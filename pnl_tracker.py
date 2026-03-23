@@ -26,6 +26,7 @@ class PnLTracker:
         """)
 
         self.conn.commit()
+ 
 
     def record_trade(
         self,
@@ -71,3 +72,4 @@ class PnLTracker:
         )
 
         self.conn.commit()
+        return realized
