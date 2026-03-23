@@ -40,11 +40,14 @@ class PnLTracker:
     ):
 
         realized = 0
+        unrealized = 0
 
-        if side == "sell":
-            realized = (price - avg_entry_price) * volume - fee
+        if avg_entry_price is not None and btc_balance > 0:
 
-        unrealized = (current_price - avg_entry_price) * btc_balance
+            if side == "sell":
+                realized = (price - avg_entry_price) * volume - fee
+
+            unrealized = (current_price - avg_entry_price) * btc_balance
 
         self.conn.execute(
             """
