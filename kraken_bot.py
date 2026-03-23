@@ -243,25 +243,68 @@ class KrakenTrader:
 
         signal = self.compute_signal(sentiment)
 
+        portfolio = self.get_portfolio(price)
+
         override_signal = self.enforce_profit_logic(price)
 
-        if override_signal is not None:
+        # --- Forced exit immediately if profit target or stop loss ---
+        if override_signal == 0 and portfolio["btc"] > 0:
 
+            self.log_event("FORCED_EXIT", reason="profit_or_stop")
+
+            side = "sell"
+            volume = portfolio["btc"]
+
+            resp = self.kraken_request(
+                "AddOrder",
+                {
+                    "pair": self.config["pair"],
+                    "type": side,
+                    "ordertype": "market",
+                    "volume": volume
+                }
+            )
+
+            fee = volume * price * self.config.get("taker_fee", 0.0026)
+
+            realized_pnl = self.pnl.record_trade(
+                side,
+                price,
+                volume,
+                fee,
+                portfolio["btc"],
+                portfolio["usd"],
+                self.last_state.get("entry_price"),
+                price
+            )
+
+            self.log_event(
+                "TRADE_EXECUTED",
+                side=side,
+                price=price,
+                volume=volume,
+                fee=fee,
+                realized_pnl=realized_pnl
+            )
+
+            self.last_state["entry_price"] = None
+            self.last_state["last_trade_time"] = utc_ts()
+            self.last_state["last_signal"] = 0
+            self.save_state()
+            return
+
+        # Update signal if override exists but not full exit
+        if override_signal is not None:
             signal = override_signal
 
         if not self.should_trade(signal):
             return
 
-        portfolio = self.get_portfolio(price)
-
         total_value = portfolio["total_value"]
-
         btc_value = portfolio["btc_value"]
 
         if total_value == 0:
-
             self.log_event("ERROR", message="Total portfolio value is zero")
-
             return
 
         current_allocation = btc_value / total_value
@@ -277,28 +320,35 @@ class KrakenTrader:
         if adjusted_target - band <= current_allocation <= adjusted_target + band:
 
             self.log_event("NO_TRADE", reason="rebalance_band")
-
             return
 
         trade_value = abs((adjusted_target * total_value) - btc_value)
 
         max_trade_pct = self.config.get("max_trade_pct", 0.10)
-
         max_trade_value = total_value * max_trade_pct
-
         trade_value = min(trade_value, max_trade_value)
 
         if trade_value < self.config.get("min_trade_size_usd", 40):
-
             self.log_event(
                 "NO_TRADE",
                 reason="min_size",
                 trade_value=trade_value
             )
-
             return
 
         side = "buy" if (adjusted_target * total_value) > btc_value else "sell"
+
+        # --- Prevent chasing high prices ---
+        entry_price = self.last_state.get("entry_price")
+        if side == "buy" and entry_price:
+            if price > entry_price * 1.004:
+                self.log_event(
+                    "BUY_SKIPPED",
+                    reason="above_entry_price",
+                    entry_price=entry_price,
+                    price=price
+                )
+                return
 
         volume = round(trade_value / price, 6)
 
@@ -344,18 +394,21 @@ class KrakenTrader:
             realized_pnl=realized_pnl
         )
 
+        # --- Weighted average entry tracking ---
         if side == "buy":
-
-            self.last_state["entry_price"] = price
-
+            prev_entry = self.last_state.get("entry_price")
+            if prev_entry is None:
+                self.last_state["entry_price"] = price
+            else:
+                total_btc = portfolio["btc"] + volume
+                self.last_state["entry_price"] = (
+                    (prev_entry * portfolio["btc"]) + (price * volume)
+                ) / total_btc
         else:
-
             self.last_state["entry_price"] = None
 
         self.last_state["last_trade_time"] = utc_ts()
-
         self.last_state["last_signal"] = signal
-
         self.save_state()
 
 
