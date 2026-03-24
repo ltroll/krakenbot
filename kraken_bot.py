@@ -224,6 +224,11 @@ class KrakenTrader:
 
         pnl_pct = (price - entry_price) / entry_price
 
+        min_move_required = self.config.get("min_stop_move_pct", 0.006)
+
+        if abs(pnl_pct) < min_move_required:
+            return None
+
         if pnl_pct >= self.config.get("profit_target_pct", 0.007):
 
             self.log_event("EXIT_SIGNAL", reason="profit_target")
