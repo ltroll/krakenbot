@@ -6,14 +6,12 @@ import requests
 from datetime import datetime, timezone, timedelta
 import krakenex
 from dotenv import load_dotenv
-import time
 from pnl_tracker import PnLTracker
 from llm_trade_summary import send_trade_summary
 
 load_dotenv()
 
 CONFIG_FILE = "bot_config.json"
-SENTIMENT_FILE = "llm_signal.json"
 STATE_FILE = "last_state.json"
 
 
@@ -47,6 +45,7 @@ class KrakenTrader:
 
         self.last_state = self.load_state()
 
+
     def log_event(self, event, message="", **kwargs):
 
         log_entry = {
@@ -59,10 +58,12 @@ class KrakenTrader:
         logging.info(json.dumps(log_entry))
         print(event, message)
 
+
     def save_state(self):
 
         with open(STATE_FILE, "w") as f:
             json.dump(self.last_state, f)
+
 
     def validate_env(self):
 
@@ -79,10 +80,12 @@ class KrakenTrader:
         if missing:
             raise Exception(f"Missing environment variables: {missing}")
 
+
     def load_json(self, path):
 
         with open(path) as f:
             return json.load(f)
+
 
     def load_state(self):
 
@@ -98,6 +101,7 @@ class KrakenTrader:
                 "entry_price": None
             }
 
+
     def kraken_request(self, endpoint, data=None):
 
         if data is None:
@@ -106,6 +110,7 @@ class KrakenTrader:
         response = self.api.query_private(endpoint, data)
 
         if response.get("error"):
+
             self.log_event(
                 "KRAKEN_ERROR",
                 endpoint=endpoint,
@@ -114,6 +119,7 @@ class KrakenTrader:
 
         return response
 
+
     def get_btc_price(self):
 
         r = requests.get(self.ticker_url).json()
@@ -121,6 +127,7 @@ class KrakenTrader:
         pair = list(r["result"].keys())[0]
 
         return float(r["result"][pair]["c"][0])
+
 
     def get_portfolio(self, price):
 
@@ -138,6 +145,7 @@ class KrakenTrader:
             "btc_value": btc_value,
             "total_value": total_value
         }
+
 
     def load_sentiment(self):
 
@@ -166,6 +174,7 @@ class KrakenTrader:
 
         return sentiment
 
+
     def compute_target_allocation(self, sentiment):
 
         execution_signal = sentiment["execution_signal"]
@@ -179,6 +188,7 @@ class KrakenTrader:
         allocation = max(min(allocation, 1), 0)
 
         return allocation
+
 
     def should_trade(self, signal):
 
@@ -215,6 +225,7 @@ class KrakenTrader:
 
         return True
 
+
     def enforce_profit_logic(self, price):
 
         entry_price = self.last_state.get("entry_price")
@@ -243,6 +254,7 @@ class KrakenTrader:
 
         return None
 
+
     def run(self):
 
         price = self.get_btc_price()
@@ -268,7 +280,7 @@ class KrakenTrader:
 
             volume = portfolio["btc"]
 
-            resp = self.kraken_request(
+            self.kraken_request(
                 "AddOrder",
                 {
                     "pair": self.config["pair"],
@@ -286,11 +298,14 @@ class KrakenTrader:
 
             return
 
+
         if override_signal is not None:
             signal = override_signal
 
+
         if not self.should_trade(signal):
             return
+
 
         total_value = portfolio["total_value"]
         btc_value = portfolio["btc_value"]
@@ -301,6 +316,7 @@ class KrakenTrader:
 
             return
 
+
         current_allocation = btc_value / total_value
 
         adjustment = self.config.get("adjustment_factor", 0.35)
@@ -308,6 +324,7 @@ class KrakenTrader:
         adjusted_target = current_allocation + (
             (signal - current_allocation) * adjustment
         )
+
 
         band = self.config.get("rebalance_band", 0.07)
 
@@ -317,6 +334,7 @@ class KrakenTrader:
 
             return
 
+
         trade_value = abs((adjusted_target * total_value) - btc_value)
 
         trade_value = min(
@@ -324,15 +342,66 @@ class KrakenTrader:
             total_value * self.config.get("max_trade_pct", 0.10)
         )
 
-        if trade_value < self.config.get("min_trade_size_usd", 40):
 
-            self.log_event("NO_TRADE", reason="min_trade_size")
+        min_trade = self.config.get("min_trade_size_usd", 40)
 
-            return
+        allocation_drift = abs(current_allocation - adjusted_target)
+
+        drift_override = self.config.get("min_rebalance_drift_pct", 0.06)
+
+
+        # Position rebuild safeguard
+        if btc_value < self.config.get("min_position_rebuild_usd", 0):
+
+            self.log_event(
+                "POSITION_REBUILD_TRIGGER",
+                btc_value=btc_value
+            )
+
+            trade_value = min_trade
+
+
+        # Drift override safeguard
+        elif trade_value < min_trade:
+
+            if allocation_drift >= drift_override:
+
+                self.log_event(
+                    "MIN_DRIFT_OVERRIDE",
+                    allocation_drift=allocation_drift,
+                    forced_trade_size=min_trade
+                )
+
+                trade_value = min_trade
+
+            else:
+
+                self.log_event(
+                    "NO_TRADE",
+                    reason="min_trade_size",
+                    trade_value=trade_value,
+                    allocation_drift=allocation_drift
+                )
+
+                return
+
 
         side = "buy" if signal > current_allocation else "sell"
 
+
+        # Prevent dust-selling loops
+        if side == "sell" and btc_value < min_trade:
+
+            self.log_event(
+                "SELL_SKIPPED_DUST_POSITION",
+                btc_value=btc_value
+            )
+
+            return
+
+
         volume = round(trade_value / price, 6)
+
 
         self.log_event(
             "TRADE_DECISION",
@@ -340,6 +409,7 @@ class KrakenTrader:
             volume=volume,
             price=price
         )
+
 
         resp = self.kraken_request(
             "AddOrder",
@@ -351,8 +421,10 @@ class KrakenTrader:
             }
         )
 
+
         if resp.get("error"):
             return
+
 
         if side == "buy":
 
@@ -375,6 +447,7 @@ class KrakenTrader:
 
             self.last_state["entry_price"] = None
 
+
         self.last_state["last_trade_time"] = utc_ts()
         self.last_state["last_signal"] = signal
 
@@ -385,6 +458,9 @@ if __name__ == "__main__":
 
     trader = KrakenTrader()
 
-    trader.log_event("BOT_START", message="Kraken Sentiment Trader Starting")
+    trader.log_event(
+        "BOT_START",
+        message="Kraken Sentiment Trader Starting"
+    )
 
     trader.run()
