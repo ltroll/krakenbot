@@ -11,9 +11,8 @@ from llm_trade_summary import send_trade_summary
 
 load_dotenv()
 
-CONFIG_FILE = "bot_config.json"
-STATE_FILE = "last_state.json"
-
+CONFIG_FILE = os.getenv("BOT_CONFIG_FILE", "bot_config.json")
+STATE_FILE = os.getenv("BOT_STATE_FILE", "last_state.json")
 
 logging.basicConfig(
     filename="trade_log.jsonl",
