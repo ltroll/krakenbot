@@ -1,0 +1,16 @@
+{
+  "range_window_hours": 24,
+
+  "buy_zone_percentile": 0.20,
+  "max_grid_size": 3,
+
+  "profit_target_pct": 0.012,
+  "round_trip_fee_pct": 0.0032,
+
+  "position_size_pct": 0.15,
+
+  "execution_signal_threshold": 0.05,
+
+  "price_check_interval_seconds": 60,
+  "range_refresh_interval_minutes": 15
+}
