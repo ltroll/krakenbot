@@ -195,7 +195,7 @@ def main():
 
             if sentiment < config["execution_signal_threshold"]:
                 print("Sentiment too low:", sentiment)
-                time.sleep(config["price_check_interval_seconds"])
+                #time.sleep(config["price_check_interval_seconds"])
                 #continue
                 print("Running anyways, need to disable later")
 
