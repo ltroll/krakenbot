@@ -5,6 +5,7 @@ import json
 import time
 import requests
 import krakenex
+
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from pnl_tracker import PnLTracker
@@ -39,6 +40,7 @@ def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
             return json.load(f)
+
     return {
         "grid_fills": [],
         "last_range_refresh": None
@@ -55,7 +57,11 @@ def fetch_sentiment():
     r = requests.get(LLM_SIGNAL_URL)
     data = r.json()
 
-    return data["execution_signal"]
+    sentiment = data["execution_signal"]
+
+    print("Execution signal:", sentiment)
+
+    return sentiment
 
 
 def fetch_price_log():
@@ -68,7 +74,7 @@ def fetch_price_log():
     for line in lines:
         try:
             data.append(json.loads(line))
-        except:
+        except Exception:
             continue
 
     return data
@@ -93,12 +99,21 @@ def compute_24h_range(price_log):
 def get_current_price():
 
     r = api.query_public("Ticker", {"pair": "XXBTZUSD"})
+
+    if "result" not in r:
+        print("Ticker fetch error:", r)
+        return None
+
     return float(r["result"]["XXBTZUSD"]["c"][0])
 
 
 def get_balances():
 
     r = api.query_private("Balance")
+
+    if "result" not in r:
+        print("Balance fetch error:", r)
+        return 0, 0
 
     usd = float(r["result"].get("ZUSD", 0))
     btc = float(r["result"].get("XXBT", 0))
@@ -134,9 +149,10 @@ def place_limit_sell(price, volume):
 
 def compute_grid_levels(low, high, percentile, grid_size):
 
-    range_size = high - low
-    zone_top = low + (range_size * percentile)
+    if low is None or high is None:
+        return []
 
+    range_size = high - low
     step = percentile / grid_size
 
     levels = []
@@ -157,7 +173,6 @@ def main():
     config = load_config()
     state = load_state()
 
-    last_range_refresh = None
     low = None
     high = None
 
@@ -172,8 +187,11 @@ def main():
                 time.sleep(config["price_check_interval_seconds"])
                 continue
 
-            now = datetime.utcnow()
 
+            now = datetime.now(timezone.utc)
+
+
+            # Refresh range if needed
             if (
                 not state["last_range_refresh"]
                 or datetime.fromisoformat(state["last_range_refresh"])
@@ -184,8 +202,8 @@ def main():
 
                 low, high = compute_24h_range(price_log)
 
-                if not low:
-                    print("No price range available")
+                if low is None or high is None:
+                    print("No valid 24h range available yet")
                     time.sleep(60)
                     continue
 
@@ -194,7 +212,13 @@ def main():
 
                 print("Range refreshed:", low, high)
 
+
             current_price = get_current_price()
+
+            if current_price is None:
+                time.sleep(60)
+                continue
+
 
             grid_levels = compute_grid_levels(
                 low,
@@ -203,9 +227,16 @@ def main():
                 config["max_grid_size"]
             )
 
+            if not grid_levels:
+                print("Grid levels unavailable yet")
+                time.sleep(60)
+                continue
+
+
             usd_balance, btc_balance = get_balances()
 
             filled_levels = state["grid_fills"]
+
 
             for level in grid_levels:
 
@@ -221,12 +252,21 @@ def main():
 
                     volume = position_size / current_price
 
-                    print("Buying at", current_price)
+
+                    if volume < 0.00005:
+                        print("Volume below Kraken minimum:", volume)
+                        continue
+
+
+                    print("Placing BUY order @", current_price)
 
                     order = place_limit_buy(current_price, volume)
 
-                    if "result" not in order:
+
+                    if "error" in order and order["error"]:
+                        print("Kraken BUY error:", order["error"])
                         continue
+
 
                     sell_price = current_price * (
                         1
@@ -234,9 +274,20 @@ def main():
                         + config["round_trip_fee_pct"]
                     )
 
-                    place_limit_sell(sell_price, volume)
+
+                    sell_order = place_limit_sell(sell_price, volume)
+
+
+                    if "error" in sell_order and sell_order["error"]:
+                        print("Kraken SELL error:", sell_order["error"])
+                        continue
+
+
+                    print("Placed SELL order @", sell_price)
+
 
                     filled_levels.append(level)
+
 
                     tracker.record_trade(
                         "buy",
@@ -249,13 +300,16 @@ def main():
                         current_price
                     )
 
+
                     save_state(state)
+
 
             time.sleep(config["price_check_interval_seconds"])
 
+
         except Exception as e:
 
-            print("Error:", e)
+            print("Runtime error:", e)
             time.sleep(60)
 
 
