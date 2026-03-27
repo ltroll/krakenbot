@@ -204,12 +204,26 @@ def main():
 
 
             # Refresh range if needed
-            if (
-                not state["last_range_refresh"]
-                or datetime.fromisoformat(state["last_range_refresh"])
-                < now - timedelta(minutes=config["range_refresh_interval_minutes"])
-            ):
 
+            refresh_needed = False
+
+            if not state["last_range_refresh"]:
+                refresh_needed = True
+            else:
+                last_refresh = datetime.fromisoformat(state["last_range_refresh"])
+            
+                # normalize timezone if missing
+                if last_refresh.tzinfo is None:
+                    last_refresh = last_refresh.replace(tzinfo=timezone.utc)
+            
+                if last_refresh < now - timedelta(
+                    minutes=config["range_refresh_interval_minutes"]
+                ):
+                    refresh_needed = True
+            
+            
+            if refresh_needed:
+            
                 price_log = fetch_price_log()
 
                 low, high = compute_24h_range(price_log)
