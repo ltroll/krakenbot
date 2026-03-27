@@ -84,11 +84,22 @@ def compute_24h_range(price_log):
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
 
-    prices = [
-        entry["btc_price_usd"]
-        for entry in price_log
-        if datetime.fromisoformat(entry["timestamp"]) >= cutoff
-    ]
+    prices = []
+
+    for entry in price_log:
+
+        try:
+            ts = datetime.fromisoformat(entry["timestamp"])
+
+            # normalize timezone
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+
+            if ts >= cutoff:
+                prices.append(entry["btc_price_usd"])
+
+        except Exception:
+            continue
 
     if not prices:
         return None, None
@@ -185,7 +196,8 @@ def main():
             if sentiment < config["execution_signal_threshold"]:
                 print("Sentiment too low:", sentiment)
                 time.sleep(config["price_check_interval_seconds"])
-                continue
+                #continue
+                print("Running anyways, need to disable later")
 
 
             now = datetime.now(timezone.utc)
