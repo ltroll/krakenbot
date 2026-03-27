@@ -206,13 +206,12 @@ def main():
             # Refresh range if needed
 
             refresh_needed = False
-
+            
             if not state["last_range_refresh"]:
                 refresh_needed = True
             else:
                 last_refresh = datetime.fromisoformat(state["last_range_refresh"])
             
-                # normalize timezone if missing
                 if last_refresh.tzinfo is None:
                     last_refresh = last_refresh.replace(tzinfo=timezone.utc)
             
@@ -225,20 +224,27 @@ def main():
             if refresh_needed:
             
                 price_log = fetch_price_log()
-
+            
                 low, high = compute_24h_range(price_log)
-
+            
                 if low is None or high is None:
                     print("No valid 24h range available yet")
                     time.sleep(60)
                     continue
-
-                state["last_range_refresh"] = now.isoformat()
+            
+                state["last_range_refresh"] = now.astimezone(timezone.utc).isoformat()
+                state["range_low"] = low
+                state["range_high"] = high
+            
                 save_state(state)
-
+            
                 print("Range refreshed:", low, high)
-
-
+            
+            else:
+            
+                low = state.get("range_low")
+                high = state.get("range_high")
+             
             current_price = get_current_price()
 
             if current_price is None:
