@@ -19,8 +19,9 @@ STATE_FILE = os.getenv("BOT_STATE_FILE", "last_state.json")
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
 PRICE_LOG_URL = "http://screenpi.local/bot/btc_price_log.jsonl"
 
+api = krakenex.API()
 
-api = krakenex.API(uri=os.getenv("KRAKEN_API_URL"))
+api.url = krakenex.API(uri=os.getenv("KRAKEN_API_URL"))
 
 api.key = os.getenv("KRAKEN_API_KEY")
 api.secret = os.getenv("KRAKEN_API_SECRET")
