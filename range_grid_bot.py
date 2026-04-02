@@ -138,24 +138,30 @@ def get_balances():
 
 def place_limit_buy(price, volume):
 
-    return api.query_private("AddOrder", {
+    order = api.query_private("AddOrder", {
         "pair": "XXBTZUSD",
         "type": "buy",
         "ordertype": "limit",
         "price": price,
         "volume": volume
     })
+    
+    print("BUY response:", order)
+    return order
 
 
 def place_limit_sell(price, volume):
 
-    return api.query_private("AddOrder", {
+    order = api.query_private("AddOrder", {
         "pair": "XXBTZUSD",
         "type": "sell",
         "ordertype": "limit",
         "price": price,
         "volume": volume
     })
+
+    print("SELL response:", order)
+    return order
 
 
 # ------------------------
