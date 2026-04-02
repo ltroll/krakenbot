@@ -245,7 +245,7 @@ def main():
 
                 print("Sentiment too low")
 
-                time.sleep(config["price_check_interval_seconds"])
+                #time.sleep(config["price_check_interval_seconds"])
 
                 # continue
                 print("Still running for now")
