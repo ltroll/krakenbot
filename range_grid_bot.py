@@ -247,8 +247,8 @@ def main():
 
                 time.sleep(config["price_check_interval_seconds"])
 
-                continue
-
+                # continue
+                print("Still running for now")
 
             now = datetime.now(timezone.utc)
 
