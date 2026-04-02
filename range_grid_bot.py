@@ -41,19 +41,36 @@ tracker = PnLTracker()
 
 def load_state():
 
-    if os.path.exists(STATE_FILE):
-
-        with open(STATE_FILE) as f:
-            return json.load(f)
-
-    return {
+    default_state = {
 
         "grid_fills": [],
         "open_buy_orders": {},
         "last_range_refresh": None,
         "range_low": None,
         "range_high": None
+
     }
+
+    if not os.path.exists(STATE_FILE):
+
+        return default_state
+
+
+    with open(STATE_FILE) as f:
+
+        state = json.load(f)
+
+
+    # auto-upgrade missing keys
+
+    for key in default_state:
+
+        if key not in state:
+
+            state[key] = default_state[key]
+
+
+    return state
 
 
 def save_state(state):
