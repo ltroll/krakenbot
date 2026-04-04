@@ -86,7 +86,12 @@ def load_state():
     save_state(state)
 
     return state
-    
+
+def save_state(state):
+
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
 ###########################################################
 # SENTIMENT
 ###########################################################
