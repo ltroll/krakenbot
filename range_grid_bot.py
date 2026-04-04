@@ -58,21 +58,35 @@ def load_state():
         state = json.load(f)
 
 
-    # auto-upgrade missing keys
+    # ensure keys exist
     for key in default_state:
         if key not in state:
             state[key] = default_state[key]
 
 
+    # 🔧 AUTO-UPGRADE old open_buy_orders format
+    upgraded_orders = {}
+
+    for level, value in state["open_buy_orders"].items():
+
+        # old format: "level": "txid"
+        if isinstance(value, str):
+
+            upgraded_orders[level] = {
+                "txid": value,
+                "volume": 0.0   # placeholder until next fill
+            }
+
+        else:
+            upgraded_orders[level] = value
+
+
+    state["open_buy_orders"] = upgraded_orders
+
+    save_state(state)
+
     return state
-
-
-def save_state(state):
-
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
-
-
+    
 ###########################################################
 # SENTIMENT
 ###########################################################
