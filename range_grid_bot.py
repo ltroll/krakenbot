@@ -120,6 +120,19 @@ def compute_24h_range(price_log):
 
     for entry in price_log:
 
+        # skip anything malformed immediately
+        if not isinstance(entry, dict):
+            print("Skipping non-dict price entry")
+            continue
+
+        if "timestamp" not in entry:
+            print("Skipping entry missing timestamp")
+            continue
+
+        if "btc_price_usd" not in entry:
+            print("Skipping entry missing price")
+            continue
+
         try:
 
             ts = datetime.fromisoformat(entry["timestamp"])
@@ -128,16 +141,16 @@ def compute_24h_range(price_log):
                 ts = ts.replace(tzinfo=timezone.utc)
 
             if ts >= cutoff:
-                prices.append(entry["btc_price_usd"])
+                prices.append(float(entry["btc_price_usd"]))
 
         except Exception:
+            print("Skipping malformed timestamp entry")
             continue
 
     if not prices:
         return None, None
 
     return min(prices), max(prices)
-
 
 ###########################################################
 # MARKET DATA
