@@ -25,7 +25,6 @@ KRAKEN_API_URL = os.getenv("KRAKEN_API_URL")
 
 api = krakenex.API()
 api.uri = KRAKEN_API_URL
-
 api.key = os.getenv("KRAKEN_API_KEY")
 api.secret = os.getenv("KRAKEN_API_SECRET")
 
@@ -36,7 +35,7 @@ tracker = PnLTracker()
 
 
 ###########################################################
-# STATE MANAGEMENT
+# STATE MANAGEMENT (AUTO-UPGRADE SAFE)
 ###########################################################
 
 def load_state():
@@ -52,21 +51,16 @@ def load_state():
     }
 
     if not os.path.exists(STATE_FILE):
-
         return default_state
 
 
     with open(STATE_FILE) as f:
-
         state = json.load(f)
 
 
     # auto-upgrade missing keys
-
     for key in default_state:
-
         if key not in state:
-
             state[key] = default_state[key]
 
 
@@ -86,7 +80,6 @@ def save_state(state):
 def fetch_sentiment():
 
     r = requests.get(LLM_SIGNAL_URL)
-
     data = r.json()
 
     sentiment = data["execution_signal"]
@@ -123,7 +116,6 @@ def compute_24h_range(price_log):
                 ts = ts.replace(tzinfo=timezone.utc)
 
             if ts >= cutoff:
-
                 prices.append(entry["btc_price_usd"])
 
         except Exception:
@@ -251,7 +243,6 @@ def main():
 
             sentiment = fetch_sentiment()
 
-
             if (
 
                 sentiment < config["execution_signal_threshold"]
@@ -261,11 +252,9 @@ def main():
             ):
 
                 print("Sentiment too low")
+                time.sleep(config["price_check_interval_seconds"])
+                continue
 
-                #time.sleep(config["price_check_interval_seconds"])
-
-                # continue
-                print("Still running for now")
 
             now = datetime.now(timezone.utc)
 
@@ -276,33 +265,23 @@ def main():
 
             refresh_needed = False
 
-
             if not state["last_range_refresh"]:
-
                 refresh_needed = True
 
             else:
 
                 last_refresh = datetime.fromisoformat(
-
                     state["last_range_refresh"]
-
                 )
 
                 if last_refresh.tzinfo is None:
-
                     last_refresh = last_refresh.replace(
-
                         tzinfo=timezone.utc
-
                     )
 
                 if last_refresh < now - timedelta(
-
                     minutes=config["range_refresh_interval_minutes"]
-
                 ):
-
                     refresh_needed = True
 
 
@@ -315,21 +294,17 @@ def main():
                 if not low:
 
                     print("Range unavailable")
-
                     time.sleep(60)
-
                     continue
 
 
                 state["range_low"] = low
                 state["range_high"] = high
-
                 state["last_range_refresh"] = now.isoformat()
 
                 save_state(state)
 
                 print("Range refreshed:", low, high)
-
 
             else:
 
@@ -341,11 +316,15 @@ def main():
             # CHECK OPEN BUYS FOR FILLS
             ###################################################
 
-            for level, txid in list(
-
+            for level_str, order_data in list(
                 state["open_buy_orders"].items()
-
             ):
+
+                level = float(level_str)
+
+                txid = order_data["txid"]
+
+                volume = order_data["volume"]
 
                 if order_is_filled(txid):
 
@@ -354,28 +333,19 @@ def main():
                     sell_price = level * (
 
                         1
-
                         + config["profit_target_pct"]
-
                         + config["round_trip_fee_pct"]
 
                     )
 
-
-                    volume = config["position_size_pct"]
-
                     place_limit_sell(
-
                         sell_price,
-
                         volume
-
                     )
-
 
                     state["grid_fills"].append(level)
 
-                    del state["open_buy_orders"][level]
+                    del state["open_buy_orders"][level_str]
 
                     save_state(state)
 
@@ -392,78 +362,65 @@ def main():
             grid_levels = compute_grid_levels(
 
                 low,
-
                 high,
-
                 config["buy_zone_percentile"],
-
                 config["max_grid_size"]
 
             )
 
 
             print("Current:", current_price)
-
             print("Lowest grid:", grid_levels[-1])
 
 
             for level in grid_levels:
 
                 if level in state["grid_fills"]:
-
                     continue
 
-
-                if level in state["open_buy_orders"]:
-
+                if str(level) in state["open_buy_orders"]:
                     continue
-
 
                 if current_price <= level:
 
                     position_size = (
 
                         usd_balance
-
                         * config["position_size_pct"]
 
                     )
 
-
                     volume = position_size / current_price
 
-
                     if volume < 0.00005:
-
                         continue
 
 
                     order = place_limit_buy(
-
                         current_price,
-
                         volume
-
                     )
 
 
                     if order["error"]:
-
                         continue
 
 
                     txid = order["result"]["txid"][0]
 
 
-                    state["open_buy_orders"][level] = txid
+                    state["open_buy_orders"][str(level)] = {
+
+                        "txid": txid,
+                        "volume": volume
+
+                    }
 
                     save_state(state)
 
 
             time.sleep(
-
                 config["price_check_interval_seconds"]
-
             )
 
 
