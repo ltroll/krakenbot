@@ -97,8 +97,20 @@ def fetch_price_log():
 
     r = requests.get(PRICE_LOG_URL)
 
-    return [json.loads(line) for line in r.text.splitlines()]
+    records = []
 
+    for line in r.text.splitlines():
+
+        if not line.strip():
+            continue
+
+        try:
+            records.append(json.loads(line))
+        except Exception:
+            print("Skipping malformed log line")
+            continue
+
+    return records
 
 def compute_24h_range(price_log):
 
