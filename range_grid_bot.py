@@ -252,8 +252,9 @@ def main():
             ):
 
                 print("Sentiment too low")
-                time.sleep(config["price_check_interval_seconds"])
-                continue
+                print("Running anyways for troubleshooting")
+                #time.sleep(config["price_check_interval_seconds"])
+                #continue
 
 
             now = datetime.now(timezone.utc)
