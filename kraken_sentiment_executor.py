@@ -179,13 +179,36 @@ def get_balances():
 # SIGNAL
 #########################################
 
-
 def load_signal():
 
-    with open(SIGNAL_FILE) as f:
-        signal = json.load(f)
+    signal_url = os.getenv("LLM_SIGNAL_URL")
+
+    if signal_url:
+
+        r = requests.get(signal_url, timeout=5)
+
+        if r.status_code != 200:
+
+            raise RuntimeError(
+                f"Signal fetch failed: {r.status_code}"
+            )
+
+        signal = r.json()
+
+    else:
+
+        if not SIGNAL_FILE:
+
+            raise RuntimeError(
+                "Missing SIGNAL_FILE or LLM_SIGNAL_URL in .env"
+            )
+
+        with open(SIGNAL_FILE) as f:
+
+            signal = json.load(f)
 
     return signal["execution_signal"], signal["confidence"]
+
 
 
 #########################################
