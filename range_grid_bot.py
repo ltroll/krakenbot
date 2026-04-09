@@ -215,7 +215,7 @@ def place_limit_buy(price, volume):
 
 def place_limit_sell(price, volume):
 
-    price = round(price, 2)
+    price = round(price, 1)
     volume = round(volume, 6)
 
     order = api.query_private("AddOrder", {
