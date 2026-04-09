@@ -12,7 +12,7 @@ from statistics import pstdev
 from urllib.parse import urlencode
 
 ########################################
-# ENV
+# ENVIRONMENT
 ########################################
 
 load_dotenv()
@@ -20,15 +20,16 @@ load_dotenv()
 API_KEY = os.getenv("KRAKEN_API_KEY")
 API_SECRET = os.getenv("KRAKEN_API_SECRET")
 
-SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
+KRAKEN_API_URL = os.getenv("KRAKEN_API_URL")
 TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
 
+PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
+
+SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
 STATE_FILE = os.getenv("BOT_STATE_FILE")
 CONFIG_FILE = os.getenv("BOT_CONFIG_FILE")
 
 TRADE_LOG = "trade_log.jsonl"
-
-PAIR = "XXBTZUSD"
 
 PRICE_LOG_PATH = SIGNAL_URL.replace(
     "llm_signal.json",
@@ -56,7 +57,7 @@ def log_event(event, **kwargs):
 
 
 ########################################
-# LOAD CONFIG
+# CONFIG LOADING
 ########################################
 
 def load_config():
@@ -64,12 +65,17 @@ def load_config():
     if not CONFIG_FILE:
         raise RuntimeError("BOT_CONFIG_FILE missing")
 
+    if not os.path.exists(CONFIG_FILE):
+        raise RuntimeError(
+            f"Config file not found: {CONFIG_FILE}"
+        )
+
     with open(CONFIG_FILE) as f:
         return json.load(f)
 
 
 ########################################
-# STATE MGMT
+# STATE MANAGEMENT
 ########################################
 
 def load_state():
@@ -88,7 +94,7 @@ def save_state(state):
 
 
 ########################################
-# SIGNAL
+# SIGNAL INGESTION
 ########################################
 
 def load_signal():
@@ -100,7 +106,7 @@ def load_signal():
 
 
 ########################################
-# VOLATILITY
+# VOLATILITY CALCULATION
 ########################################
 
 def compute_volatility():
@@ -166,7 +172,12 @@ def kraken_signature(urlpath, data):
 
 def kraken_private(endpoint, data):
 
-    url = "https://api.kraken.com" + endpoint
+    if not KRAKEN_API_URL:
+        raise RuntimeError(
+            "KRAKEN_API_URL missing from .env"
+        )
+
+    url = KRAKEN_API_URL.rstrip("/") + endpoint
 
     data["nonce"] = str(
         int(time.time() * 1000)
@@ -183,15 +194,24 @@ def kraken_private(endpoint, data):
 
     }
 
-    return requests.post(
+    response = requests.post(
         url,
         headers=headers,
         data=data
-    ).json()
+    )
+
+    result = response.json()
+
+    if result.get("error"):
+        raise RuntimeError(
+            f"Kraken API error: {result['error']}"
+        )
+
+    return result
 
 
 ########################################
-# BALANCES
+# ACCOUNT BALANCES
 ########################################
 
 def get_balances():
@@ -200,6 +220,12 @@ def get_balances():
         "/0/private/Balance",
         {}
     )
+
+    if "result" not in result:
+
+        raise RuntimeError(
+            f"Unexpected Kraken response: {result}"
+        )
 
     btc = float(
         result["result"].get("XXBT", 0)
@@ -213,22 +239,32 @@ def get_balances():
 
 
 ########################################
-# PRICE
+# CURRENT PRICE
 ########################################
 
 def get_price():
 
-    r = requests.get(TICKER_URL).json()
+    if not TICKER_URL:
+        raise RuntimeError(
+            "KRAKEN_TICKER_URL missing from .env"
+        )
+
+    r = requests.get(TICKER_URL)
+
+    data = r.json()
+
+    if data.get("error"):
+        raise RuntimeError(
+            f"Ticker error: {data['error']}"
+        )
 
     return float(
-        list(
-            r["result"].values()
-        )[0]["c"][0]
+        list(data["result"].values())[0]["c"][0]
     )
 
 
 ########################################
-# TARGET ALLOCATION
+# TARGET ALLOCATION ENGINE
 ########################################
 
 def compute_target(signal, config, volatility):
@@ -255,9 +291,12 @@ def compute_target(signal, config, volatility):
         )
 
     if (
+
         config["volatility_dampening"]
+
         and volatility >
         config["volatility_cutoff"]
+
     ):
 
         target = (
@@ -266,11 +305,14 @@ def compute_target(signal, config, volatility):
         )
 
     target = max(
+
         config["min_total_allocation"],
+
         min(
             config["max_total_allocation"],
             target
         )
+
     )
 
     return target
@@ -285,9 +327,13 @@ def place_order(side, volume, dry_run):
     if dry_run:
 
         return {
+
             "status": "DRY_RUN",
+
             "side": side,
+
             "volume": volume
+
         }
 
     return kraken_private(
@@ -310,7 +356,7 @@ def place_order(side, volume, dry_run):
 
 
 ########################################
-# MAIN LOOP
+# MAIN EXECUTION ENGINE
 ########################################
 
 def execute():
@@ -339,8 +385,11 @@ def execute():
     )
 
     if (
+
         signal["confidence"]
+
         < config["confidence_threshold"]
+
     ):
 
         log_event(
@@ -357,9 +406,19 @@ def execute():
 
     portfolio_value = btc * price + usd
 
+    if portfolio_value == 0:
+
+        log_event(
+            "ERROR",
+            message="Portfolio value is zero"
+        )
+
+        return
+
     current_allocation = (
 
         btc * price
+
     ) / portfolio_value
 
     target = compute_target(
@@ -391,6 +450,11 @@ def execute():
         "min_trade_usd"
     ]:
 
+        log_event(
+            "SKIP_SMALL_TRADE",
+            trade_value=trade_value
+        )
+
         return
 
     side = "buy" if trade_value > 0 else "sell"
@@ -405,7 +469,11 @@ def execute():
 
         volume=volume,
 
-        price=price
+        price=price,
+
+        allocation_current=current_allocation,
+
+        allocation_target=target
 
     )
 
