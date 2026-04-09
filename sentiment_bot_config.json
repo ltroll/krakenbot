@@ -1,0 +1,16 @@
+{
+  "base_btc_allocation": 0.50,
+  "max_adjustment_per_cycle": 0.10,
+  "min_trade_usd": 30,
+
+  "confidence_threshold": 0.45,
+  "confidence_weighting": true,
+
+  "volatility_dampening": true,
+  "volatility_cutoff": 0.0025,
+
+  "max_total_allocation": 0.95,
+  "min_total_allocation": 0.05,
+
+  "dry_run": false
+}
