@@ -1,522 +1,312 @@
+# Kraken Sentiment Executor V3
+# Production-ready allocation controller with:
+# - confidence weighting
+# - signal smoothing memory
+# - minimum allocation delta threshold
+# - .env-driven endpoints
+# - sandbox compatibility
+# - configurable behavior via JSON config
+
 import os
-import json
 import time
-import hmac
+import json
 import base64
 import hashlib
+import hmac
 import requests
-
-from dotenv import load_dotenv
 from datetime import datetime, timezone
-from statistics import pstdev
-from urllib.parse import urlencode
+from dotenv import load_dotenv
 
-########################################
-# ENVIRONMENT
-########################################
+
+#########################################
+# LOAD ENVIRONMENT
+#########################################
 
 load_dotenv()
 
 API_KEY = os.getenv("KRAKEN_API_KEY")
 API_SECRET = os.getenv("KRAKEN_API_SECRET")
-
-KRAKEN_API_URL = os.getenv("KRAKEN_API_URL")
+API_URL = os.getenv("KRAKEN_API_URL")
 TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
-
 PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
 
-SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
-STATE_FILE = os.getenv("BOT_STATE_FILE")
+SIGNAL_FILE = os.getenv("SIGNAL_FILE")
 CONFIG_FILE = os.getenv("BOT_CONFIG_FILE")
-
-TRADE_LOG = "trade_log.jsonl"
-
-PRICE_LOG_PATH = SIGNAL_URL.replace(
-    "llm_signal.json",
-    "btc_price_log.jsonl"
-)
-
-########################################
-# UTILITIES
-########################################
-
-def now():
-    return datetime.now(timezone.utc).isoformat()
+TRADE_LOG = os.getenv("TRADE_LOG_FILE", "sentiment_trade_log.txt")
 
 
-def log_event(event, **kwargs):
+#########################################
+# LOAD CONFIG
+#########################################
 
-    record = {
-        "ts": now(),
-        "event": event,
-        **kwargs
-    }
+with open(CONFIG_FILE) as f:
+    CONFIG = json.load(f)
+
+BASE_ALLOCATION = CONFIG["base_btc_allocation"]
+MAX_STEP = CONFIG["max_adjustment_per_cycle"]
+MIN_TRADE_USD = CONFIG["min_trade_usd"]
+CONF_THRESHOLD = CONFIG["confidence_threshold"]
+DRY_RUN = CONFIG.get("dry_run", False)
+
+MIN_ALLOC = CONFIG.get("min_total_allocation", 0.05)
+MAX_ALLOC = CONFIG.get("max_total_allocation", 0.95)
+
+MIN_ALLOC_DELTA = CONFIG.get("min_allocation_change", 0.02)
+
+
+#########################################
+# LOGGING
+#########################################
+
+
+def log(event, message=""):
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    line = f"{timestamp} | {event:<18} | {message}"
+
+    print(line)
 
     with open(TRADE_LOG, "a") as f:
-        f.write(json.dumps(record) + "\n")
+        f.write(line + "\n")
 
 
-########################################
-# CONFIG LOADING
-########################################
+#########################################
+# SIGNAL MEMORY (SMOOTHING)
+#########################################
 
-def load_config():
+SIGNAL_HISTORY_FILE = "signal_memory.json"
 
-    if not CONFIG_FILE:
-        raise RuntimeError("BOT_CONFIG_FILE missing")
 
-    if not os.path.exists(CONFIG_FILE):
-        raise RuntimeError(
-            f"Config file not found: {CONFIG_FILE}"
-        )
+def load_signal_memory():
 
-    with open(CONFIG_FILE) as f:
+    if not os.path.exists(SIGNAL_HISTORY_FILE):
+        return [0, 0]
+
+    with open(SIGNAL_HISTORY_FILE) as f:
         return json.load(f)
 
 
-########################################
-# STATE MANAGEMENT
-########################################
 
-def load_state():
+def save_signal_memory(memory):
 
-    if not os.path.exists(STATE_FILE):
-        return {}
-
-    with open(STATE_FILE) as f:
-        return json.load(f)
+    with open(SIGNAL_HISTORY_FILE, "w") as f:
+        json.dump(memory, f)
 
 
-def save_state(state):
-
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
-
-
-########################################
-# SIGNAL INGESTION
-########################################
-
-def load_signal():
-
-    r = requests.get(SIGNAL_URL)
-    r.raise_for_status()
-
-    return r.json()
+#########################################
+# SIGNATURE
+#########################################
 
 
-########################################
-# VOLATILITY CALCULATION
-########################################
+def kraken_signature(endpoint, data):
 
-def compute_volatility():
+    postdata = "&".join([f"{k}={v}" for k, v in data.items()])
 
-    if not os.path.exists(PRICE_LOG_PATH):
-        return 0
+    encoded = (str(data["nonce"]) + postdata).encode()
 
-    prices = []
+    message = endpoint.encode() + hashlib.sha256(encoded).digest()
 
-    with open(PRICE_LOG_PATH) as f:
-
-        for line in f:
-            prices.append(
-                json.loads(line)["btc_price_usd"]
-            )
-
-    if len(prices) < 10:
-        return 0
-
-    returns = [
-
-        (prices[i] - prices[i - 1]) /
-        prices[i - 1]
-
-        for i in range(1, len(prices))
-
-    ]
-
-    return pstdev(returns)
-
-
-########################################
-# KRAKEN AUTH
-########################################
-
-def kraken_signature(urlpath, data):
-
-    postdata = urlencode(data)
-
-    encoded = (
-        str(data["nonce"]) + postdata
-    ).encode()
-
-    message = (
-        urlpath.encode() +
-        hashlib.sha256(encoded).digest()
-    )
-
-    signature = hmac.new(
-
+    mac = hmac.new(
         base64.b64decode(API_SECRET),
-
         message,
-
         hashlib.sha512
-
     )
 
-    return base64.b64encode(
-        signature.digest()
-    ).decode()
+    return base64.b64encode(mac.digest()).decode()
+
+
+#########################################
+# PRIVATE API
+#########################################
 
 
 def kraken_private(endpoint, data):
 
-    if not KRAKEN_API_URL:
-        raise RuntimeError(
-            "KRAKEN_API_URL missing from .env"
-        )
+    url = API_URL.rstrip("/") + endpoint
 
-    url = KRAKEN_API_URL.rstrip("/") + endpoint
-
-    data["nonce"] = str(
-        int(time.time() * 1000)
-    )
+    data["nonce"] = str(int(time.time() * 1000))
 
     headers = {
-
         "API-Key": API_KEY,
-
-        "API-Sign": kraken_signature(
-            endpoint,
-            data
-        )
-
+        "API-Sign": kraken_signature(endpoint, data)
     }
 
-    response = requests.post(
-        url,
-        headers=headers,
-        data=data
-    )
+    r = requests.post(url, headers=headers, data=data)
 
-    result = response.json()
+    result = r.json()
 
     if result.get("error"):
-        raise RuntimeError(
-            f"Kraken API error: {result['error']}"
-        )
+        raise RuntimeError(result["error"])
 
     return result
 
 
-########################################
-# ACCOUNT BALANCES
-########################################
+#########################################
+# PUBLIC PRICE
+#########################################
 
-def get_balances():
-
-    result = kraken_private(
-        "/0/private/Balance",
-        {}
-    )
-
-    if "result" not in result:
-
-        raise RuntimeError(
-            f"Unexpected Kraken response: {result}"
-        )
-
-    btc = float(
-        result["result"].get("XXBT", 0)
-    )
-
-    usd = float(
-        result["result"].get("ZUSD", 0)
-    )
-
-    return btc, usd
-
-
-########################################
-# CURRENT PRICE
-########################################
 
 def get_price():
-
-    if not TICKER_URL:
-        raise RuntimeError(
-            "KRAKEN_TICKER_URL missing from .env"
-        )
 
     r = requests.get(TICKER_URL)
 
     data = r.json()
 
     if data.get("error"):
-        raise RuntimeError(
-            f"Ticker error: {data['error']}"
-        )
+        raise RuntimeError(data["error"])
 
-    return float(
-        list(data["result"].values())[0]["c"][0]
+    return float(list(data["result"].values())[0]["c"][0])
+
+
+#########################################
+# BALANCES
+#########################################
+
+
+def get_balances():
+
+    result = kraken_private("/0/private/Balance", {})
+
+    btc = float(result["result"].get("XXBT", 0))
+
+    usd = float(result["result"].get("ZUSD", 0))
+
+    return btc, usd
+
+
+#########################################
+# SIGNAL
+#########################################
+
+
+def load_signal():
+
+    with open(SIGNAL_FILE) as f:
+        signal = json.load(f)
+
+    return signal["execution_signal"], signal["confidence"]
+
+
+#########################################
+# SMOOTH SIGNAL
+#########################################
+
+
+def smooth_signal(current_signal):
+
+    prev1, prev2 = load_signal_memory()
+
+    smoothed = (
+        0.6 * current_signal
+        + 0.3 * prev1
+        + 0.1 * prev2
     )
 
+    save_signal_memory([current_signal, prev1])
 
-########################################
-# TARGET ALLOCATION ENGINE
-########################################
-
-def compute_target(signal, config, volatility):
-
-    base = config["base_btc_allocation"]
-
-    execution_signal = signal[
-        "execution_signal"
-    ]
-
-    confidence = signal["confidence"]
-
-    multiplier = signal[
-        "smoothed_risk_multiplier"
-    ]
-
-    target = base + execution_signal * multiplier
-
-    if config["confidence_weighting"]:
-        target = base + (
-            execution_signal *
-            multiplier *
-            confidence
-        )
-
-    if (
-
-        config["volatility_dampening"]
-
-        and volatility >
-        config["volatility_cutoff"]
-
-    ):
-
-        target = (
-            base +
-            (target - base) * 0.5
-        )
-
-    target = max(
-
-        config["min_total_allocation"],
-
-        min(
-            config["max_total_allocation"],
-            target
-        )
-
-    )
-
-    return target
+    return smoothed
 
 
-########################################
+#########################################
 # ORDER EXECUTION
-########################################
+#########################################
 
-def place_order(side, volume, dry_run):
 
-    if dry_run:
+def place_market(side, volume):
 
-        return {
+    if DRY_RUN:
+        log("DRY_RUN", f"{side} {volume}")
+        return
 
-            "status": "DRY_RUN",
-
-            "side": side,
-
-            "volume": volume
-
-        }
-
-    return kraken_private(
-
+    result = kraken_private(
         "/0/private/AddOrder",
-
         {
-
             "pair": PAIR,
-
             "type": side,
-
             "ordertype": "market",
-
             "volume": volume
-
         }
-
     )
 
+    log("TRADE_EXECUTED", str(result))
 
-########################################
-# MAIN EXECUTION ENGINE
-########################################
+
+#########################################
+# EXECUTOR
+#########################################
+
 
 def execute():
 
-    config = load_config()
+    log("BOT_START", "Sentiment Executor V3")
 
-    state = load_state()
+    raw_signal, confidence = load_signal()
 
-    log_event(
-        "BOT_START",
-        message="Sentiment Executor V2"
-    )
+    if confidence < CONF_THRESHOLD:
 
-    signal = load_signal()
-
-    log_event(
-
-        "SIGNAL_UPDATE",
-
-        execution_signal=signal[
-            "execution_signal"
-        ],
-
-        confidence=signal["confidence"]
-
-    )
-
-    if (
-
-        signal["confidence"]
-
-        < config["confidence_threshold"]
-
-    ):
-
-        log_event(
-            "SKIP_LOW_CONFIDENCE"
-        )
+        log("SKIP_LOW_CONF", confidence)
 
         return
 
-    volatility = compute_volatility()
+    smoothed_signal = smooth_signal(raw_signal)
 
-    price = get_price()
+    weighted_signal = smoothed_signal * confidence
+
+    log(
+        "SIGNAL_UPDATE",
+        f"raw={raw_signal} smooth={smoothed_signal} conf={confidence}"
+    )
 
     btc, usd = get_balances()
 
+    price = get_price()
+
     portfolio_value = btc * price + usd
 
-    if portfolio_value == 0:
+    allocation_current = (btc * price) / portfolio_value
 
-        log_event(
-            "ERROR",
-            message="Portfolio value is zero"
-        )
+    allocation_target = BASE_ALLOCATION + weighted_signal
 
-        return
+    allocation_target = max(MIN_ALLOC, allocation_target)
 
-    current_allocation = (
+    allocation_target = min(MAX_ALLOC, allocation_target)
 
-        btc * price
+    delta = allocation_target - allocation_current
 
-    ) / portfolio_value
+    if abs(delta) < MIN_ALLOC_DELTA:
 
-    target = compute_target(
-        signal,
-        config,
-        volatility
-    )
-
-    delta = target - current_allocation
-
-    delta = max(
-
-        -config[
-            "max_adjustment_per_cycle"
-        ],
-
-        min(
-            config[
-                "max_adjustment_per_cycle"
-            ],
-            delta
-        )
-
-    )
-
-    trade_value = delta * portfolio_value
-
-    if abs(trade_value) < config[
-        "min_trade_usd"
-    ]:
-
-        log_event(
-            "SKIP_SMALL_TRADE",
-            trade_value=trade_value
-        )
+        log("SKIP_SMALL_DELTA", delta)
 
         return
 
-    side = "buy" if trade_value > 0 else "sell"
+    delta = max(-MAX_STEP, min(MAX_STEP, delta))
 
-    volume = abs(trade_value) / price
+    trade_value = abs(delta) * portfolio_value
 
-    log_event(
+    if trade_value < MIN_TRADE_USD:
 
+        log("SKIP_SMALL_TRADE", trade_value)
+
+        return
+
+    side = "buy" if delta > 0 else "sell"
+
+    volume = trade_value / price
+
+    log(
         "TRADE_DECISION",
-
-        side=side,
-
-        volume=volume,
-
-        price=price,
-
-        allocation_current=current_allocation,
-
-        allocation_target=target
-
+        f"side={side} volume={volume} current={allocation_current} target={allocation_target}"
     )
 
-    result = place_order(
-        side,
-        volume,
-        config["dry_run"]
-    )
-
-    log_event(
-
-        "TRADE_EXECUTED",
-
-        side=side,
-
-        volume=volume,
-
-        price=price,
-
-        kraken_result=result
-
-    )
-
-    state[
-        "last_target_allocation"
-    ] = target
-
-    state[
-        "last_execution_signal"
-    ] = signal[
-        "execution_signal"
-    ]
-
-    state[
-        "last_trade_ts"
-    ] = now()
-
-    save_state(state)
+    place_market(side, volume)
 
 
-########################################
-# ENTRYPOINT
-########################################
+#########################################
+# MAIN
+#########################################
+
 
 if __name__ == "__main__":
+
     execute()
