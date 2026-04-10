@@ -292,206 +292,109 @@ def compute_grid_levels(low, high, percentile, size):
 
 def main():
 
-    config = json.load(open(CONFIG_FILE))
+    console("Starting Kraken Sentiment Bot")
 
-    state = load_state()
-
+    last_range_refresh = None
+    low_price = None
+    high_price = None
 
     while True:
 
         try:
 
-            sentiment = fetch_sentiment()
-
-
-            if sentiment < config["execution_signal_threshold"]:
-
-                console("Sentiment gate active")
-
-                log_event(
-
-                    "NO_TRADE",
-
-                    reason="sentiment_gate",
-
-                    execution_signal=sentiment
-
-                )
-
-
             now = datetime.now(timezone.utc)
 
+            # Refresh price range once per hour
+            if (
+                last_range_refresh is None
+                or (now - last_range_refresh).seconds > 3600
+            ):
 
-            refresh_needed = (
+                records = []
 
-                not state["last_range_refresh"]
+                response = requests.get(PRICE_LOG_URL)
 
-                or datetime.fromisoformat(
+                for line in response.text.splitlines():
 
-                    state["last_range_refresh"]
-
-                )
-
-                < now
-
-                - timedelta(
-
-                    minutes=config[
-
-                        "range_refresh_interval_minutes"
-
-                    ]
-
-                )
-
-            )
-
-
-            if refresh_needed:
-
-                records = requests.get(
-
-                    PRICE_LOG_URL
-
-                ).json()
-
-                low, high = compute_24h_range(records)
-
-                state["range_low"] = low
-                state["range_high"] = high
-                state["last_range_refresh"] = now.isoformat()
-
-                save_state(state)
-
-                console(f"Range refreshed {low} → {high}")
-
-                log_event(
-
-                    "RANGE_REFRESH",
-
-                    low=low,
-
-                    high=high
-
-                )
-
-
-            low = state["range_low"]
-            high = state["range_high"]
-
-
-            current_price = get_current_price()
-
-            usd_balance, _ = get_balances()
-
-
-            grid = compute_grid_levels(
-
-                low,
-
-                high,
-
-                config["buy_zone_percentile"],
-
-                config["max_grid_size"]
-
-            )
-
-
-            console(
-
-                f"Price {current_price} | lowest grid {grid[-1]}"
-
-            )
-
-
-            for level in grid:
-
-                if str(level) in state["open_buy_orders"]:
-
-                    continue
-
-
-                if current_price <= level:
-
-                    size = (
-
-                        usd_balance
-
-                        * config["position_size_pct"]
-
-                    )
-
-                    volume = size / level
-
-                    if volume < 0.00005:
-
+                    if not line.strip():
                         continue
 
+                    try:
 
-                    order = place_limit_buy(
+                        records.append(json.loads(line))
 
-                        level,
+                    except Exception as e:
 
-                        volume
+                        console(f"Malformed JSONL entry: {e}")
 
+                        log_event(
+                            "ERROR",
+                            message=f"Malformed JSONL entry: {e}"
+                        )
+
+                cutoff = now - timedelta(
+                    hours=range_window_hours
+                )
+
+                recent_prices = [
+
+                    r["btc_price_usd"]
+
+                    for r in records
+
+                    if datetime.fromisoformat(
+                        r["timestamp"]
+                    ) >= cutoff
+
+                ]
+
+                if recent_prices:
+
+                    low_price = min(recent_prices)
+                    high_price = max(recent_prices)
+
+                    console(
+                        f"Range refreshed "
+                        f"{low_price:.0f} → {high_price:.0f}"
                     )
-
-
-                    if order["error"]:
-
-                        continue
-
-
-                    txid = order["result"]["txid"][0]
-
-
-                    state["open_buy_orders"][
-
-                        str(level)
-
-                    ] = {
-
-                        "txid": txid,
-
-                        "volume": volume
-
-                    }
-
-
-                    save_state(state)
-
 
                     log_event(
-
-                        "TRADE_DECISION",
-
-                        side="buy",
-
-                        volume=volume,
-
-                        price=level
-
+                        "INFO",
+                        message=f"Range refreshed "
+                        f"{low_price:.2f} → {high_price:.2f}"
                     )
 
+                else:
 
-            time.sleep(
+                    console(
+                        "No recent price data found "
+                        "for range calculation"
+                    )
 
-                config["price_check_interval_seconds"]
+                    log_event(
+                        "ERROR",
+                        message="No recent price data found"
+                    )
 
+                last_range_refresh = now
+
+
+            # Run trading logic
+            run_trading_cycle(
+                low_price,
+                high_price
             )
+
+            time.sleep(60)
 
 
         except Exception as e:
 
-            console(f"Runtime error {e}")
+            console(f"ERROR: {e}")
 
             log_event(
-
                 "ERROR",
-
                 message=str(e)
-
             )
 
             time.sleep(60)
