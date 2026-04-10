@@ -322,30 +322,125 @@ def main():
     last_range_refresh = state["last_range_refresh"]
     low_price = state["range_low"]
     high_price = state["range_high"]
-
+    
     if isinstance(last_range_refresh, str):
-
+    
         last_range_refresh = datetime.fromisoformat(
             last_range_refresh
         )
-
+    
+    
     while True:
 
         try:
 
             now = datetime.now(timezone.utc)
-
+           
             # Refresh price range once per hour
             if (
-
+            
                 last_range_refresh is None
-
+            
                 or
-
+            
                 (now - last_range_refresh).seconds > 3600
-
+            
             ):
-
+            
+                records = []
+            
+                response = requests.get(
+                    PRICE_LOG_URL
+                )
+            
+                for line in response.text.splitlines():
+            
+                    if not line.strip():
+            
+                        continue
+            
+                    try:
+            
+                        records.append(
+                            json.loads(line)
+                        )
+            
+                    except Exception as e:
+            
+                        console(
+                            f"Malformed JSONL entry: {e}"
+                        )
+            
+                        log_event(
+                            "ERROR",
+                            message=f"Malformed JSONL entry: {e}"
+                        )
+            
+            
+                cutoff = now - timedelta(
+                    hours=range_window_hours
+                )
+            
+            
+                recent_prices = [
+            
+                    r["btc_price_usd"]
+            
+                    for r in records
+            
+                    if datetime.fromisoformat(
+                        r["timestamp"]
+                    ) >= cutoff
+            
+                ]
+            
+            
+                if recent_prices:
+            
+                    low_price = min(recent_prices)
+                    high_price = max(recent_prices)
+            
+                    console(
+            
+                        f"Range refreshed "
+            
+                        f"{low_price:.0f} → {high_price:.0f}"
+            
+                    )
+            
+                    log_event(
+            
+                        "INFO",
+            
+                        message=f"Range refreshed "
+            
+                        f"{low_price:.2f} → {high_price:.2f}"
+            
+                    )
+            
+            
+                    state["range_low"] = low_price
+                    state["range_high"] = high_price
+                    state["last_range_refresh"] = now.isoformat()
+            
+                    save_state(state)
+            
+            
+                else:
+            
+                    console(
+                        "No recent price data found "
+                        "for range calculation"
+                    )
+            
+                    log_event(
+                        "ERROR",
+                        message="No recent price data found"
+                    )
+            
+            
+                last_range_refresh = now
+          
                 records = []
 
                 response = requests.get(
