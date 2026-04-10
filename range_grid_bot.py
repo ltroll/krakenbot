@@ -10,9 +10,7 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from pnl_tracker import PnLTracker
 
-
 load_dotenv()
-
 
 CONFIG_FILE = "range_grid_config.json"
 STATE_FILE = os.getenv("BOT_STATE_FILE", "last_state.json")
@@ -22,21 +20,16 @@ LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
 PRICE_LOG_URL = "http://screenpi.local/bot/btc_price_log.jsonl"
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL")
 
+
 ###########################################################
 # CONFIG
 ###########################################################
 
 if not os.path.exists(CONFIG_FILE):
-
-    raise FileNotFoundError(
-        f"Config file missing: {CONFIG_FILE}"
-    )
-
+    raise FileNotFoundError(f"Config file missing: {CONFIG_FILE}")
 
 with open(CONFIG_FILE) as f:
-
     config = json.load(f)
-
 
 range_window_hours = config["range_window_hours"]
 buy_zone_percentile = config["buy_zone_percentile"]
@@ -46,6 +39,7 @@ round_trip_fee_pct = config["round_trip_fee_pct"]
 position_size_pct = config["position_size_pct"]
 execution_signal_threshold = config["execution_signal_threshold"]
 
+
 ###########################################################
 # LOGGING
 ###########################################################
@@ -53,11 +47,9 @@ execution_signal_threshold = config["execution_signal_threshold"]
 def log_event(event, **kwargs):
 
     record = {
-
         "ts": datetime.now(timezone.utc).isoformat(),
         "event": event,
         "message": kwargs.pop("message", "")
-
     }
 
     record.update(kwargs)
@@ -67,7 +59,6 @@ def log_event(event, **kwargs):
 
 
 def console(msg):
-
     print(f"[{datetime.utcnow().isoformat()}] {msg}")
 
 
@@ -83,7 +74,6 @@ api.secret = os.getenv("KRAKEN_API_SECRET")
 console(f"Using Kraken endpoint: {api.uri}")
 log_event("BOT_START", message="Kraken Grid Sentiment Trader Starting")
 
-
 pair_info = api.query_public("AssetPairs")["result"]["XXBTZUSD"]
 
 PRICE_DECIMALS = pair_info["pair_decimals"]
@@ -91,12 +81,10 @@ VOLUME_DECIMALS = pair_info["lot_decimals"]
 
 
 def round_price(price):
-
     return round(price, PRICE_DECIMALS)
 
 
 def round_volume(volume):
-
     return round(volume, VOLUME_DECIMALS)
 
 
@@ -107,39 +95,28 @@ def round_volume(volume):
 def load_state():
 
     default = {
-
         "open_buy_orders": {},
         "open_sell_orders": {},
         "last_range_refresh": None,
         "range_low": None,
         "range_high": None
-
     }
 
     if not os.path.exists(STATE_FILE):
-
         return default
 
-
     with open(STATE_FILE) as f:
-
         state = json.load(f)
 
-
     for k in default:
-
         if k not in state:
-
             state[k] = default[k]
-
 
     return state
 
 
 def save_state(state):
-
     with open(STATE_FILE, "w") as f:
-
         json.dump(state, f, indent=2)
 
 
@@ -148,40 +125,54 @@ def save_state(state):
 ###########################################################
 
 def fetch_sentiment():
-
     r = requests.get(LLM_SIGNAL_URL)
-
     data = r.json()
-
     log_event("SIGNAL_UPDATE", **data)
-
     return data["execution_signal"]
 
 
 ###########################################################
-# RANGE
+# PRICE RANGE
 ###########################################################
+
+def fetch_price_log():
+
+    records = []
+
+    r = requests.get(PRICE_LOG_URL)
+
+    for line in r.text.splitlines():
+
+        if not line.strip():
+            continue
+
+        try:
+            records.append(json.loads(line))
+        except:
+            continue
+
+    return records
+
 
 def compute_24h_range(records):
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=range_window_hours)
 
     prices = []
 
     for entry in records:
 
         try:
-
             ts = datetime.fromisoformat(entry["timestamp"])
 
             if ts >= cutoff:
-
                 prices.append(float(entry["btc_price_usd"]))
 
         except:
-
             continue
 
+    if not prices:
+        return None, None
 
     return min(prices), max(prices)
 
@@ -191,19 +182,13 @@ def compute_24h_range(records):
 ###########################################################
 
 def get_current_price():
-
     r = api.query_public("Ticker", {"pair": "XXBTZUSD"})
-
     return float(r["result"]["XXBTZUSD"]["c"][0])
 
 
 def get_balances():
-
     r = api.query_private("Balance")
-
-    return float(r["result"].get("ZUSD", 0)), float(
-        r["result"].get("XXBT", 0)
-    )
+    return float(r["result"].get("ZUSD", 0)), float(r["result"].get("XXBT", 0))
 
 
 def place_limit_buy(price, volume):
@@ -212,28 +197,14 @@ def place_limit_buy(price, volume):
     volume = round_volume(volume)
 
     order = api.query_private("AddOrder", {
-
         "pair": "XXBTZUSD",
         "type": "buy",
         "ordertype": "limit",
         "price": str(price),
         "volume": str(volume)
-
     })
 
-    log_event(
-
-        "ORDER_RESPONSE",
-
-        side="buy",
-
-        price=price,
-
-        volume=volume,
-
-        response=order
-
-    )
+    log_event("ORDER_RESPONSE", side="buy", price=price, volume=volume, response=order)
 
     return order
 
@@ -244,44 +215,16 @@ def place_limit_sell(price, volume):
     volume = round_volume(volume)
 
     order = api.query_private("AddOrder", {
-
         "pair": "XXBTZUSD",
         "type": "sell",
         "ordertype": "limit",
         "price": str(price),
         "volume": str(volume)
-
     })
 
-    log_event(
-
-        "ORDER_RESPONSE",
-
-        side="sell",
-
-        price=price,
-
-        volume=volume,
-
-        response=order
-
-    )
+    log_event("ORDER_RESPONSE", side="sell", price=price, volume=volume, response=order)
 
     return order
-
-
-def order_is_filled(txid):
-
-    result = api.query_private("QueryOrders", {"txid": txid})
-
-    if result["error"]:
-
-        return False
-
-
-    status = list(result["result"].values())[0]["status"]
-
-    return status == "closed"
 
 
 ###########################################################
@@ -291,21 +234,14 @@ def order_is_filled(txid):
 def compute_grid_levels(low, high, percentile, size):
 
     rng = high - low
-
     step = percentile / size
 
     return sorted(
-
         [
-
             low + (rng * (percentile - step * i))
-
             for i in range(size)
-
         ],
-
         reverse=True
-
     )
 
 
@@ -322,258 +258,100 @@ def main():
     last_range_refresh = state["last_range_refresh"]
     low_price = state["range_low"]
     high_price = state["range_high"]
-    
+
     if isinstance(last_range_refresh, str):
-    
-        last_range_refresh = datetime.fromisoformat(
-            last_range_refresh
-        )
-    
-    
+        last_range_refresh = datetime.fromisoformat(last_range_refresh)
+
     while True:
 
         try:
 
             now = datetime.now(timezone.utc)
-           
-            # Refresh price range once per hour
+
+            ###################################################
+            # REFRESH RANGE
+            ###################################################
+
             if (
-            
                 last_range_refresh is None
-            
-                or
-            
-                (now - last_range_refresh).seconds > 3600
-            
+                or (now - last_range_refresh).seconds > 3600
             ):
-            
-                records = []
-            
-                response = requests.get(
-                    PRICE_LOG_URL
-                )
-            
-                for line in response.text.splitlines():
-            
-                    if not line.strip():
-            
-                        continue
-            
-                    try:
-            
-                        records.append(
-                            json.loads(line)
-                        )
-            
-                    except Exception as e:
-            
-                        console(
-                            f"Malformed JSONL entry: {e}"
-                        )
-            
-                        log_event(
-                            "ERROR",
-                            message=f"Malformed JSONL entry: {e}"
-                        )
-            
-            
-                cutoff = now - timedelta(
-                    hours=range_window_hours
-                )
-            
-            
-                recent_prices = [
-            
-                    r["btc_price_usd"]
-            
-                    for r in records
-            
-                    if datetime.fromisoformat(
-                        r["timestamp"]
-                    ) >= cutoff
-            
-                ]
-            
-            
-                if recent_prices:
-            
-                    low_price = min(recent_prices)
-                    high_price = max(recent_prices)
-            
-                    console(
-            
-                        f"Range refreshed "
-            
-                        f"{low_price:.0f} → {high_price:.0f}"
-            
-                    )
-            
-                    log_event(
-            
-                        "INFO",
-            
-                        message=f"Range refreshed "
-            
-                        f"{low_price:.2f} → {high_price:.2f}"
-            
-                    )
-            
-            
-                    state["range_low"] = low_price
-                    state["range_high"] = high_price
-                    state["last_range_refresh"] = now.isoformat()
-            
-                    save_state(state)
-            
-            
-                else:
-            
-                    console(
-                        "No recent price data found "
-                        "for range calculation"
-                    )
-            
-                    log_event(
-                        "ERROR",
-                        message="No recent price data found"
-                    )
-            
-            
-                last_range_refresh = now
-          
-                records = []
 
-                response = requests.get(
-                    PRICE_LOG_URL
-                )
+                records = fetch_price_log()
 
-                for line in response.text.splitlines():
+                low_price, high_price = compute_24h_range(records)
 
-                    if not line.strip():
+                if low_price is None:
+                    console("No range data available")
+                    time.sleep(60)
+                    continue
 
-                        continue
+                console(f"Range refreshed {low_price:.0f} → {high_price:.0f}")
 
-                    try:
+                state["range_low"] = low_price
+                state["range_high"] = high_price
+                state["last_range_refresh"] = now.isoformat()
 
-                        records.append(
-                            json.loads(line)
-                        )
-
-                    except Exception as e:
-
-                        console(
-                            f"Malformed JSONL entry: {e}"
-                        )
-
-                        log_event(
-                            "ERROR",
-                            message=f"Malformed JSONL entry: {e}"
-                        )
-
-
-                cutoff = now - timedelta(
-                    hours=range_window_hours
-                )
-
-
-                recent_prices = [
-
-                    r["btc_price_usd"]
-
-                    for r in records
-
-                    if datetime.fromisoformat(
-                        r["timestamp"]
-                    ) >= cutoff
-
-                ]
-
-
-                if recent_prices:
-
-                    low_price = min(recent_prices)
-                    high_price = max(recent_prices)
-
-                    console(
-
-                        f"Range refreshed "
-
-                        f"{low_price:.0f} → {high_price:.0f}"
-
-                    )
-
-                    log_event(
-
-                        "INFO",
-
-                        message=f"Range refreshed "
-
-                        f"{low_price:.2f} → {high_price:.2f}"
-
-                    )
-
-
-                    state["range_low"] = low_price
-                    state["range_high"] = high_price
-                    state["last_range_refresh"] = now.isoformat()
-
-                    save_state(state)
-
-
-                else:
-
-                    console(
-
-                        "No recent price data found "
-
-                        "for range calculation"
-
-                    )
-
-                    log_event(
-
-                        "ERROR",
-
-                        message="No recent price data found"
-
-                    )
-
+                save_state(state)
 
                 last_range_refresh = now
 
+            ###################################################
+            # STRATEGY EXECUTION (INLINE - FIXED)
+            ###################################################
 
-            # Run trading logic
-            run_trading_cycle(
+            sentiment = fetch_sentiment()
 
+            current_price = get_current_price()
+
+            usd_balance, btc_balance = get_balances()
+
+            grid_levels = compute_grid_levels(
                 low_price,
-
-                high_price
-
+                high_price,
+                buy_zone_percentile,
+                max_grid_size
             )
 
+            console(f"Current: {current_price} | Lowest grid: {grid_levels[-1]}")
+
+            if sentiment < execution_signal_threshold:
+                console("Sentiment too low - skipping buys")
+
+            for level in grid_levels:
+
+                if current_price <= level and sentiment >= execution_signal_threshold:
+
+                    position_size = usd_balance * position_size_pct
+                    volume = position_size / level
+
+                    if volume < 0.00005:
+                        continue
+
+                    order = place_limit_buy(level, volume)
+
+                    if order.get("error"):
+                        continue
+
+                    txid = order["result"]["txid"][0]
+
+                    state["open_buy_orders"][str(level)] = {
+                        "txid": txid,
+                        "volume": volume
+                    }
+
+                    save_state(state)
 
             time.sleep(60)
-
 
         except Exception as e:
 
             console(f"ERROR: {e}")
 
-            log_event(
-
-                "ERROR",
-
-                message=str(e)
-
-            )
+            log_event("ERROR", message=str(e))
 
             time.sleep(60)
 
 
 if __name__ == "__main__":
-
-    main()
-
-if __name__ == "__main__":
-
     main()
