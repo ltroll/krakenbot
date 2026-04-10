@@ -22,6 +22,29 @@ LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
 PRICE_LOG_URL = "http://screenpi.local/bot/btc_price_log.jsonl"
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL")
 
+###########################################################
+# CONFIG
+###########################################################
+
+if not os.path.exists(CONFIG_FILE):
+
+    raise FileNotFoundError(
+        f"Config file missing: {CONFIG_FILE}"
+    )
+
+
+with open(CONFIG_FILE) as f:
+
+    config = json.load(f)
+
+
+range_window_hours = config["range_window_hours"]
+buy_zone_percentile = config["buy_zone_percentile"]
+max_grid_size = config["max_grid_size"]
+profit_target_pct = config["profit_target_pct"]
+round_trip_fee_pct = config["round_trip_fee_pct"]
+position_size_pct = config["position_size_pct"]
+execution_signal_threshold = config["execution_signal_threshold"]
 
 ###########################################################
 # LOGGING
@@ -294,9 +317,17 @@ def main():
 
     console("Starting Kraken Sentiment Bot")
 
-    last_range_refresh = None
-    low_price = None
-    high_price = None
+    state = load_state()
+
+    last_range_refresh = state["last_range_refresh"]
+    low_price = state["range_low"]
+    high_price = state["range_high"]
+
+    if isinstance(last_range_refresh, str):
+
+        last_range_refresh = datetime.fromisoformat(
+            last_range_refresh
+        )
 
     while True:
 
@@ -306,35 +337,49 @@ def main():
 
             # Refresh price range once per hour
             if (
+
                 last_range_refresh is None
-                or (now - last_range_refresh).seconds > 3600
+
+                or
+
+                (now - last_range_refresh).seconds > 3600
+
             ):
 
                 records = []
 
-                response = requests.get(PRICE_LOG_URL)
+                response = requests.get(
+                    PRICE_LOG_URL
+                )
 
                 for line in response.text.splitlines():
 
                     if not line.strip():
+
                         continue
 
                     try:
 
-                        records.append(json.loads(line))
+                        records.append(
+                            json.loads(line)
+                        )
 
                     except Exception as e:
 
-                        console(f"Malformed JSONL entry: {e}")
+                        console(
+                            f"Malformed JSONL entry: {e}"
+                        )
 
                         log_event(
                             "ERROR",
                             message=f"Malformed JSONL entry: {e}"
                         )
 
+
                 cutoff = now - timedelta(
                     hours=range_window_hours
                 )
+
 
                 recent_prices = [
 
@@ -348,42 +393,69 @@ def main():
 
                 ]
 
+
                 if recent_prices:
 
                     low_price = min(recent_prices)
                     high_price = max(recent_prices)
 
                     console(
+
                         f"Range refreshed "
+
                         f"{low_price:.0f} → {high_price:.0f}"
+
                     )
 
                     log_event(
+
                         "INFO",
+
                         message=f"Range refreshed "
+
                         f"{low_price:.2f} → {high_price:.2f}"
+
                     )
+
+
+                    state["range_low"] = low_price
+                    state["range_high"] = high_price
+                    state["last_range_refresh"] = now.isoformat()
+
+                    save_state(state)
+
 
                 else:
 
                     console(
+
                         "No recent price data found "
+
                         "for range calculation"
+
                     )
 
                     log_event(
+
                         "ERROR",
+
                         message="No recent price data found"
+
                     )
+
 
                 last_range_refresh = now
 
 
             # Run trading logic
             run_trading_cycle(
+
                 low_price,
+
                 high_price
+
             )
+
 
             time.sleep(60)
 
@@ -393,12 +465,19 @@ def main():
             console(f"ERROR: {e}")
 
             log_event(
+
                 "ERROR",
+
                 message=str(e)
+
             )
 
             time.sleep(60)
 
+
+if __name__ == "__main__":
+
+    main()
 
 if __name__ == "__main__":
 
