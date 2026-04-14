@@ -32,6 +32,7 @@ LOG_FILE = os.getenv("TRADE_LOG_FILE", "trade_log.jsonl")
 KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL")
+PRICE_LOG_URL = os.getenv("PRICE_LOG_URL")
 
 with open(CONFIG_FILE) as f:
     config = json.load(f)
