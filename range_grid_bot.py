@@ -108,11 +108,12 @@ def get_price():
 
     ticker_url = os.getenv("KRAKEN_TICKER_URL")
 
+    # Defensive logging to confirm env variable loaded correctly
     if not ticker_url:
 
         log_event({
             "event": "price_fetch_error",
-            "error": "KRAKEN_TICKER_URL missing from .env"
+            "error": "KRAKEN_TICKER_URL missing or not loaded from .env"
         })
 
         return None
@@ -123,30 +124,24 @@ def get_price():
         response = requests.get(ticker_url, timeout=5)
         data = response.json()
 
-        # Native Kraken format
-        if "result" in data:
+        # Kraken native format (your curl output matches this exactly)
+        if "result" in data and isinstance(data["result"], dict):
 
             pair = list(data["result"].keys())[0]
-            return float(data["result"][pair]["c"][0])
+
+            if "c" in data["result"][pair]:
+                return float(data["result"][pair]["c"][0])
 
 
-        # ScreenPi simplified format
+        # ScreenPi simplified format support
         if "price" in data:
             return float(data["price"])
 
 
-        # Some ScreenPi reverse proxies flatten result layer
-        if isinstance(data, dict):
-
-            for key in data:
-
-                if isinstance(data[key], dict) and "c" in data[key]:
-                    return float(data[key]["c"][0])
-
-
+        # Unexpected format — log full payload for debugging
         log_event({
             "event": "price_fetch_error",
-            "error": f"Unexpected ticker format: {data}"
+            "error": f"Unexpected ticker format payload: {data}"
         })
 
         return None
