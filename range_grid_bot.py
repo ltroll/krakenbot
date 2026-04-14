@@ -199,10 +199,10 @@ def place_sell(price, volume):
     })
 
 # ----------------------
-# MAIN LOOP
+# MAIN LOOP (HARDENED)
 # ----------------------
 
-print("Bot started (clean version)")
+print("Bot started (hardened loop)")
 
 while True:
 
@@ -224,35 +224,92 @@ while True:
         high = state.get("range_high")
 
         # ----------------------
-        # SELL CHECK
+        # SELL CHECK (SAFE)
         # ----------------------
 
         for level, order in list(state["open_buy_orders"].items()):
 
-            if order_filled(order["txid"]):
+            try:
+
+                if not order_filled(order.get("txid")):
+                    continue
 
                 buy_price = float(level)
 
-                sell_price = buy_price * (1 + profit_target_pct + round_trip_fee_pct)
+                sell_price = buy_price * (
+                    1 + profit_target_pct + round_trip_fee_pct
+                )
 
-                sell = place_sell(sell_price, order["volume"])
+                sell_resp = place_sell(
+                    sell_price,
+                    order.get("volume", 0)
+                )
 
-                txid = sell["result"]["txid"][0]
+                if not isinstance(sell_resp, dict):
+                    log_event(
+                        "SELL_FAILED_BAD_RESPONSE",
+                        response=str(sell_resp),
+                        level=level
+                    )
+                    continue
+
+                if sell_resp.get("error"):
+                    log_event(
+                        "SELL_FAILED_KRAKEN_ERROR",
+                        error=sell_resp["error"],
+                        level=level
+                    )
+                    continue
+
+                txid = (
+                    sell_resp.get("result", {})
+                    .get("txid", [None])[0]
+                )
+
+                if not txid:
+                    log_event(
+                        "SELL_NO_TXID",
+                        response=sell_resp,
+                        level=level
+                    )
+                    continue
 
                 state["open_sell_orders"][txid] = order
                 del state["open_buy_orders"][level]
 
                 save_state(state)
 
+                log_event(
+                    "TRADE_DECISION",
+                    side="sell",
+                    price=sell_price,
+                    volume=order.get("volume", 0)
+                )
+
+            except Exception as e:
+
+                log_event(
+                    "SELL_LOOP_ERROR",
+                    message=str(e),
+                    level=level
+                )
+
         # ----------------------
-        # GRID BUY
+        # GRID BUY (SAFE)
         # ----------------------
 
         if low and high and execution_signal >= execution_signal_threshold:
 
             grid = compute_grid(low, high)
 
-            usd = float(api.query_private("Balance")["result"].get("ZUSD", 0))
+            usd_resp = api.query_private("Balance")
+
+            usd = 0.0
+
+            try:
+                usd = float(usd_resp["result"].get("ZUSD", 0))
+            except:
+                log_event("BALANCE_PARSE_ERROR", response=str(usd_resp))
 
             for level in grid:
 
@@ -261,16 +318,46 @@ while True:
                 if key in state["open_buy_orders"]:
                     continue
 
-                if price <= level:
+                if price > level:
+                    continue
 
-                    volume = (usd * position_size_pct) / level
+                volume = (usd * position_size_pct) / level
 
-                    if volume < 0.00005:
+                if volume < 0.00005:
+                    continue
+
+                try:
+
+                    buy_resp = place_buy(level, volume)
+
+                    if not isinstance(buy_resp, dict):
+                        log_event(
+                            "BUY_FAILED_BAD_RESPONSE",
+                            response=str(buy_resp),
+                            level=level
+                        )
                         continue
 
-                    order = place_buy(level, volume)
+                    if buy_resp.get("error"):
+                        log_event(
+                            "BUY_FAILED_KRAKEN_ERROR",
+                            error=buy_resp["error"],
+                            level=level
+                        )
+                        continue
 
-                    txid = order["result"]["txid"][0]
+                    txid = (
+                        buy_resp.get("result", {})
+                        .get("txid", [None])[0]
+                    )
+
+                    if not txid:
+                        log_event(
+                            "BUY_NO_TXID",
+                            response=buy_resp,
+                            level=level
+                        )
+                        continue
 
                     state["open_buy_orders"][key] = {
                         "txid": txid,
@@ -279,8 +366,28 @@ while True:
 
                     save_state(state)
 
+                    log_event(
+                        "TRADE_DECISION",
+                        side="buy",
+                        price=level,
+                        volume=volume
+                    )
+
+                except Exception as e:
+
+                    log_event(
+                        "BUY_LOOP_ERROR",
+                        message=str(e),
+                        level=level
+                    )
+
         time.sleep(120)
 
     except Exception as e:
-        log_event({"event": "loop_error", "error": str(e)})
+
+        log_event(
+            "LOOP_ERROR",
+            message=str(e)
+        )
+
         time.sleep(120)
