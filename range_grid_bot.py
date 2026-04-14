@@ -100,7 +100,68 @@ def log_event(event):
 
 
 # ==========================
-# PRICE FETCH (PATCHED)
+# PRICE FETCH (FIXED FOR SCREENPI + KRAKEN TICKER URL)
+# ==========================
+
+
+def get_price():
+
+    ticker_url = os.getenv("KRAKEN_TICKER_URL")
+
+    if not ticker_url:
+
+        log_event({
+            "event": "price_fetch_error",
+            "error": "KRAKEN_TICKER_URL missing from .env"
+        })
+
+        return None
+
+
+    try:
+
+        response = requests.get(ticker_url, timeout=5)
+        data = response.json()
+
+        # Native Kraken format
+        if "result" in data:
+
+            pair = list(data["result"].keys())[0]
+            return float(data["result"][pair]["c"][0])
+
+
+        # ScreenPi simplified format
+        if "price" in data:
+            return float(data["price"])
+
+
+        # Some ScreenPi reverse proxies flatten result layer
+        if isinstance(data, dict):
+
+            for key in data:
+
+                if isinstance(data[key], dict) and "c" in data[key]:
+                    return float(data[key]["c"][0])
+
+
+        log_event({
+            "event": "price_fetch_error",
+            "error": f"Unexpected ticker format: {data}"
+        })
+
+        return None
+
+
+    except Exception as e:
+
+        log_event({
+            "event": "price_fetch_error",
+            "error": str(e)
+        })
+
+        return None
+
+
 # ==========================
 
 
@@ -179,7 +240,67 @@ def get_sentiment():
 
 
 # ==========================
-# TRADE EXECUTION PLACEHOLDER
+# SENTIMENT-AWARE EXECUTION ENGINE (UPGRADED)
+# ==========================
+
+
+def maybe_execute_trade(price, sentiment):
+
+    if price is None:
+        return
+
+    if sentiment is None:
+        return
+
+
+    execution_signal = sentiment.get("execution_signal", 0)
+    confidence = sentiment.get("confidence", 0)
+    risk_multiplier = sentiment.get("smoothed_risk_multiplier", 1)
+    direction_bias = sentiment.get("direction_bias", 0)
+
+
+    threshold = config["execution_signal_threshold"]
+
+
+    # Ignore weak signals
+    if abs(execution_signal) < threshold:
+        return
+
+
+    # Confidence gating
+    if confidence < 0.55:
+        log_event({
+            "event": "signal_filtered_low_confidence",
+            "confidence": confidence
+        })
+        return
+
+
+    # Direction-aware filtering
+    if execution_signal < 0 and direction_bias > 0.3:
+
+        log_event({
+            "event": "signal_filtered_direction_conflict",
+            "execution_signal": execution_signal,
+            "direction_bias": direction_bias
+        })
+
+        return
+
+
+    adjusted_position_size = config["position_size_pct"] * risk_multiplier
+
+
+    log_event({
+        "event": "trade_signal_triggered",
+        "price": price,
+        "execution_signal": execution_signal,
+        "confidence": confidence,
+        "risk_multiplier": risk_multiplier,
+        "adjusted_position_size": adjusted_position_size
+    })
+
+
 # ==========================
 
 
