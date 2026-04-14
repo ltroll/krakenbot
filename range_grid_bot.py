@@ -93,7 +93,7 @@ state = load_state()
 
 
 def log_event(event):
-    event["timestamp"] = datetime.datetime.now(datetime.UTC).isoformat()
+    event["timestamp"] = datetime.now(datetime.UTC).isoformat()
 
     with open(LOG_FILE, "a") as f:
         f.write(json.dumps(event) + "\n")
@@ -206,7 +206,7 @@ def get_sentiment():
     global sentiment_cache
     global sentiment_cache_time
 
-    now = datetime.datetime.now(datetime.UTC)
+    now = datetime.now(datetime.UTC)
 
     if sentiment_cache:
 
