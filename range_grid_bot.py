@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 
 # =====================================================
-# CLEAN + STABLE RANGE GRID BOT (BASELINE VERSION)
-# =====================================================
-# - Safe Kraken execution wrapper
-# - Verbose structured logging
-# - No missing function dependencies
-# - Stable state handling
-# - Defensive JSON parsing
+# RANGE GRID SENTIMENT BOT (RESTORED STABLE VERSION)
 # =====================================================
 
 import os
@@ -60,7 +54,7 @@ PRICE_DECIMALS = pair_info["pair_decimals"]
 VOLUME_DECIMALS = pair_info["lot_decimals"]
 
 # ----------------------
-# LOGGING (SAFE)
+# LOGGING
 # ----------------------
 
 def log_event(event, **kwargs):
@@ -97,14 +91,13 @@ def kraken_call(label, fn, *args, **kwargs):
         return None
 
     if not isinstance(resp, dict):
-        log_event("KRAKEN_BAD_RESPONSE", operation=label, response=str(resp))
+        log_event("KRAKEN_BAD_RESPONSE", operation=label)
         return None
 
     if resp.get("error"):
         log_event("KRAKEN_API_ERROR", operation=label, error=resp["error"])
         return resp
 
-    log_event("KRAKEN_OK", operation=label)
     return resp
 
 # ----------------------
@@ -118,7 +111,6 @@ def load_state():
         "open_sell_orders": {},
         "range_low": None,
         "range_high": None,
-        "execution_signal": 0,
         "last_range_refresh": None
     }
 
@@ -139,74 +131,8 @@ def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
+
 state = load_state()
-
-# ----------------------
-# BOOTSTRAP RANGE IF EMPTY
-# ----------------------
-
-if (
-    state.get("range_low") is None
-    or state.get("range_high") is None
-):
-    log_event("BOOTSTRAP_START", message="Initializing range from market data")
-
-    try:
-        r = requests.get(PRICE_LOG_URL, timeout=10)
-
-        records = []
-        for line in r.text.splitlines():
-            if not line.strip():
-                continue
-            try:
-                records.append(json.loads(line))
-            except:
-                continue
-
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-
-        prices = []
-        for x in records:
-            try:
-                ts = datetime.fromisoformat(x["timestamp"])
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-
-                if ts >= cutoff:
-                    prices.append(float(x["btc_price_usd"]))
-            except:
-                continue
-
-        if prices:
-            state["range_low"] = min(prices)
-            state["range_high"] = max(prices)
-            state.setdefault("open_buy_orders", {})
-            state.setdefault("open_sell_orders", {})
-
-            save_state(state)
-
-            print(
-                f"[BOOTSTRAP] Range initialized: "
-                f"{state['range_low']:.0f} → {state['range_high']:.0f}"
-            )
-
-            log_event(
-                "BOOTSTRAP_COMPLETE",
-                range_low=state["range_low"],
-                range_high=state["range_high"]
-            )
-
-        else:
-            log_event(
-                "BOOTSTRAP_FAILED",
-                message="No price history available"
-            )
-
-    except Exception as e:
-        log_event(
-            "BOOTSTRAP_ERROR",
-            message=str(e)
-        )
 
 # ----------------------
 # PRICE
@@ -216,14 +142,17 @@ def get_price():
 
     try:
 
-        r = requests.get(KRAKEN_TICKER_URL, timeout=5)
-        data = r.json()
+        if KRAKEN_TICKER_URL:
 
-        if "result" in data:
-            pair = list(data["result"].keys())[0]
-            return float(data["result"][pair]["c"][0])
+            r = requests.get(KRAKEN_TICKER_URL, timeout=5)
+            data = r.json()
 
-        return None
+            if "result" in data:
+                pair = list(data["result"].keys())[0]
+                return float(data["result"][pair]["c"][0])
+
+        r = api.query_public("Ticker", {"pair": "XXBTZUSD"})
+        return float(r["result"]["XXBTZUSD"]["c"][0])
 
     except Exception as e:
         log_event("PRICE_ERROR", message=str(e))
@@ -236,11 +165,72 @@ def get_price():
 def get_sentiment():
 
     try:
+
         r = requests.get(LLM_SIGNAL_URL, timeout=5)
-        return r.json()
+        data = r.json()
+
+        if isinstance(data, dict):
+            return data.get("execution_signal", 0)
+
+        return float(data)
+
     except Exception as e:
         log_event("SENTIMENT_ERROR", message=str(e))
         return None
+
+# ----------------------
+# RANGE REFRESH
+# ----------------------
+
+def refresh_range():
+
+    try:
+
+        r = requests.get(PRICE_LOG_URL, timeout=10)
+
+        records = []
+
+        for line in r.text.splitlines():
+
+            if not line.strip():
+                continue
+
+            try:
+                records.append(json.loads(line))
+            except:
+                continue
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=range_window_hours)
+
+        prices = []
+
+        for x in records:
+
+            try:
+
+                ts = datetime.fromisoformat(x["timestamp"])
+
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+
+                if ts >= cutoff:
+                    prices.append(float(x["btc_price_usd"]))
+
+            except:
+                continue
+
+        if prices:
+
+            state["range_low"] = min(prices)
+            state["range_high"] = max(prices)
+            state["last_range_refresh"] = datetime.now(timezone.utc).isoformat()
+
+            save_state(state)
+
+            console(f"Range refreshed: {state['range_low']} → {state['range_high']}")
+
+    except Exception as e:
+        log_event("RANGE_REFRESH_ERROR", message=str(e))
 
 # ----------------------
 # GRID
@@ -261,6 +251,7 @@ def compute_grid(low, high):
 # ----------------------
 
 def place_buy(price, volume):
+
     return api.query_private("AddOrder", {
         "pair": "XXBTZUSD",
         "type": "buy",
@@ -271,6 +262,7 @@ def place_buy(price, volume):
 
 
 def place_sell(price, volume):
+
     return api.query_private("AddOrder", {
         "pair": "XXBTZUSD",
         "type": "sell",
@@ -283,151 +275,148 @@ def place_sell(price, volume):
 def order_filled(txid):
 
     try:
+
         r = api.query_private("QueryOrders", {"txid": txid})
 
-        if not isinstance(r, dict):
-            return False
-
         if r.get("error"):
-            log_event("ORDER_CHECK_ERROR", error=r["error"])
             return False
 
-        result = r.get("result", {})
-        if txid not in result:
-            return False
+        return r["result"][txid]["status"] == "closed"
 
-        return result[txid].get("status") == "closed"
+    except:
 
-    except Exception as e:
-        log_event("ORDER_CHECK_EXCEPTION", message=str(e))
         return False
-
-
 
 # ----------------------
 # MAIN LOOP
 # ----------------------
 
-console("Bot started (stable baseline)")
+def main():
 
-while True:
+    console("Bot started (restored operational build)")
 
-    try:
+    while True:
 
-        now = datetime.now(timezone.utc)
+        try:
 
-        price = get_price()
-        sentiment = get_sentiment()
+            now = datetime.now(timezone.utc)
 
-        if price is None or sentiment is None:
-            time.sleep(120)
-            continue
+            price = get_price()
+            sentiment = get_sentiment()
 
-        execution_signal = sentiment.get("execution_signal", 0)
-        state["execution_signal"] = execution_signal
-
-        low = state.get("range_low")
-        high = state.get("range_high")
-
-        # ----------------------
-        # SELL CHECK
-        # ----------------------
-
-        for level, order in list(state["open_buy_orders"].items()):
-
-            txid = order.get("txid")
-            if not txid:
+            if price is None or sentiment is None:
+                time.sleep(120)
                 continue
 
-            if not order_filled(txid):
-                continue
+            execution_signal = sentiment
 
-            buy_price = float(level)
+            console(f"Price: {price} | Signal: {execution_signal}")
 
-            sell_price = buy_price * (1 + profit_target_pct + round_trip_fee_pct)
+            if (
+                state["last_range_refresh"] is None
+                or (
+                    now - datetime.fromisoformat(state["last_range_refresh"])
+                ).seconds > 3600
+            ):
+                refresh_range()
 
-            sell_resp = kraken_call(
-                "SELL",
-                place_sell,
-                sell_price,
-                order.get("volume", 0)
-            )
+            low = state["range_low"]
+            high = state["range_high"]
 
-            if not sell_resp or sell_resp.get("error"):
-                continue
+            # SELL CHECK
 
-            txid = sell_resp.get("result", {}).get("txid", [None])[0]
-            if not txid:
-                continue
+            for level, order in list(state["open_buy_orders"].items()):
 
-            state["open_sell_orders"][txid] = order
-            del state["open_buy_orders"][level]
+                txid = order["txid"]
 
-            save_state(state)
-
-            log_event(
-                "TRADE_DECISION",
-                side="sell",
-                price=sell_price,
-                volume=order.get("volume", 0)
-            )
-
-        # ----------------------
-        # GRID BUY
-        # ----------------------
-
-        if low and high and execution_signal >= execution_signal_threshold:
-
-            grid = compute_grid(low, high)
-
-            usd = float(api.query_private("Balance")["result"].get("ZUSD", 0))
-
-            for level in grid:
-
-                key = str(round(level, 2))
-
-                if key in state["open_buy_orders"]:
+                if not order_filled(txid):
                     continue
 
-                if price > level:
-                    continue
+                buy_price = float(level)
 
-                volume = (usd * position_size_pct) / level
-
-                if volume < 0.00005:
-                    continue
-
-                buy_resp = kraken_call(
-                    "BUY",
-                    place_buy,
-                    level,
-                    volume
+                sell_price = buy_price * (
+                    1 + profit_target_pct + round_trip_fee_pct
                 )
 
-                if not buy_resp or buy_resp.get("error"):
+                sell_resp = kraken_call(
+                    "SELL",
+                    place_sell,
+                    sell_price,
+                    order["volume"]
+                )
+
+                if not sell_resp or sell_resp.get("error"):
                     continue
 
-                txid = buy_resp.get("result", {}).get("txid", [None])[0]
-                if not txid:
-                    continue
+                txid = sell_resp["result"]["txid"][0]
 
-                state["open_buy_orders"][key] = {
-                    "txid": txid,
-                    "volume": volume
-                }
+                state["open_sell_orders"][txid] = order
+
+                del state["open_buy_orders"][level]
 
                 save_state(state)
 
-                log_event(
-                    "TRADE_DECISION",
-                    side="buy",
-                    price=level,
-                    volume=volume
-                )
+                console(f"SELL placed @ {sell_price}")
 
-        time.sleep(120)
+            # GRID BUY
 
-    except Exception as e:
+            if low and high and execution_signal >= execution_signal_threshold:
 
-        log_event("LOOP_ERROR", message=str(e))
-        time.sleep(120)
+                grid = compute_grid(low, high)
+
+                bal = kraken_call("BALANCE", api.query_private, "Balance")
+
+                if not bal:
+                    time.sleep(120)
+                    continue
+
+                usd = float(bal["result"].get("ZUSD", 0))
+
+                for level in grid:
+
+                    key = str(level)
+
+                    if key in state["open_buy_orders"]:
+                        continue
+
+                    if price > level:
+                        continue
+
+                    volume = (usd * position_size_pct) / level
+
+                    if volume < 0.00005:
+                        continue
+
+                    buy_resp = kraken_call(
+                        "BUY",
+                        place_buy,
+                        level,
+                        volume
+                    )
+
+                    if not buy_resp or buy_resp.get("error"):
+                        continue
+
+                    txid = buy_resp["result"]["txid"][0]
+
+                    state["open_buy_orders"][key] = {
+                        "txid": txid,
+                        "volume": volume
+                    }
+
+                    save_state(state)
+
+                    console(f"BUY placed @ {level}")
+
+            time.sleep(120)
+
+        except Exception as e:
+
+            log_event("LOOP_ERROR", message=str(e))
+            console(f"Loop error: {e}")
+
+            time.sleep(120)
+
+
+if __name__ == "__main__":
+    main()
