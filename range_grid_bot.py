@@ -141,6 +141,73 @@ def save_state(state):
 state = load_state()
 
 # ----------------------
+# BOOTSTRAP RANGE IF EMPTY
+# ----------------------
+
+if (
+    state.get("range_low") is None
+    or state.get("range_high") is None
+):
+    log_event("BOOTSTRAP_START", message="Initializing range from market data")
+
+    try:
+        r = requests.get(PRICE_LOG_URL, timeout=10)
+
+        records = []
+        for line in r.text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except:
+                continue
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+
+        prices = []
+        for x in records:
+            try:
+                ts = datetime.fromisoformat(x["timestamp"])
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+
+                if ts >= cutoff:
+                    prices.append(float(x["btc_price_usd"]))
+            except:
+                continue
+
+        if prices:
+            state["range_low"] = min(prices)
+            state["range_high"] = max(prices)
+            state.setdefault("open_buy_orders", {})
+            state.setdefault("open_sell_orders", {})
+
+            save_state(state)
+
+            print(
+                f"[BOOTSTRAP] Range initialized: "
+                f"{state['range_low']:.0f} → {state['range_high']:.0f}"
+            )
+
+            log_event(
+                "BOOTSTRAP_COMPLETE",
+                range_low=state["range_low"],
+                range_high=state["range_high"]
+            )
+
+        else:
+            log_event(
+                "BOOTSTRAP_FAILED",
+                message="No price history available"
+            )
+
+    except Exception as e:
+        log_event(
+            "BOOTSTRAP_ERROR",
+            message=str(e)
+        )
+
+# ----------------------
 # PRICE
 # ----------------------
 
@@ -233,6 +300,8 @@ def order_filled(txid):
     except Exception as e:
         log_event("ORDER_CHECK_EXCEPTION", message=str(e))
         return False
+
+
 
 # ----------------------
 # MAIN LOOP
