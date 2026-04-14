@@ -12,7 +12,7 @@ import time
 import requests
 import krakenex
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 
@@ -93,7 +93,7 @@ state = load_state()
 
 
 def log_event(event):
-    event["timestamp"] = datetime.now(datetime.UTC).isoformat()
+    event["timestamp"] = datetime.now(timezone.utc).isoformat()
 
     with open(LOG_FILE, "a") as f:
         f.write(json.dumps(event) + "\n")
