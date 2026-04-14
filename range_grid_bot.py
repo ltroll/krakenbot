@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 
 # =====================================================
-# CLEAN RANGE GRID BOT (DEDUPED + FIXED + PRODUCTION READY)
+# CLEAN + STABLE RANGE GRID BOT (BASELINE VERSION)
 # =====================================================
-# FIXES INCLUDED:
-# - Removed duplicate functions (single source of truth)
-# - Fixed datetime.utcnow() deprecation warning
-# - Fixed ticker parsing (Kraken + proxy safe)
-# - Fixed env variable usage consistency
-# - Single get_price implementation
+# - Safe Kraken execution wrapper
+# - Verbose structured logging
+# - No missing function dependencies
 # - Stable state handling
-# - Clean logging
-# - Perpetual grid (buy → sell → reset)
+# - Defensive JSON parsing
 # =====================================================
 
 import os
@@ -37,10 +33,6 @@ KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL")
 
-# ----------------------
-# LOAD CONFIG
-# ----------------------
-
 with open(CONFIG_FILE) as f:
     config = json.load(f)
 
@@ -53,7 +45,7 @@ position_size_pct = config["position_size_pct"]
 execution_signal_threshold = config["execution_signal_threshold"]
 
 # ----------------------
-# KRKEN INIT
+# KRAKEN INIT
 # ----------------------
 
 api = krakenex.API()
@@ -62,34 +54,84 @@ api.key = os.getenv("KRAKEN_API_KEY")
 api.secret = os.getenv("KRAKEN_API_SECRET")
 
 pair_info = api.query_public("AssetPairs")["result"]["XXBTZUSD"]
+
 PRICE_DECIMALS = pair_info["pair_decimals"]
 VOLUME_DECIMALS = pair_info["lot_decimals"]
 
 # ----------------------
-# LOGGING
+# LOGGING (SAFE)
 # ----------------------
 
-def log_event(event):
-    event["ts"] = datetime.now(timezone.utc).isoformat()
-    with open(LOG_FILE, "a") as f:
-        f.write(json.dumps(event) + "\n")
+def log_event(event, **kwargs):
+
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event": event,
+        "message": kwargs.pop("message", "")
+    }
+
+    record.update(kwargs)
+
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except:
+        pass
+
+
+def console(msg):
+    print(f"[{datetime.now(timezone.utc).isoformat()}] {msg}")
+
+# ----------------------
+# SAFE KRAKEN WRAPPER
+# ----------------------
+
+def kraken_call(label, fn, *args, **kwargs):
+
+    try:
+        resp = fn(*args, **kwargs)
+
+    except Exception as e:
+        log_event("KRAKEN_EXCEPTION", operation=label, message=str(e))
+        return None
+
+    if not isinstance(resp, dict):
+        log_event("KRAKEN_BAD_RESPONSE", operation=label, response=str(resp))
+        return None
+
+    if resp.get("error"):
+        log_event("KRAKEN_API_ERROR", operation=label, error=resp["error"])
+        return resp
+
+    log_event("KRAKEN_OK", operation=label)
+    return resp
 
 # ----------------------
 # STATE
 # ----------------------
 
 def load_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE) as f:
-            return json.load(f)
 
-    return {
+    default = {
         "open_buy_orders": {},
         "open_sell_orders": {},
         "range_low": None,
         "range_high": None,
-        "execution_signal": 0
+        "execution_signal": 0,
+        "last_range_refresh": None
     }
+
+    if not os.path.exists(STATE_FILE):
+        return default
+
+    with open(STATE_FILE) as f:
+        state = json.load(f)
+
+    for k in default:
+        if k not in state:
+            state[k] = default[k]
+
+    return state
 
 
 def save_state(state):
@@ -99,69 +141,45 @@ def save_state(state):
 state = load_state()
 
 # ----------------------
-# PRICE FETCH (SINGLE SOURCE OF TRUTH)
+# PRICE
 # ----------------------
 
 def get_price():
 
-    if not KRAKEN_TICKER_URL:
-        log_event({"event": "price_error", "error": "Missing KRAKEN_TICKER_URL"})
-        return None
-
     try:
+
         r = requests.get(KRAKEN_TICKER_URL, timeout=5)
         data = r.json()
 
-        # Kraken standard format
         if "result" in data:
             pair = list(data["result"].keys())[0]
             return float(data["result"][pair]["c"][0])
 
-        # fallback proxy format
-        if "price" in data:
-            return float(data["price"])
-
-        log_event({"event": "price_error", "error": f"Bad format: {data}"})
         return None
 
     except Exception as e:
-        log_event({"event": "price_error", "error": str(e)})
+        log_event("PRICE_ERROR", message=str(e))
         return None
 
 # ----------------------
-# SENTIMENT (CACHED)
+# SENTIMENT
 # ----------------------
 
-sentiment_cache = None
-sentiment_cache_time = None
-
-SENTIMENT_REFRESH_SECONDS = 900
-
-
 def get_sentiment():
-    global sentiment_cache, sentiment_cache_time
-
-    now = datetime.now(timezone.utc)
-
-    if sentiment_cache and sentiment_cache_time:
-        if (now - sentiment_cache_time).total_seconds() < SENTIMENT_REFRESH_SECONDS:
-            return sentiment_cache
 
     try:
         r = requests.get(LLM_SIGNAL_URL, timeout=5)
-        sentiment_cache = r.json()
-        sentiment_cache_time = now
-        return sentiment_cache
-
+        return r.json()
     except Exception as e:
-        log_event({"event": "sentiment_error", "error": str(e)})
-        return sentiment_cache
+        log_event("SENTIMENT_ERROR", message=str(e))
+        return None
 
 # ----------------------
-# GRID LOGIC
+# GRID
 # ----------------------
 
 def compute_grid(low, high):
+
     rng = high - low
     step = buy_zone_percentile / max_grid_size
 
@@ -173,11 +191,6 @@ def compute_grid(low, high):
 # ----------------------
 # ORDER HELPERS
 # ----------------------
-
-def order_filled(txid):
-    r = api.query_private("QueryOrders", {"txid": txid})
-    return r["result"][txid]["status"] == "closed"
-
 
 def place_buy(price, volume):
     return api.query_private("AddOrder", {
@@ -198,11 +211,34 @@ def place_sell(price, volume):
         "volume": str(round(volume, VOLUME_DECIMALS))
     })
 
+
+def order_filled(txid):
+
+    try:
+        r = api.query_private("QueryOrders", {"txid": txid})
+
+        if not isinstance(r, dict):
+            return False
+
+        if r.get("error"):
+            log_event("ORDER_CHECK_ERROR", error=r["error"])
+            return False
+
+        result = r.get("result", {})
+        if txid not in result:
+            return False
+
+        return result[txid].get("status") == "closed"
+
+    except Exception as e:
+        log_event("ORDER_CHECK_EXCEPTION", message=str(e))
+        return False
+
 # ----------------------
-# MAIN LOOP (HARDENED)
+# MAIN LOOP
 # ----------------------
 
-print("Bot started (hardened loop)")
+console("Bot started (stable baseline)")
 
 while True:
 
@@ -224,92 +260,57 @@ while True:
         high = state.get("range_high")
 
         # ----------------------
-        # SELL CHECK (SAFE)
+        # SELL CHECK
         # ----------------------
 
         for level, order in list(state["open_buy_orders"].items()):
 
-            try:
+            txid = order.get("txid")
+            if not txid:
+                continue
 
-                if not order_filled(order.get("txid")):
-                    continue
+            if not order_filled(txid):
+                continue
 
-                buy_price = float(level)
+            buy_price = float(level)
 
-                sell_price = buy_price * (
-                    1 + profit_target_pct + round_trip_fee_pct
-                )
+            sell_price = buy_price * (1 + profit_target_pct + round_trip_fee_pct)
 
-                sell_resp = place_sell(
-                    sell_price,
-                    order.get("volume", 0)
-                )
+            sell_resp = kraken_call(
+                "SELL",
+                place_sell,
+                sell_price,
+                order.get("volume", 0)
+            )
 
-                if not isinstance(sell_resp, dict):
-                    log_event(
-                        "SELL_FAILED_BAD_RESPONSE",
-                        response=str(sell_resp),
-                        level=level
-                    )
-                    continue
+            if not sell_resp or sell_resp.get("error"):
+                continue
 
-                if sell_resp.get("error"):
-                    log_event(
-                        "SELL_FAILED_KRAKEN_ERROR",
-                        error=sell_resp["error"],
-                        level=level
-                    )
-                    continue
+            txid = sell_resp.get("result", {}).get("txid", [None])[0]
+            if not txid:
+                continue
 
-                txid = (
-                    sell_resp.get("result", {})
-                    .get("txid", [None])[0]
-                )
+            state["open_sell_orders"][txid] = order
+            del state["open_buy_orders"][level]
 
-                if not txid:
-                    log_event(
-                        "SELL_NO_TXID",
-                        response=sell_resp,
-                        level=level
-                    )
-                    continue
+            save_state(state)
 
-                state["open_sell_orders"][txid] = order
-                del state["open_buy_orders"][level]
-
-                save_state(state)
-
-                log_event(
-                    "TRADE_DECISION",
-                    side="sell",
-                    price=sell_price,
-                    volume=order.get("volume", 0)
-                )
-
-            except Exception as e:
-
-                log_event(
-                    "SELL_LOOP_ERROR",
-                    message=str(e),
-                    level=level
-                )
+            log_event(
+                "TRADE_DECISION",
+                side="sell",
+                price=sell_price,
+                volume=order.get("volume", 0)
+            )
 
         # ----------------------
-        # GRID BUY (SAFE)
+        # GRID BUY
         # ----------------------
 
         if low and high and execution_signal >= execution_signal_threshold:
 
             grid = compute_grid(low, high)
 
-            usd_resp = api.query_private("Balance")
-
-            usd = 0.0
-
-            try:
-                usd = float(usd_resp["result"].get("ZUSD", 0))
-            except:
-                log_event("BALANCE_PARSE_ERROR", response=str(usd_resp))
+            usd = float(api.query_private("Balance")["result"].get("ZUSD", 0))
 
             for level in grid:
 
@@ -326,68 +327,37 @@ while True:
                 if volume < 0.00005:
                     continue
 
-                try:
+                buy_resp = kraken_call(
+                    "BUY",
+                    place_buy,
+                    level,
+                    volume
+                )
 
-                    buy_resp = place_buy(level, volume)
+                if not buy_resp or buy_resp.get("error"):
+                    continue
 
-                    if not isinstance(buy_resp, dict):
-                        log_event(
-                            "BUY_FAILED_BAD_RESPONSE",
-                            response=str(buy_resp),
-                            level=level
-                        )
-                        continue
+                txid = buy_resp.get("result", {}).get("txid", [None])[0]
+                if not txid:
+                    continue
 
-                    if buy_resp.get("error"):
-                        log_event(
-                            "BUY_FAILED_KRAKEN_ERROR",
-                            error=buy_resp["error"],
-                            level=level
-                        )
-                        continue
+                state["open_buy_orders"][key] = {
+                    "txid": txid,
+                    "volume": volume
+                }
 
-                    txid = (
-                        buy_resp.get("result", {})
-                        .get("txid", [None])[0]
-                    )
+                save_state(state)
 
-                    if not txid:
-                        log_event(
-                            "BUY_NO_TXID",
-                            response=buy_resp,
-                            level=level
-                        )
-                        continue
-
-                    state["open_buy_orders"][key] = {
-                        "txid": txid,
-                        "volume": volume
-                    }
-
-                    save_state(state)
-
-                    log_event(
-                        "TRADE_DECISION",
-                        side="buy",
-                        price=level,
-                        volume=volume
-                    )
-
-                except Exception as e:
-
-                    log_event(
-                        "BUY_LOOP_ERROR",
-                        message=str(e),
-                        level=level
-                    )
+                log_event(
+                    "TRADE_DECISION",
+                    side="buy",
+                    price=level,
+                    volume=volume
+                )
 
         time.sleep(120)
 
     except Exception as e:
 
-        log_event(
-            "LOOP_ERROR",
-            message=str(e)
-        )
-
+        log_event("LOOP_ERROR", message=str(e))
         time.sleep(120)
