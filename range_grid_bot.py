@@ -1,12 +1,9 @@
-# RANGE GRID BOT – DROP-IN UPGRADE VERSION
+# RANGE GRID BOT – DROP-IN UPGRADE VERSION (PATCHED PRICE FETCH FIX)
 # -------------------------------------------------
-# This version adds:
-# 1. Sentiment caching (15-minute refresh window)
-# 2. Safe execution throttling (2-minute loop)
-# 3. Smarter state persistence
-# 4. Cleaner logging
-# 5. Configurable timing controls
-# 6. Backward compatibility with existing config files
+# FIX INCLUDED:
+# Resolves loop_error: 'result'
+# Adds safer ticker parsing + fallback handling
+# Compatible with ScreenPi proxy OR native Kraken endpoint
 # -------------------------------------------------
 
 import os
@@ -15,7 +12,7 @@ import time
 import requests
 import krakenex
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 
@@ -103,17 +100,44 @@ def log_event(event):
 
 
 # ==========================
-# PRICE FETCH
+# PRICE FETCH (PATCHED)
 # ==========================
 
 
 def get_price():
-    response = requests.get(KRAKEN_API_URL)
-    data = response.json()
 
-    pair = list(data["result"].keys())[0]
+    try:
 
-    return float(data["result"][pair]["c"][0])
+        response = requests.get(KRAKEN_API_URL, timeout=5)
+        data = response.json()
+
+        # ScreenPi proxy format
+        if "result" in data:
+
+            pair = list(data["result"].keys())[0]
+            return float(data["result"][pair]["c"][0])
+
+        # direct simplified format support
+        if "price" in data:
+            return float(data["price"])
+
+        # fallback detection
+        if isinstance(data, dict):
+            for key in data:
+                if isinstance(data[key], dict) and "c" in data[key]:
+                    return float(data[key]["c"][0])
+
+        raise Exception("Unexpected ticker format")
+
+
+    except Exception as e:
+
+        log_event({
+            "event": "price_fetch_error",
+            "error": str(e)
+        })
+
+        return None
 
 
 # ==========================
@@ -122,25 +146,35 @@ def get_price():
 
 
 def get_sentiment():
+
     global sentiment_cache
     global sentiment_cache_time
 
     now = datetime.utcnow()
 
     if sentiment_cache:
+
         age = (now - sentiment_cache_time).total_seconds()
 
         if age < SENTIMENT_REFRESH_SECONDS:
             return sentiment_cache
 
     try:
+
         response = requests.get(LLM_SIGNAL_URL, timeout=5)
+
         sentiment_cache = response.json()
         sentiment_cache_time = now
 
         return sentiment_cache
 
-    except Exception:
+    except Exception as e:
+
+        log_event({
+            "event": "sentiment_fetch_error",
+            "error": str(e)
+        })
+
         return sentiment_cache
 
 
@@ -150,10 +184,14 @@ def get_sentiment():
 
 
 def maybe_execute_trade(price, sentiment):
-    threshold = config["execution_signal_threshold"]
+
+    if price is None:
+        return
 
     if sentiment is None:
         return
+
+    threshold = config["execution_signal_threshold"]
 
     signal_strength = sentiment.get("signal", 0)
 
@@ -172,7 +210,10 @@ def maybe_execute_trade(price, sentiment):
 # ==========================
 
 
-print("Bot started successfully")
+log_event({
+    "event": "BOT_START",
+    "message": "Kraken Grid Sentiment Trader Starting"
+})
 
 
 while True:
@@ -184,11 +225,13 @@ while True:
 
         maybe_execute_trade(price, sentiment)
 
+
     except Exception as e:
 
         log_event({
             "event": "loop_error",
             "error": str(e)
         })
+
 
     time.sleep(LOOP_INTERVAL_SECONDS)
