@@ -27,6 +27,7 @@ KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL")
 PRICE_LOG_URL = os.getenv("PRICE_LOG_URL")
+GRID_ANCHOR = os.getenv("GRID_ANCHOR")
 
 with open(CONFIG_FILE, encoding="utf-8") as f:
     config = json.load(f)
@@ -38,6 +39,7 @@ profit_target_pct = config["profit_target_pct"]
 round_trip_fee_pct = config["round_trip_fee_pct"]
 position_size_pct = config["position_size_pct"]
 execution_signal_threshold = config["execution_signal_threshold"]
+grid_anchor = (GRID_ANCHOR or config.get("grid_anchor", "low")).strip().lower()
 
 # ----------------------
 # KRAKEN INIT
@@ -404,9 +406,7 @@ def main():
 
             # GRID BUY
             if low and high and execution_signal >= execution_signal_threshold:
-                anchor = config.get("grid_anchor", "low")
-
-                if anchor == "mean":
+                if grid_anchor == "mean":
                     grid = compute_grid(low, high, mean)
                 else:
                     grid = compute_grid(low, high, low)
