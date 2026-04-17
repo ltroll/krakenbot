@@ -105,15 +105,16 @@ def kraken_call(label, fn, *args, **kwargs):
 # ----------------------
 
 def load_state():
-
-    default = {
+    
+    default: {
         "open_buy_orders": {},
         "open_sell_orders": {},
         "range_low": None,
         "range_high": None,
+        "range_mean": None,
         "last_range_refresh": None
-    }
-
+     }
+    
     if not os.path.exists(STATE_FILE):
         return default
 
@@ -223,11 +224,13 @@ def refresh_range():
 
             state["range_low"] = min(prices)
             state["range_high"] = max(prices)
+            state["range_mean"] = sum(prices) / len(prices)
             state["last_range_refresh"] = datetime.now(timezone.utc).isoformat()
 
             save_state(state)
 
-            console(f"Range refreshed: {state['range_low']} → {state['range_high']}")
+            console(f"Range refreshed: "f"{state['range_low']} → {state['range_high']} | "f"mean={round(state['range_mean'], 2)}"
+)
 
     except Exception as e:
         log_event("RANGE_REFRESH_ERROR", message=str(e))
@@ -236,13 +239,17 @@ def refresh_range():
 # GRID
 # ----------------------
 
-def compute_grid(low, high):
+def compute_grid(low, high, mean):
 
     rng = high - low
+
     step = buy_zone_percentile / max_grid_size
 
     return sorted(
-        [low + (rng * (buy_zone_percentile - step * i)) for i in range(max_grid_size)],
+        [
+            mean - (rng * (step * (i + 1)))
+            for i in range(max_grid_size)
+        ],
         reverse=True
     )
 
@@ -361,8 +368,15 @@ def main():
             # GRID BUY
 
             if low and high and execution_signal >= execution_signal_threshold:
+                
+                mean = state["range_mean"]
 
-                grid = compute_grid(low, high)
+                anchor = config.get("grid_anchor", "low")
+
+                if anchor == "mean":
+                    grid = compute_grid(low, high, mean)
+                else:
+                    grid = compute_grid(low, high)
 
                 bal = kraken_call("BALANCE", api.query_private, "Balance")
 
