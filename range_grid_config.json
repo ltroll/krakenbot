@@ -10,7 +10,7 @@
 
   "position_size_pct": 0.15,
 
-  "execution_signal_threshold": 0.05,
+  "execution_signal_threshold": -2.00,
 
   "price_check_interval_seconds": 60,
   "range_refresh_interval_minutes": 15
