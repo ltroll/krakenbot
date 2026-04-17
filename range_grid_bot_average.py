@@ -106,7 +106,7 @@ def kraken_call(label, fn, *args, **kwargs):
 
 def load_state():
     
-    default: {
+    default = {
         "open_buy_orders": {},
         "open_sell_orders": {},
         "range_low": None,
