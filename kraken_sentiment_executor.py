@@ -13,45 +13,70 @@ import json
 import base64
 import hashlib
 import hmac
+import math
 import requests
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
+REQUEST_TIMEOUT = 10
+PAIR_INFO_CACHE = None
+EXECUTION_BUFFER_PCT = 0.0025
+
+API_KEY = None
+API_SECRET = None
+API_URL = None
+PAIR = "XXBTZUSD"
+SIGNAL_FILE = None
+CONFIG_FILE = None
+TRADE_LOG = "sentiment_trade_log.txt"
+
+BASE_ALLOCATION = None
+MAX_STEP = None
+MIN_TRADE_USD = None
+CONF_THRESHOLD = None
+DRY_RUN = False
+MIN_ALLOC = 0.05
+MAX_ALLOC = 0.95
+MIN_ALLOC_DELTA = 0.02
 
 #########################################
 # LOAD ENVIRONMENT
 #########################################
 
-load_dotenv()
+def initialize_runtime():
 
-API_KEY = os.getenv("KRAKEN_API_KEY")
-API_SECRET = os.getenv("KRAKEN_API_SECRET")
-API_URL = os.getenv("KRAKEN_API_URL")
-TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
-PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
+    global API_KEY, API_SECRET, API_URL, PAIR
+    global SIGNAL_FILE, CONFIG_FILE, TRADE_LOG, PAIR_INFO_CACHE
+    global BASE_ALLOCATION, MAX_STEP, MIN_TRADE_USD
+    global CONF_THRESHOLD, DRY_RUN, MIN_ALLOC
+    global MAX_ALLOC, MIN_ALLOC_DELTA, EXECUTION_BUFFER_PCT
 
-SIGNAL_FILE = os.getenv("SIGNAL_FILE")
-CONFIG_FILE = os.getenv("BOT_CONFIG_FILE")
-TRADE_LOG = os.getenv("TRADE_LOG_FILE", "sentiment_trade_log.txt")
+    load_dotenv()
 
+    API_KEY = os.getenv("KRAKEN_API_KEY")
+    API_SECRET = os.getenv("KRAKEN_API_SECRET")
+    API_URL = os.getenv("KRAKEN_API_URL")
+    PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
+    SIGNAL_FILE = os.getenv("SIGNAL_FILE")
+    CONFIG_FILE = os.getenv("BOT_CONFIG_FILE")
+    TRADE_LOG = os.getenv("TRADE_LOG_FILE", "sentiment_trade_log.txt")
+    PAIR_INFO_CACHE = None
 
-#########################################
-# LOAD CONFIG
-#########################################
+    if not CONFIG_FILE:
+        raise RuntimeError("Missing BOT_CONFIG_FILE in .env")
 
-with open(CONFIG_FILE) as f:
-    CONFIG = json.load(f)
+    with open(CONFIG_FILE) as f:
+        config = json.load(f)
 
-BASE_ALLOCATION = CONFIG["base_btc_allocation"]
-MAX_STEP = CONFIG["max_adjustment_per_cycle"]
-MIN_TRADE_USD = CONFIG["min_trade_usd"]
-CONF_THRESHOLD = CONFIG["confidence_threshold"]
-DRY_RUN = CONFIG.get("dry_run", False)
-
-MIN_ALLOC = CONFIG.get("min_total_allocation", 0.05)
-MAX_ALLOC = CONFIG.get("max_total_allocation", 0.95)
-
-MIN_ALLOC_DELTA = CONFIG.get("min_allocation_change", 0.02)
+    BASE_ALLOCATION = config["base_btc_allocation"]
+    MAX_STEP = config["max_adjustment_per_cycle"]
+    MIN_TRADE_USD = config["min_trade_usd"]
+    CONF_THRESHOLD = config["confidence_threshold"]
+    DRY_RUN = config.get("dry_run", False)
+    MIN_ALLOC = config.get("min_total_allocation", 0.05)
+    MAX_ALLOC = config.get("max_total_allocation", 0.95)
+    MIN_ALLOC_DELTA = config.get("min_allocation_change", 0.02)
+    EXECUTION_BUFFER_PCT = config.get("execution_buffer_pct", 0.0025)
 
 
 #########################################
@@ -132,7 +157,8 @@ def kraken_private(endpoint, data):
         "API-Sign": kraken_signature(endpoint, data)
     }
 
-    r = requests.post(url, headers=headers, data=data)
+    r = requests.post(url, headers=headers, data=data, timeout=REQUEST_TIMEOUT)
+    r.raise_for_status()
 
     result = r.json()
 
@@ -149,14 +175,46 @@ def kraken_private(endpoint, data):
 
 def get_price():
 
-    r = requests.get(TICKER_URL)
+    url = API_URL.rstrip("/") + "/0/public/Ticker"
+    r = requests.get(url, params={"pair": PAIR}, timeout=REQUEST_TIMEOUT)
+    r.raise_for_status()
 
     data = r.json()
 
     if data.get("error"):
         raise RuntimeError(data["error"])
 
-    return float(list(data["result"].values())[0]["c"][0])
+    ticker = next(iter(data["result"].values()), None)
+
+    if not ticker:
+        raise RuntimeError(f"Ticker data not found for {PAIR}")
+
+    return float(ticker["c"][0])
+
+
+def get_pair_info():
+
+    global PAIR_INFO_CACHE
+
+    if PAIR_INFO_CACHE:
+        return PAIR_INFO_CACHE
+
+    url = API_URL.rstrip("/") + "/0/public/AssetPairs"
+    r = requests.get(url, params={"pair": PAIR}, timeout=REQUEST_TIMEOUT)
+    r.raise_for_status()
+
+    data = r.json()
+
+    if data.get("error"):
+        raise RuntimeError(data["error"])
+
+    pair_info = next(iter(data["result"].values()), None)
+
+    if not pair_info:
+        raise RuntimeError(f"Pair metadata not found for {PAIR}")
+
+    PAIR_INFO_CACHE = pair_info
+    return PAIR_INFO_CACHE
 
 
 #########################################
@@ -167,12 +225,28 @@ def get_price():
 def get_balances():
 
     result = kraken_private("/0/private/Balance", {})
+    pair_info = get_pair_info()
+    base_asset = pair_info["base"]
+    quote_asset = pair_info["quote"]
 
-    btc = float(result["result"].get("XXBT", 0))
+    base_balance = float(result["result"].get(base_asset, 0))
+    quote_balance = float(result["result"].get(quote_asset, 0))
 
-    usd = float(result["result"].get("ZUSD", 0))
+    return base_balance, quote_balance
 
-    return btc, usd
+
+def round_volume(volume):
+
+    pair_info = get_pair_info()
+    lot_decimals = int(pair_info.get("lot_decimals", 8))
+    factor = 10 ** lot_decimals
+    return math.floor(volume * factor) / factor
+
+
+def get_min_order_volume():
+
+    pair_info = get_pair_info()
+    return float(pair_info.get("ordermin") or 0)
 
 
 #########################################
@@ -186,12 +260,7 @@ def load_signal():
     if signal_url:
 
         r = requests.get(signal_url, timeout=5)
-
-        if r.status_code != 200:
-
-            raise RuntimeError(
-                f"Signal fetch failed: {r.status_code}"
-            )
+        r.raise_for_status()
 
         signal = r.json()
 
@@ -262,6 +331,7 @@ def place_market(side, volume):
 
 def execute():
 
+    initialize_runtime()
     log("BOT_START", "Sentiment Executor V3")
 
     raw_signal, confidence = load_signal()
@@ -281,13 +351,17 @@ def execute():
         f"raw={raw_signal} smooth={smoothed_signal} conf={confidence}"
     )
 
-    btc, usd = get_balances()
+    base_balance, quote_balance = get_balances()
 
     price = get_price()
 
-    portfolio_value = btc * price + usd
+    portfolio_value = base_balance * price + quote_balance
 
-    allocation_current = (btc * price) / portfolio_value
+    if portfolio_value <= 0:
+        log("SKIP_EMPTY_PORTFOLIO", portfolio_value)
+        return
+
+    allocation_current = (base_balance * price) / portfolio_value
 
     allocation_target = BASE_ALLOCATION + weighted_signal
 
@@ -295,7 +369,8 @@ def execute():
 
     allocation_target = min(MAX_ALLOC, allocation_target)
 
-    delta = allocation_target - allocation_current
+    raw_delta = allocation_target - allocation_current
+    delta = max(-MAX_STEP, min(MAX_STEP, raw_delta))
 
     if abs(delta) < MIN_ALLOC_DELTA:
 
@@ -303,9 +378,8 @@ def execute():
 
         return
 
-    delta = max(-MAX_STEP, min(MAX_STEP, delta))
-
     trade_value = abs(delta) * portfolio_value
+    trade_value *= max(0, 1 - EXECUTION_BUFFER_PCT)
 
     if trade_value < MIN_TRADE_USD:
 
@@ -315,11 +389,20 @@ def execute():
 
     side = "buy" if delta > 0 else "sell"
 
-    volume = trade_value / price
+    volume = round_volume(trade_value / price)
+    min_volume = get_min_order_volume()
+
+    if volume <= 0:
+        log("SKIP_ZERO_VOLUME", volume)
+        return
+
+    if volume < min_volume:
+        log("SKIP_MIN_VOLUME", f"{volume} < {min_volume}")
+        return
 
     log(
         "TRADE_DECISION",
-        f"side={side} volume={volume} current={allocation_current} target={allocation_target}"
+        f"side={side} volume={volume} current={allocation_current} target={allocation_target} raw_delta={raw_delta} delta={delta}"
     )
 
     place_market(side, volume)
