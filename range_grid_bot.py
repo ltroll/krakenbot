@@ -151,7 +151,50 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
-state = load_state()
+def normalize_state(state):
+    normalized_buy_orders = {}
+    normalized_sell_orders = {}
+
+    for level, order in state["open_buy_orders"].items():
+        if isinstance(order, dict):
+            normalized_buy_orders[level] = {
+                "txid": order.get("txid"),
+                "volume": order.get("volume"),
+                "price": order.get("price", float(level)),
+                "placed_at": order.get("placed_at")
+            }
+        else:
+            normalized_buy_orders[level] = {
+                "txid": None,
+                "volume": None,
+                "price": float(level),
+                "placed_at": None
+            }
+
+    for txid, order in state["open_sell_orders"].items():
+        if isinstance(order, dict) and "level" in order:
+            normalized_sell_orders[txid] = {
+                "level": order.get("level"),
+                "volume": order.get("volume"),
+                "buy_price": order.get("buy_price"),
+                "sell_price": order.get("sell_price"),
+                "placed_at": order.get("placed_at")
+            }
+        else:
+            normalized_sell_orders[txid] = {
+                "level": None,
+                "volume": order.get("volume"),
+                "buy_price": None,
+                "sell_price": None,
+                "placed_at": None
+            }
+
+    state["open_buy_orders"] = normalized_buy_orders
+    state["open_sell_orders"] = normalized_sell_orders
+    return state
+
+
+state = normalize_state(load_state())
 
 
 # ----------------------
@@ -308,6 +351,24 @@ def order_filled(txid):
         return False
 
 
+def get_order_status(txid):
+    try:
+        r = api.query_private("QueryOrders", {"txid": txid})
+
+        if r.get("error"):
+            log_event(
+                "ORDER_STATUS_ERROR",
+                txid=txid,
+                error=r["error"]
+            )
+            return None
+
+        return r["result"][txid]["status"]
+    except Exception as e:
+        log_event("ORDER_STATUS_ERROR", txid=txid, message=str(e))
+        return None
+
+
 # ----------------------
 # MAIN LOOP
 # ----------------------
@@ -324,6 +385,8 @@ def main():
     while True:
         try:
             now = datetime.now(timezone.utc)
+            cycle_id = now.isoformat()
+            actions = []
 
             price = get_price()
             sentiment = get_sentiment()
@@ -334,7 +397,8 @@ def main():
                     side="hold",
                     price=price,
                     execution_signal=sentiment,
-                    reason="missing_price_or_signal"
+                    reason="missing_price_or_signal",
+                    cycle_id=cycle_id
                 )
                 time.sleep(120)
                 continue
@@ -360,20 +424,114 @@ def main():
             high = state["range_high"]
             mean = state["range_mean"]
 
+            # SELL EXIT CHECK
+            for txid, order in list(state["open_sell_orders"].items()):
+                status = get_order_status(txid)
+
+                if status is None:
+                    continue
+
+                if status == "closed":
+                    buy_price = order.get("buy_price")
+                    sell_price = order.get("sell_price")
+                    volume = order.get("volume", 0)
+                    gross_pnl = None
+                    estimated_net_pnl = None
+
+                    if (
+                        buy_price is not None
+                        and sell_price is not None
+                        and volume is not None
+                    ):
+                        gross_pnl = volume * (sell_price - buy_price)
+                        estimated_net_pnl = gross_pnl - (
+                            volume * buy_price * round_trip_fee_pct
+                        )
+
+                    sell_level = order.get("level")
+                    del state["open_sell_orders"][txid]
+                    save_state(state)
+                    actions.append("sell_filled")
+
+                    log_and_console(
+                        "SELL_ORDER_FILLED",
+                        message=f"SELL filled for level {sell_level}",
+                        cycle_id=cycle_id,
+                        txid=txid,
+                        level=sell_level,
+                        volume=volume,
+                        buy_price=buy_price,
+                        sell_price=sell_price,
+                        gross_pnl=gross_pnl,
+                        estimated_net_pnl=estimated_net_pnl
+                    )
+                    continue
+
+                if status in ("canceled", "expired"):
+                    sell_level = order.get("level")
+                    del state["open_sell_orders"][txid]
+                    save_state(state)
+                    actions.append(f"sell_{status}")
+
+                    log_and_console(
+                        "ORDER_" + status.upper(),
+                        message=f"SELL order {status} for level {sell_level}",
+                        cycle_id=cycle_id,
+                        txid=txid,
+                        side="sell",
+                        level=sell_level,
+                        volume=order.get("volume"),
+                        buy_price=order.get("buy_price"),
+                        sell_price=order.get("sell_price")
+                    )
+
             # SELL CHECK
             for level, order in list(state["open_buy_orders"].items()):
                 txid = order["txid"]
+                status = get_order_status(txid)
 
-                if not order_filled(txid):
+                if status is None:
+                    continue
+
+                if status in ("canceled", "expired"):
+                    del state["open_buy_orders"][level]
+                    save_state(state)
+                    actions.append(f"buy_{status}")
+
+                    log_and_console(
+                        "ORDER_" + status.upper(),
+                        message=f"BUY order {status} for level {level}",
+                        cycle_id=cycle_id,
+                        txid=txid,
+                        side="buy",
+                        level=level,
+                        volume=order.get("volume"),
+                        price=order.get("price", float(level))
+                    )
+                    continue
+
+                if status != "closed":
                     continue
 
                 buy_price = float(level)
                 sell_price = buy_price * (
                     1 + profit_target_pct + round_trip_fee_pct
                 )
+                actions.append("buy_filled")
+
+                log_and_console(
+                    "BUY_ORDER_FILLED",
+                    message=f"BUY filled @ {round(buy_price, PRICE_DECIMALS)}",
+                    cycle_id=cycle_id,
+                    txid=txid,
+                    level=level,
+                    volume=round(order["volume"], VOLUME_DECIMALS),
+                    price=round(buy_price, PRICE_DECIMALS)
+                )
 
                 log_event(
                     "TRADE_DECISION",
+                    cycle_id=cycle_id,
                     side="sell",
                     volume=round(order["volume"], VOLUME_DECIMALS),
                     price=round(sell_price, PRICE_DECIMALS),
@@ -388,16 +546,38 @@ def main():
                 )
 
                 if not sell_resp or sell_resp.get("error"):
+                    actions.append("sell_rejected")
+                    log_event(
+                        "ORDER_REJECTED",
+                        cycle_id=cycle_id,
+                        side="sell",
+                        level=level,
+                        volume=round(order["volume"], VOLUME_DECIMALS),
+                        buy_price=round(buy_price, PRICE_DECIMALS),
+                        sell_price=round(sell_price, PRICE_DECIMALS),
+                        error=(
+                            None if not sell_resp
+                            else sell_resp.get("error")
+                        )
+                    )
                     continue
 
                 txid = sell_resp["result"]["txid"][0]
-                state["open_sell_orders"][txid] = order
+                state["open_sell_orders"][txid] = {
+                    "level": level,
+                    "volume": order["volume"],
+                    "buy_price": buy_price,
+                    "sell_price": sell_price,
+                    "placed_at": cycle_id
+                }
                 del state["open_buy_orders"][level]
                 save_state(state)
+                actions.append("sell_placed")
 
                 log_and_console(
                     "SELL_ORDER_PLACED",
                     message=f"SELL placed @ {round(sell_price, PRICE_DECIMALS)}",
+                    cycle_id=cycle_id,
                     txid=txid,
                     volume=round(order["volume"], VOLUME_DECIMALS),
                     price=round(sell_price, PRICE_DECIMALS),
@@ -416,32 +596,53 @@ def main():
                 if not bal:
                     log_event(
                         "TRADE_DECISION",
+                        cycle_id=cycle_id,
                         side="hold",
                         price=price,
                         execution_signal=execution_signal,
                         reason="balance_fetch_failed"
                     )
+                    actions.append("hold_balance_fetch_failed")
                     time.sleep(120)
                     continue
 
                 usd = float(bal["result"].get("ZUSD", 0))
+                reserved_sell_levels = {
+                    sell_order.get("level")
+                    for sell_order in state["open_sell_orders"].values()
+                }
 
                 for level in grid:
                     key = str(level)
+                    skip_reason = None
 
                     if key in state["open_buy_orders"]:
-                        continue
-
-                    if price > level:
-                        continue
+                        skip_reason = "open_buy_order"
+                    elif key in reserved_sell_levels:
+                        skip_reason = "open_sell_order"
+                    elif price > level:
+                        skip_reason = "price_above_level"
 
                     volume = (usd * position_size_pct) / level
 
-                    if volume < 0.00005:
+                    if skip_reason is None and volume < 0.00005:
+                        skip_reason = "below_min_volume"
+
+                    if skip_reason is not None:
+                        log_event(
+                            "GRID_LEVEL_EVAL",
+                            cycle_id=cycle_id,
+                            level=round(level, PRICE_DECIMALS),
+                            market_price=price,
+                            execution_signal=execution_signal,
+                            usd_balance=usd,
+                            reason=skip_reason
+                        )
                         continue
 
                     log_event(
                         "TRADE_DECISION",
+                        cycle_id=cycle_id,
                         side="buy",
                         volume=round(volume, VOLUME_DECIMALS),
                         price=round(level, PRICE_DECIMALS),
@@ -459,18 +660,35 @@ def main():
                     )
 
                     if not buy_resp or buy_resp.get("error"):
+                        actions.append("buy_rejected")
+                        log_event(
+                            "ORDER_REJECTED",
+                            cycle_id=cycle_id,
+                            side="buy",
+                            level=round(level, PRICE_DECIMALS),
+                            volume=round(volume, VOLUME_DECIMALS),
+                            execution_signal=execution_signal,
+                            error=(
+                                None if not buy_resp
+                                else buy_resp.get("error")
+                            )
+                        )
                         continue
 
                     txid = buy_resp["result"]["txid"][0]
                     state["open_buy_orders"][key] = {
                         "txid": txid,
-                        "volume": volume
+                        "volume": volume,
+                        "price": level,
+                        "placed_at": cycle_id
                     }
                     save_state(state)
+                    actions.append("buy_placed")
 
                     log_and_console(
                         "BUY_ORDER_PLACED",
                         message=f"BUY placed @ {round(level, PRICE_DECIMALS)}",
+                        cycle_id=cycle_id,
                         txid=txid,
                         volume=round(volume, VOLUME_DECIMALS),
                         price=round(level, PRICE_DECIMALS)
@@ -484,8 +702,30 @@ def main():
                     threshold=execution_signal_threshold,
                     range_low=low,
                     range_high=high,
-                    reason="signal_below_threshold_or_range_unavailable"
+                    reason="signal_below_threshold_or_range_unavailable",
+                    cycle_id=cycle_id
                 )
+                actions.append("hold")
+
+            log_event(
+                "CYCLE_SUMMARY",
+                cycle_id=cycle_id,
+                price=price,
+                execution_signal=execution_signal,
+                threshold=execution_signal_threshold,
+                range_low=low,
+                range_high=high,
+                range_mean=mean,
+                grid_anchor=grid_anchor,
+                grid_levels=(
+                    [round(level, PRICE_DECIMALS) for level in grid]
+                    if low and high and execution_signal >= execution_signal_threshold
+                    else []
+                ),
+                open_buy_count=len(state["open_buy_orders"]),
+                open_sell_count=len(state["open_sell_orders"]),
+                actions=actions or ["no_action"]
+            )
 
             time.sleep(120)
         except Exception as e:
