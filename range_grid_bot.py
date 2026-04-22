@@ -33,7 +33,6 @@ with open(CONFIG_FILE, encoding="utf-8") as f:
     config = json.load(f)
 
 range_window_hours = config["range_window_hours"]
-buy_zone_percentile = config["buy_zone_percentile"]
 max_grid_size = config["max_grid_size"]
 profit_target_pct = config["profit_target_pct"]
 round_trip_fee_pct = config["round_trip_fee_pct"]
@@ -303,12 +302,11 @@ def refresh_range():
 # ----------------------
 
 def compute_grid(low, high, mean):
-    rng = high - low
-    step = buy_zone_percentile / max_grid_size
+    step_pct = profit_target_pct / 2
 
     return sorted(
         [
-            mean - (rng * (step * (i + 1)))
+            mean * (1 - (step_pct * (i + 1)))
             for i in range(max_grid_size)
         ],
         reverse=True
