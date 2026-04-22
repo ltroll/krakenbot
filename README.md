@@ -8,14 +8,14 @@ The project is built around a simple pattern:
 3. Bot scripts fetch price and sentiment inputs, make trade decisions, and write state and logs locally.
 4. Optional support tools inspect logs, summarize trades, track PnL, or render dashboards.
 
-The active bot you have been working on is [`range_grid_bot_average.py`](/C:/Users/bgert/krakenbot/range_grid_bot_average.py).
+The active bot you have been working on is [`range_grid_bot.py`](/C:/Users/bgert/krakenbot/range_grid_bot.py).
 
 ## Repository layout
 
 Core bot files:
 
-- [`range_grid_bot_average.py`](/C:/Users/bgert/krakenbot/range_grid_bot_average.py): range/grid bot using recent BTC price range plus external sentiment.
-- [`range_grid_bot.py`](/C:/Users/bgert/krakenbot/range_grid_bot.py): related grid bot variant.
+- [`range_grid_bot.py`](/C:/Users/bgert/krakenbot/range_grid_bot.py): the current range/grid bot using recent BTC price range plus external sentiment.
+- [`range_grid_bot_average.py`](/C:/Users/bgert/krakenbot/range_grid_bot_average.py): test/alternate range-grid variant.
 - [`kraken_sentiment_executor.py`](/C:/Users/bgert/krakenbot/kraken_sentiment_executor.py): allocation-style sentiment trader.
 - [`kraken_bot.py`](/C:/Users/bgert/krakenbot/kraken_bot.py): older/general Kraken bot logic.
 - [`account_value_usd.py`](/C:/Users/bgert/krakenbot/account_value_usd.py): account value helper.
@@ -92,7 +92,7 @@ DISCORD_WEB_HOOK=
 
 Notes:
 
-- `BOT_CONFIG_FILE` now works with `range_grid_bot_average.py`, so config file selection can come from `.env`.
+- `BOT_CONFIG_FILE` works with the range-grid bots, so config file selection can come from `.env`.
 - `GRID_ANCHOR` now also works from `.env`, which makes bot iteration easier than editing JSON every time.
 - If `GRID_ANCHOR` is not set, the bot falls back to the value in `range_grid_config.json`, then to `"low"`.
 
@@ -115,6 +115,7 @@ The bot loads the file pointed to by `PRICE_LOG_URL`, filters rows to the last `
 - `range_low`
 - `range_high`
 - `range_mean`
+- `range_median`
 
 These are persisted into bot state after each refresh.
 
@@ -132,7 +133,7 @@ The sentiment file is expected to look like this:
 
 For the active range-grid bot, only `execution_signal` is currently used directly.
 
-## How `range_grid_bot_average.py` works
+## How `range_grid_bot.py` works
 
 This bot combines a recent BTC trading range with a sentiment gate.
 
@@ -173,11 +174,18 @@ Grid levels are derived from:
 `GRID_ANCHOR` controls that anchor:
 
 - `GRID_ANCHOR=mean`: levels are centered off the recent average price
+- `GRID_ANCHOR=median`: levels are centered off the recent median price
 - `GRID_ANCHOR=low`: levels are built downward from the observed low
 
 This is useful because anchor placement strongly affects how aggressively the bot averages into a range.
 
-For the current mean-reversion buy model, the buy ladder is centered off the recent mean. The first rung sits at half of `profit_target_pct` below the mean, and each additional rung steps another half-target lower.
+For the current mean-reversion buy model, the buy ladder is centered off the selected anchor. The first rung sits at half of `profit_target_pct` below that anchor, and each additional rung steps another half-target lower.
+
+Why `median` can help:
+
+- it is less sensitive to short-lived spikes or wicks in the recent price log
+- it can keep the ladder closer to where price spent most of its time
+- it may produce steadier entries than `mean` in noisy markets
 
 ### Strategy values from `range_grid_config.json`
 
@@ -201,6 +209,7 @@ State includes:
 - `range_low`
 - `range_high`
 - `range_mean`
+- `range_median`
 - `last_range_refresh`
 
 ## Logging
@@ -219,9 +228,17 @@ The active range-grid bot currently writes events such as:
 - `SIGNAL_UPDATE`
 - `RANGE_REFRESH`
 - `RANGE_REFRESH_SKIPPED`
+- `GRID_LEVEL_EVAL`
 - `TRADE_DECISION`
+- `BUY_ORDER_FILLED`
 - `BUY_ORDER_PLACED`
+- `SELL_ORDER_FILLED`
 - `SELL_ORDER_PLACED`
+- `ORDER_REJECTED`
+- `ORDER_CANCELED`
+- `ORDER_EXPIRED`
+- `ORDER_STATUS_ERROR`
+- `CYCLE_SUMMARY`
 - `PRICE_ERROR`
 - `SENTIMENT_ERROR`
 - `RANGE_REFRESH_ERROR`
@@ -297,7 +314,7 @@ pip install -r .\requirements.txt
 Run the active range-grid bot:
 
 ```powershell
-python .\range_grid_bot_average.py
+python .\range_grid_bot.py
 ```
 
 Run the dashboard:
@@ -341,7 +358,8 @@ If the grid feels too aggressive or too passive:
 - adjust `position_size_pct`
 - adjust `max_grid_size`
 - change `GRID_ANCHOR` in `.env`
-- adjust `profit_target_pct` to move the buy ladder closer to or farther from the mean
+- adjust `profit_target_pct` to move the buy ladder closer to or farther from the anchor
+- try `GRID_ANCHOR=median` if `mean` is being pushed around by noisy price spikes
 
 ## Current assumptions
 

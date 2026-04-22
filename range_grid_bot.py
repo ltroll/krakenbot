@@ -6,6 +6,7 @@
 
 import json
 import os
+import statistics
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -129,6 +130,7 @@ def load_state():
         "range_low": None,
         "range_high": None,
         "range_mean": None,
+        "range_median": None,
         "last_range_refresh": None
     }
 
@@ -272,6 +274,7 @@ def refresh_range():
             state["range_low"] = min(prices)
             state["range_high"] = max(prices)
             state["range_mean"] = sum(prices) / len(prices)
+            state["range_median"] = statistics.median(prices)
             state["last_range_refresh"] = datetime.now(timezone.utc).isoformat()
 
             save_state(state)
@@ -281,11 +284,13 @@ def refresh_range():
                 message=(
                     f"low={state['range_low']} "
                     f"high={state['range_high']} "
-                    f"mean={round(state['range_mean'], 2)}"
+                    f"mean={round(state['range_mean'], 2)} "
+                    f"median={round(state['range_median'], 2)}"
                 ),
                 range_low=state["range_low"],
                 range_high=state["range_high"],
                 range_mean=state["range_mean"],
+                range_median=state["range_median"],
                 samples=len(prices)
             )
         else:
@@ -421,6 +426,7 @@ def main():
             low = state["range_low"]
             high = state["range_high"]
             mean = state["range_mean"]
+            median = state["range_median"]
 
             # SELL EXIT CHECK
             for txid, order in list(state["open_sell_orders"].items()):
@@ -586,6 +592,8 @@ def main():
             if low and high and execution_signal >= execution_signal_threshold:
                 if grid_anchor == "mean":
                     grid = compute_grid(low, high, mean)
+                elif grid_anchor == "median" and median is not None:
+                    grid = compute_grid(low, high, median)
                 else:
                     grid = compute_grid(low, high, low)
 
@@ -647,7 +655,8 @@ def main():
                         execution_signal=execution_signal,
                         range_low=low,
                         range_high=high,
-                        range_mean=mean
+                        range_mean=mean,
+                        range_median=median
                     )
 
                     buy_resp = kraken_call(
@@ -700,6 +709,8 @@ def main():
                     threshold=execution_signal_threshold,
                     range_low=low,
                     range_high=high,
+                    range_mean=mean,
+                    range_median=median,
                     reason="signal_below_threshold_or_range_unavailable",
                     cycle_id=cycle_id
                 )
@@ -714,6 +725,7 @@ def main():
                 range_low=low,
                 range_high=high,
                 range_mean=mean,
+                range_median=median,
                 grid_anchor=grid_anchor,
                 grid_levels=(
                     [round(level, PRICE_DECIMALS) for level in grid]
