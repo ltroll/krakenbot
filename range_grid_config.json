@@ -1,16 +1,15 @@
 {
   "range_window_hours": 24,
 
-  "max_grid_size": 3,
+  "max_grid_size": 4,
 
-  "profit_target_pct": 0.012,
+  "profit_target_pct": 0.009,
   "round_trip_fee_pct": 0.0032,
 
-  "position_size_pct": 0.15,
+  "position_size_pct": 0.10,
 
   "execution_signal_threshold": -2.00,
 
   "price_check_interval_seconds": 60,
   "range_refresh_interval_minutes": 15
-  
 }
