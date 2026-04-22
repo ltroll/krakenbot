@@ -30,15 +30,36 @@ KRAKEN_API_URL = os.getenv("KRAKEN_API_URL")
 PRICE_LOG_URL = os.getenv("PRICE_LOG_URL")
 GRID_ANCHOR = os.getenv("GRID_ANCHOR")
 
+
+def env_int(name, default):
+    value = os.getenv(name)
+    return default if value is None else int(value)
+
+
+def env_float(name, default):
+    value = os.getenv(name)
+    return default if value is None else float(value)
+
 with open(CONFIG_FILE, encoding="utf-8") as f:
     config = json.load(f)
 
-range_window_hours = config["range_window_hours"]
-max_grid_size = config["max_grid_size"]
-profit_target_pct = config["profit_target_pct"]
-round_trip_fee_pct = config["round_trip_fee_pct"]
-position_size_pct = config["position_size_pct"]
-execution_signal_threshold = config["execution_signal_threshold"]
+range_window_hours = env_int("RANGE_WINDOW_HOURS", config["range_window_hours"])
+max_grid_size = env_int("MAX_GRID_SIZE", config["max_grid_size"])
+profit_target_pct = env_float("PROFIT_TARGET_PCT", config["profit_target_pct"])
+round_trip_fee_pct = env_float("ROUND_TRIP_FEE_PCT", config["round_trip_fee_pct"])
+position_size_pct = env_float("POSITION_SIZE_PCT", config["position_size_pct"])
+execution_signal_threshold = env_float(
+    "EXECUTION_SIGNAL_THRESHOLD",
+    config["execution_signal_threshold"]
+)
+price_check_interval_seconds = env_int(
+    "PRICE_CHECK_INTERVAL_SECONDS",
+    config.get("price_check_interval_seconds", 120)
+)
+range_refresh_interval_minutes = env_int(
+    "RANGE_REFRESH_INTERVAL_MINUTES",
+    config.get("range_refresh_interval_minutes", 60)
+)
 grid_anchor = (GRID_ANCHOR or config.get("grid_anchor", "low")).strip().lower()
 
 # ----------------------
@@ -382,7 +403,16 @@ def main():
         message="Range Grid Average bot starting",
         config_file=CONFIG_FILE,
         state_file=STATE_FILE,
-        log_file=LOG_FILE
+        log_file=LOG_FILE,
+        grid_anchor=grid_anchor,
+        range_window_hours=range_window_hours,
+        max_grid_size=max_grid_size,
+        profit_target_pct=profit_target_pct,
+        round_trip_fee_pct=round_trip_fee_pct,
+        position_size_pct=position_size_pct,
+        execution_signal_threshold=execution_signal_threshold,
+        price_check_interval_seconds=price_check_interval_seconds,
+        range_refresh_interval_minutes=range_refresh_interval_minutes
     )
 
     while True:
@@ -403,7 +433,7 @@ def main():
                     reason="missing_price_or_signal",
                     cycle_id=cycle_id
                 )
-                time.sleep(120)
+                time.sleep(price_check_interval_seconds)
                 continue
 
             execution_signal = sentiment
@@ -419,7 +449,7 @@ def main():
                 state["last_range_refresh"] is None
                 or (
                     now - datetime.fromisoformat(state["last_range_refresh"])
-                ).total_seconds() > 3600
+                ).total_seconds() > (range_refresh_interval_minutes * 60)
             ):
                 refresh_range()
 
@@ -609,7 +639,7 @@ def main():
                         reason="balance_fetch_failed"
                     )
                     actions.append("hold_balance_fetch_failed")
-                    time.sleep(120)
+                    time.sleep(price_check_interval_seconds)
                     continue
 
                 usd = float(bal["result"].get("ZUSD", 0))
@@ -737,11 +767,11 @@ def main():
                 actions=actions or ["no_action"]
             )
 
-            time.sleep(120)
+            time.sleep(price_check_interval_seconds)
         except Exception as e:
             log_event("LOOP_ERROR", message=str(e))
             console(f"Loop error: {e}")
-            time.sleep(120)
+            time.sleep(price_check_interval_seconds)
 
 
 if __name__ == "__main__":
