@@ -152,7 +152,15 @@ def load_state():
         "range_high": None,
         "range_mean": None,
         "range_median": None,
-        "last_range_refresh": None
+        "last_range_refresh": None,
+        "stats": {
+            "buy_orders_placed": 0,
+            "buy_orders_filled": 0,
+            "sell_orders_placed": 0,
+            "sell_orders_filled": 0,
+            "realized_gross_pnl": 0.0,
+            "realized_estimated_net_pnl": 0.0
+        }
     }
 
     if not os.path.exists(STATE_FILE):
@@ -176,6 +184,17 @@ def save_state(state):
 def normalize_state(state):
     normalized_buy_orders = {}
     normalized_sell_orders = {}
+    state.setdefault("stats", {})
+
+    for key, default_value in {
+        "buy_orders_placed": 0,
+        "buy_orders_filled": 0,
+        "sell_orders_placed": 0,
+        "sell_orders_filled": 0,
+        "realized_gross_pnl": 0.0,
+        "realized_estimated_net_pnl": 0.0
+    }.items():
+        state["stats"].setdefault(key, default_value)
 
     for level, order in state["open_buy_orders"].items():
         if isinstance(order, dict):
@@ -214,6 +233,16 @@ def normalize_state(state):
     state["open_buy_orders"] = normalized_buy_orders
     state["open_sell_orders"] = normalized_sell_orders
     return state
+
+
+def parse_iso8601(value):
+    if not value:
+        return None
+
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
 
 
 state = normalize_state(load_state())
