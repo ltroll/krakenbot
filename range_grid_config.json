@@ -4,9 +4,16 @@
   "max_grid_size": 4,
 
   "profit_target_pct": 0.009,
+  "entry_step_pct": 0.0045,
   "round_trip_fee_pct": 0.0032,
 
   "position_size_pct": 0.10,
+  "max_open_sell_orders": 12,
+  "max_inventory_usd": 750,
+  "aging_start_minutes": 360,
+  "aging_step_minutes": 180,
+  "aging_profit_reduction_pct": 0.001,
+  "min_profit_target_pct": 0.0045,
 
   "execution_signal_threshold": -2.00,
 
