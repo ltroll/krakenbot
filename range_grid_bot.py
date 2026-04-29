@@ -56,6 +56,10 @@ execution_signal_threshold = env_float(
     "EXECUTION_SIGNAL_THRESHOLD",
     config["execution_signal_threshold"]
 )
+llm_target_proximity_pct = env_float(
+    "LLM_TARGET_PROXIMITY_PCT",
+    config.get("llm_target_proximity_pct", entry_step_pct)
+)
 price_check_interval_seconds = env_int(
     "PRICE_CHECK_INTERVAL_SECONDS",
     config.get("price_check_interval_seconds", 120)
@@ -230,14 +234,16 @@ def normalize_state(state):
                 "txid": order.get("txid"),
                 "volume": order.get("volume"),
                 "price": order.get("price", float(level)),
-                "placed_at": order.get("placed_at")
+                "placed_at": order.get("placed_at"),
+                "sell_pct_override": order.get("sell_pct_override")
             }
         else:
             normalized_buy_orders[level] = {
                 "txid": None,
                 "volume": None,
                 "price": float(level),
-                "placed_at": None
+                "placed_at": None,
+                "sell_pct_override": None
             }
 
     for txid, order in state["open_sell_orders"].items():
@@ -247,7 +253,8 @@ def normalize_state(state):
                 "volume": order.get("volume"),
                 "buy_price": order.get("buy_price"),
                 "sell_price": order.get("sell_price"),
-                "placed_at": order.get("placed_at")
+                "placed_at": order.get("placed_at"),
+                "sell_pct_override": order.get("sell_pct_override")
             }
         else:
             normalized_sell_orders[txid] = {
@@ -255,7 +262,8 @@ def normalize_state(state):
                 "volume": order.get("volume"),
                 "buy_price": None,
                 "sell_price": None,
-                "placed_at": None
+                "placed_at": None,
+                "sell_pct_override": None
             }
 
     state["open_buy_orders"] = normalized_buy_orders
@@ -307,9 +315,19 @@ def get_sentiment():
         data = r.json()
 
         if isinstance(data, dict):
-            return data.get("execution_signal", 0)
+            target_prices = data.get("target_prices", [])
+            if not isinstance(target_prices, list):
+                target_prices = []
 
-        return float(data)
+            return {
+                "execution_signal": data.get("execution_signal", 0),
+                "target_prices": target_prices
+            }
+
+        return {
+            "execution_signal": float(data),
+            "target_prices": []
+        }
     except Exception as e:
         log_event("SENTIMENT_ERROR", message=str(e))
         return None
@@ -461,20 +479,72 @@ def compute_sell_target_price(buy_price, profit_target_override=None):
     return buy_price * (1 + profit_target + round_trip_fee_pct)
 
 
-def compute_adjusted_profit_target(age_minutes):
+def normalize_llm_sell_pct(raw_sell_pct):
+    if raw_sell_pct is None:
+        return None
+
+    try:
+        return float(raw_sell_pct) / 100.0
+    except Exception:
+        return None
+
+
+def select_llm_target(target_prices, current_price):
+    valid_targets = []
+
+    for target in target_prices:
+        if not isinstance(target, dict):
+            continue
+
+        buy_price = target.get("buy_price")
+        sell_pct = normalize_llm_sell_pct(target.get("sell_pct"))
+
+        if buy_price is None or sell_pct is None:
+            continue
+
+        try:
+            buy_price = float(buy_price)
+        except Exception:
+            continue
+
+        distance_pct = abs(current_price - buy_price) / buy_price
+        if distance_pct > llm_target_proximity_pct:
+            continue
+
+        valid_targets.append(
+            {
+                "buy_price": buy_price,
+                "sell_pct": sell_pct,
+                "distance_pct": distance_pct
+            }
+        )
+
+    if not valid_targets:
+        return None
+
+    return min(valid_targets, key=lambda target: target["distance_pct"])
+
+
+def compute_adjusted_profit_target(age_minutes, base_profit_target=None):
+    starting_profit_target = (
+        profit_target_pct
+        if base_profit_target is None
+        else base_profit_target
+    )
+
     if (
         age_minutes is None
         or aging_profit_reduction_pct <= 0
         or age_minutes < aging_start_minutes
     ):
-        return profit_target_pct
+        return starting_profit_target
 
     reduction_steps = (
         int((age_minutes - aging_start_minutes) // max(1, aging_step_minutes))
         + 1
     )
     adjusted_profit = (
-        profit_target_pct - reduction_steps * aging_profit_reduction_pct
+        starting_profit_target - reduction_steps * aging_profit_reduction_pct
     )
     return max(min_profit_target_pct, adjusted_profit)
 
@@ -510,6 +580,7 @@ def main():
         round_trip_fee_pct=round_trip_fee_pct,
         position_size_pct=position_size_pct,
         execution_signal_threshold=execution_signal_threshold,
+        llm_target_proximity_pct=llm_target_proximity_pct,
         price_check_interval_seconds=price_check_interval_seconds,
         range_refresh_interval_minutes=range_refresh_interval_minutes,
         max_open_sell_orders=max_open_sell_orders,
@@ -527,26 +598,33 @@ def main():
             actions = []
 
             price = get_price()
-            sentiment = get_sentiment()
+            sentiment_payload = get_sentiment()
 
-            if price is None or sentiment is None:
+            if price is None or sentiment_payload is None:
                 log_event(
                     "TRADE_DECISION",
                     side="hold",
                     price=price,
-                    execution_signal=sentiment,
+                    execution_signal=None,
                     reason="missing_price_or_signal",
                     cycle_id=cycle_id
                 )
                 time.sleep(price_check_interval_seconds)
                 continue
 
-            execution_signal = sentiment
+            execution_signal = sentiment_payload["execution_signal"]
+            target_prices = sentiment_payload.get("target_prices", [])
+            llm_target = select_llm_target(target_prices, price)
 
             log_event(
                 "SIGNAL_UPDATE",
                 execution_signal=execution_signal,
-                price=price
+                price=price,
+                llm_target_count=len(target_prices),
+                active_llm_target=(
+                    None if llm_target is None
+                    else round(llm_target["buy_price"], PRICE_DECIMALS)
+                )
             )
             console(f"Price: {price} | Signal: {execution_signal}")
 
@@ -624,6 +702,7 @@ def main():
                 if status == "open":
                     buy_price = order.get("buy_price")
                     current_sell_price = order.get("sell_price")
+                    sell_pct_override = order.get("sell_pct_override")
                     placed_at = parse_iso8601(order.get("placed_at"))
                     age_minutes = None
                     if placed_at is not None:
@@ -632,7 +711,8 @@ def main():
                         ).total_seconds() / 60
 
                     adjusted_profit_target = compute_adjusted_profit_target(
-                        age_minutes
+                        age_minutes,
+                        sell_pct_override
                     )
 
                     if buy_price is None or current_sell_price is None:
@@ -700,7 +780,8 @@ def main():
                         "volume": order["volume"],
                         "buy_price": buy_price,
                         "sell_price": adjusted_sell_price,
-                        "placed_at": order.get("placed_at")
+                        "placed_at": order.get("placed_at"),
+                        "sell_pct_override": sell_pct_override
                     }
                     del state["open_sell_orders"][txid]
                     save_state(state)
@@ -722,7 +803,8 @@ def main():
                         old_sell_price=current_sell_price,
                         sell_price=adjusted_sell_price,
                         age_minutes=age_minutes,
-                        adjusted_profit_target_pct=adjusted_profit_target
+                        adjusted_profit_target_pct=adjusted_profit_target,
+                        sell_pct_override=sell_pct_override
                     )
                     continue
 
@@ -773,7 +855,11 @@ def main():
                     continue
 
                 buy_price = float(level)
-                sell_price = compute_sell_target_price(buy_price)
+                sell_pct_override = order.get("sell_pct_override")
+                sell_price = compute_sell_target_price(
+                    buy_price,
+                    sell_pct_override
+                )
                 placed_at = parse_iso8601(order.get("placed_at"))
                 hold_minutes = None
                 if placed_at is not None:
@@ -792,7 +878,8 @@ def main():
                     level=level,
                     volume=round(order["volume"], VOLUME_DECIMALS),
                     price=round(buy_price, PRICE_DECIMALS),
-                    hold_minutes=hold_minutes
+                    hold_minutes=hold_minutes,
+                    sell_pct_override=sell_pct_override
                 )
 
                 log_event(
@@ -801,7 +888,8 @@ def main():
                     side="sell",
                     volume=round(order["volume"], VOLUME_DECIMALS),
                     price=round(sell_price, PRICE_DECIMALS),
-                    buy_price=round(buy_price, PRICE_DECIMALS)
+                    buy_price=round(buy_price, PRICE_DECIMALS),
+                    sell_pct_override=sell_pct_override
                 )
 
                 sell_resp = kraken_call(
@@ -821,6 +909,7 @@ def main():
                         volume=round(order["volume"], VOLUME_DECIMALS),
                         buy_price=round(buy_price, PRICE_DECIMALS),
                         sell_price=round(sell_price, PRICE_DECIMALS),
+                        sell_pct_override=sell_pct_override,
                         error=(
                             None if not sell_resp
                             else sell_resp.get("error")
@@ -831,11 +920,12 @@ def main():
                 txid = sell_resp["result"]["txid"][0]
                 state["open_sell_orders"][txid] = {
                     "level": level,
-                    "volume": order["volume"],
-                    "buy_price": buy_price,
-                    "sell_price": sell_price,
-                    "placed_at": cycle_id
-                }
+                        "volume": order["volume"],
+                        "buy_price": buy_price,
+                        "sell_price": sell_price,
+                        "placed_at": cycle_id,
+                        "sell_pct_override": sell_pct_override
+                    }
                 del state["open_buy_orders"][level]
                 state["stats"]["sell_orders_placed"] += 1
                 save_state(state)
@@ -846,19 +936,30 @@ def main():
                     message=f"SELL placed @ {round(sell_price, PRICE_DECIMALS)}",
                     cycle_id=cycle_id,
                     txid=txid,
-                    volume=round(order["volume"], VOLUME_DECIMALS),
-                    price=round(sell_price, PRICE_DECIMALS),
-                    buy_price=round(buy_price, PRICE_DECIMALS)
-                )
+                        volume=round(order["volume"], VOLUME_DECIMALS),
+                        price=round(sell_price, PRICE_DECIMALS),
+                        buy_price=round(buy_price, PRICE_DECIMALS),
+                        sell_pct_override=sell_pct_override
+                    )
 
-            # GRID BUY
+            # BUY CANDIDATES
             if low and high and execution_signal >= execution_signal_threshold:
-                if grid_anchor == "mean":
+                if llm_target is not None:
+                    grid = [llm_target["buy_price"]]
+                    active_sell_pct_override = llm_target["sell_pct"]
+                    buy_source = "llm_target"
+                elif grid_anchor == "mean":
                     grid = compute_grid(low, high, mean)
+                    active_sell_pct_override = None
+                    buy_source = "range_grid"
                 elif grid_anchor == "median" and median is not None:
                     grid = compute_grid(low, high, median)
+                    active_sell_pct_override = None
+                    buy_source = "range_grid"
                 else:
                     grid = compute_grid(low, high, low)
+                    active_sell_pct_override = None
+                    buy_source = "range_grid"
 
                 bal = kraken_call("BALANCE", api.query_private, "Balance")
 
@@ -890,7 +991,7 @@ def main():
                         skip_reason = "open_buy_order"
                     elif key in reserved_sell_levels:
                         skip_reason = "open_sell_order"
-                    elif price > level:
+                    elif buy_source != "llm_target" and price > level:
                         skip_reason = "price_above_level"
                     elif len(state["open_sell_orders"]) >= max_open_sell_orders:
                         skip_reason = "max_open_sell_orders"
@@ -920,6 +1021,7 @@ def main():
                             execution_signal=execution_signal,
                             usd_balance=usd,
                             deployed_inventory_usd=deployed_inventory_usd,
+                            buy_source=buy_source,
                             reason=skip_reason
                         )
                         continue
@@ -934,7 +1036,9 @@ def main():
                         range_low=low,
                         range_high=high,
                         range_mean=mean,
-                        range_median=median
+                        range_median=median,
+                        buy_source=buy_source,
+                        sell_pct_override=active_sell_pct_override
                     )
 
                     buy_resp = kraken_call(
@@ -953,6 +1057,8 @@ def main():
                             level=round(level, PRICE_DECIMALS),
                             volume=round(volume, VOLUME_DECIMALS),
                             execution_signal=execution_signal,
+                            buy_source=buy_source,
+                            sell_pct_override=active_sell_pct_override,
                             error=(
                                 None if not buy_resp
                                 else buy_resp.get("error")
@@ -965,7 +1071,8 @@ def main():
                         "txid": txid,
                         "volume": volume,
                         "price": level,
-                        "placed_at": cycle_id
+                        "placed_at": cycle_id,
+                        "sell_pct_override": active_sell_pct_override
                     }
                     state["stats"]["buy_orders_placed"] += 1
                     save_state(state)
@@ -978,7 +1085,9 @@ def main():
                         cycle_id=cycle_id,
                         txid=txid,
                         volume=round(volume, VOLUME_DECIMALS),
-                        price=round(level, PRICE_DECIMALS)
+                        price=round(level, PRICE_DECIMALS),
+                        buy_source=buy_source,
+                        sell_pct_override=active_sell_pct_override
                     )
             else:
                 log_event(
@@ -1007,6 +1116,11 @@ def main():
                 range_mean=mean,
                 range_median=median,
                 grid_anchor=grid_anchor,
+                buy_source=(
+                    "llm_target"
+                    if low and high and execution_signal >= execution_signal_threshold and llm_target is not None
+                    else "range_grid"
+                ),
                 grid_levels=(
                     [round(level, PRICE_DECIMALS) for level in grid]
                     if low and high and execution_signal >= execution_signal_threshold

@@ -179,7 +179,7 @@ Grid levels are derived from:
 
 This is useful because anchor placement strongly affects how aggressively the bot averages into a range.
 
-For the current mean-reversion buy model, the buy ladder is centered off the selected anchor. The first rung sits at half of `profit_target_pct` below that anchor, and each additional rung steps another half-target lower.
+For the current mean-reversion buy model, the buy ladder is centered off the selected anchor. The first rung sits at `entry_step_pct` below that anchor, and each additional rung steps another `entry_step_pct` lower.
 
 Why `median` can help:
 
@@ -193,7 +193,9 @@ Important values in [`range_grid_config.json`](/C:/Users/bgert/krakenbot/range_g
 
 - `range_window_hours`: how much recent history is used for the observed range
 - `max_grid_size`: number of buy levels
-- `profit_target_pct`: sell markup after a filled buy, and the basis for mean-reversion buy spacing
+- `profit_target_pct`: sell markup after a filled buy
+- `entry_step_pct`: spacing between buy levels below the selected anchor
+- `llm_target_proximity_pct`: how close market price must be to an LLM-provided target before the bot will act on it
 - `round_trip_fee_pct`: fee allowance added to sell pricing
 - `position_size_pct`: fraction of available USD allocated per buy level
 - `execution_signal_threshold`: minimum signal required before placing new buys

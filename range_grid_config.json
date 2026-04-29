@@ -3,8 +3,9 @@
 
   "max_grid_size": 4,
 
-  "profit_target_pct": 0.009,
+  "profit_target_pct": 0.010,
   "entry_step_pct": 0.0045,
+  "llm_target_proximity_pct": 0.003,
   "round_trip_fee_pct": 0.0032,
 
   "position_size_pct": 0.10,
@@ -15,7 +16,7 @@
   "aging_profit_reduction_pct": 0.001,
   "min_profit_target_pct": 0.0045,
 
-  "execution_signal_threshold": -2.00,
+  "execution_signal_threshold": 0.00,
 
   "price_check_interval_seconds": 60,
   "range_refresh_interval_minutes": 15
