@@ -321,12 +321,31 @@ def get_sentiment():
 
             return {
                 "execution_signal": data.get("execution_signal", 0),
-                "target_prices": target_prices
+                "target_prices": target_prices,
+                "btc_sentiment": data.get("btc_sentiment"),
+                "regulatory_risk": data.get("regulatory_risk"),
+                "macro_tightening_bias": data.get("macro_tightening_bias"),
+                "confidence": data.get("confidence"),
+                "direction_bias": data.get("direction_bias"),
+                "raw_btc_sentiment": data.get("raw_btc_sentiment"),
+                "raw_regulatory_risk": data.get("raw_regulatory_risk"),
+                "raw_macro_tightening_bias": data.get("raw_macro_tightening_bias"),
+                "raw_confidence": data.get("raw_confidence"),
+                "raw_direction_bias": data.get("raw_direction_bias"),
+                "btc_price": data.get("btc_price"),
+                "fear_greed_index": data.get("fear_greed_index"),
+                "processed_at": data.get("processed_at"),
+                "price_regime": (
+                    data.get("price_regime")
+                    if isinstance(data.get("price_regime"), dict)
+                    else {}
+                )
             }
 
         return {
             "execution_signal": float(data),
-            "target_prices": []
+            "target_prices": [],
+            "price_regime": {}
         }
     except Exception as e:
         log_event("SENTIMENT_ERROR", message=str(e))
@@ -525,6 +544,15 @@ def select_llm_target(target_prices, current_price):
     return min(valid_targets, key=lambda target: target["distance_pct"])
 
 
+def numeric_or_default(value, default):
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
 def compute_adjusted_profit_target(age_minutes, base_profit_target=None):
     starting_profit_target = (
         profit_target_pct
@@ -615,15 +643,27 @@ def main():
             execution_signal = sentiment_payload["execution_signal"]
             target_prices = sentiment_payload.get("target_prices", [])
             llm_target = select_llm_target(target_prices, price)
+            price_regime = sentiment_payload.get("price_regime", {})
 
             log_event(
                 "SIGNAL_UPDATE",
                 execution_signal=execution_signal,
                 price=price,
+                btc_sentiment=sentiment_payload.get("btc_sentiment"),
+                confidence=sentiment_payload.get("confidence"),
+                raw_btc_sentiment=sentiment_payload.get("raw_btc_sentiment"),
+                raw_confidence=sentiment_payload.get("raw_confidence"),
+                direction_bias=sentiment_payload.get("direction_bias"),
+                raw_direction_bias=sentiment_payload.get("raw_direction_bias"),
+                fear_greed_index=sentiment_payload.get("fear_greed_index"),
                 llm_target_count=len(target_prices),
                 active_llm_target=(
                     None if llm_target is None
                     else round(llm_target["buy_price"], PRICE_DECIMALS)
+                ),
+                price_regime_range_position=price_regime.get("range_position_24h"),
+                price_regime_volatility_pct=price_regime.get(
+                    "realized_volatility_24h_pct"
                 )
             )
             console(f"Price: {price} | Signal: {execution_signal}")
@@ -640,6 +680,23 @@ def main():
             high = state["range_high"]
             mean = state["range_mean"]
             median = state["range_median"]
+
+            low = numeric_or_default(
+                price_regime.get("price_low_24h"),
+                low
+            )
+            high = numeric_or_default(
+                price_regime.get("price_high_24h"),
+                high
+            )
+            mean = numeric_or_default(
+                price_regime.get("price_mean_24h"),
+                mean
+            )
+            median = numeric_or_default(
+                price_regime.get("price_median_24h"),
+                median
+            )
 
             # SELL EXIT CHECK
             for txid, order in list(state["open_sell_orders"].items()):
@@ -1101,7 +1158,13 @@ def main():
                     range_mean=mean,
                     range_median=median,
                     reason="signal_below_threshold_or_range_unavailable",
-                    cycle_id=cycle_id
+                    cycle_id=cycle_id,
+                    price_regime_range_position=price_regime.get(
+                        "range_position_24h"
+                    ),
+                    price_regime_volatility_pct=price_regime.get(
+                        "realized_volatility_24h_pct"
+                    )
                 )
                 actions.append("hold")
 
@@ -1115,6 +1178,19 @@ def main():
                 range_high=high,
                 range_mean=mean,
                 range_median=median,
+                price_regime_timestamp=price_regime.get("timestamp"),
+                price_regime_range_position=price_regime.get(
+                    "range_position_24h"
+                ),
+                price_regime_volatility_pct=price_regime.get(
+                    "realized_volatility_24h_pct"
+                ),
+                price_regime_mean_reversion_buy_target=price_regime.get(
+                    "mean_reversion_buy_target"
+                ),
+                price_regime_median_reversion_buy_target=price_regime.get(
+                    "median_reversion_buy_target"
+                ),
                 grid_anchor=grid_anchor,
                 buy_source=(
                     "llm_target"
