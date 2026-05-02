@@ -3,10 +3,12 @@
 import os
 import time
 import base64
+import csv
 import hashlib
 import hmac
 import urllib.parse
 import requests
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 
@@ -17,6 +19,16 @@ API_KEY = os.getenv("KRAKEN_API_KEY")
 API_SECRET = os.getenv("KRAKEN_API_SECRET")
 API_URL = os.getenv("KRAKEN_API_URL")
 TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
+CSV_FILE = os.getenv("ACCOUNT_VALUE_CSV_FILE", "account_value_usd.csv")
+
+CSV_FIELDS = [
+    "timestamp",
+    "usd_balance",
+    "btc_balance",
+    "btc_price_usd",
+    "btc_value_usd",
+    "total_value_usd"
+]
 
 
 def kraken_signature(urlpath, data, secret):
@@ -80,6 +92,25 @@ def get_btc_price():
     return price
 
 
+def append_csv_row(row):
+    """
+    Append an account value snapshot to a local CSV file.
+    """
+    csv_dir = os.path.dirname(CSV_FILE)
+    if csv_dir:
+        os.makedirs(csv_dir, exist_ok=True)
+
+    write_header = not os.path.exists(CSV_FILE) or os.path.getsize(CSV_FILE) == 0
+
+    with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+
+        if write_header:
+            writer.writeheader()
+
+        writer.writerow(row)
+
+
 def main():
     balances = get_balances()
 
@@ -90,6 +121,18 @@ def main():
 
     btc_value_usd = btc_balance * btc_price
     total_value = usd_balance + btc_value_usd
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    append_csv_row(
+        {
+            "timestamp": timestamp,
+            "usd_balance": usd_balance,
+            "btc_balance": btc_balance,
+            "btc_price_usd": btc_price,
+            "btc_value_usd": btc_value_usd,
+            "total_value_usd": total_value
+        }
+    )
 
     print("\n📊 Kraken Account Value Summary")
     print("-----------------------------")
@@ -99,6 +142,7 @@ def main():
     print(f"BTC Value:   ${btc_value_usd:,.2f}")
     print("-----------------------------")
     print(f"💰 Total Value: ${total_value:,.2f}\n")
+    print(f"Recorded snapshot: {CSV_FILE}")
 
 
 if __name__ == "__main__":
