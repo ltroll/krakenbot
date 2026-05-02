@@ -68,6 +68,10 @@ REQUEST_TIMEOUT = env_int(
     "REQUEST_TIMEOUT_SECONDS",
     config.get("request_timeout_seconds", 10)
 )
+KRAKEN_NONCE_RETRIES = env_int(
+    "KRAKEN_NONCE_RETRIES",
+    config.get("kraken_nonce_retries", 2)
+)
 PRICE_CHECK_INTERVAL_SECONDS = env_int(
     "PRICE_CHECK_INTERVAL_SECONDS",
     config.get("price_check_interval_seconds", 60)
@@ -165,7 +169,8 @@ def load_state():
             "dry_run_trades": 0,
             "skips": 0,
             "errors": 0
-        }
+        },
+        "last_nonce": 0
     }
 
     if not os.path.exists(STATE_FILE):
@@ -219,6 +224,15 @@ def require_runtime_config():
         raise RuntimeError("Missing LLM_SIGNAL_URL or SIGNAL_FILE in .env")
 
 
+def next_nonce():
+    wall_nonce = int(time.time() * 1000)
+    last_nonce = int(state.get("last_nonce", 0))
+    nonce = max(wall_nonce, last_nonce + 1)
+    state["last_nonce"] = nonce
+    save_state(state)
+    return str(nonce)
+
+
 def kraken_signature(endpoint, data):
     postdata = "&".join([f"{k}={v}" for k, v in data.items()])
     encoded = (str(data["nonce"]) + postdata).encode()
@@ -234,7 +248,7 @@ def kraken_signature(endpoint, data):
 def kraken_private(endpoint, data):
     url = KRAKEN_API_URL.rstrip("/") + endpoint
     payload = dict(data)
-    payload["nonce"] = str(int(time.time() * 1000))
+    payload["nonce"] = next_nonce()
 
     headers = {
         "API-Key": KRAKEN_API_KEY,
@@ -257,11 +271,31 @@ def kraken_private(endpoint, data):
 
 
 def safe_kraken_private(label, endpoint, data=None):
-    try:
-        return kraken_private(endpoint, data or {})
-    except Exception as e:
-        log_event("KRAKEN_EXCEPTION", operation=label, message=str(e))
-        return None
+    attempts = max(1, KRAKEN_NONCE_RETRIES + 1)
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return kraken_private(endpoint, data or {})
+        except Exception as e:
+            message = str(e)
+            log_event(
+                "KRAKEN_EXCEPTION",
+                operation=label,
+                message=message,
+                attempt=attempt
+            )
+
+            if "Invalid nonce" not in message or attempt >= attempts:
+                return None
+
+            state["last_nonce"] = max(
+                int(state.get("last_nonce", 0)),
+                int(time.time() * 1000)
+            ) + 1000
+            save_state(state)
+            time.sleep(1)
+
+    return None
 
 
 # ----------------------
