@@ -11,6 +11,11 @@
 
   "max_total_allocation": 0.95,
   "min_total_allocation": 0.05,
+  "min_allocation_change": 0.08,
+  "rebalance_cooldown_minutes": 15,
+  "cooldown_override_signal_abs": 0.20,
+  "min_signal_abs_to_trade": 0.03,
+  "negative_signal_buy_block": true,
 
   "dry_run": false
 }

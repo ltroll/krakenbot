@@ -5,6 +5,7 @@
 # =====================================================
 
 import base64
+import csv
 import hashlib
 import hmac
 import json
@@ -25,6 +26,10 @@ load_dotenv()
 CONFIG_FILE = os.getenv("BOT_CONFIG_FILE", "sentiment_bot_config.json")
 STATE_FILE = os.getenv("BOT_STATE_FILE", "sentiment_state.json")
 LOG_FILE = os.getenv("TRADE_LOG_FILE", "sentiment_trade_log.jsonl")
+DECISION_CSV_FILE = os.getenv(
+    "SENTIMENT_DECISION_CSV_FILE",
+    "sentiment_decisions.csv"
+)
 
 KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY")
 KRAKEN_API_SECRET = os.getenv("KRAKEN_API_SECRET")
@@ -113,8 +118,58 @@ EXECUTION_BUFFER_PCT = env_float(
     "EXECUTION_BUFFER_PCT",
     config.get("execution_buffer_pct", 0.0025)
 )
+REBALANCE_COOLDOWN_MINUTES = env_float(
+    "REBALANCE_COOLDOWN_MINUTES",
+    config.get("rebalance_cooldown_minutes", 15)
+)
+COOLDOWN_OVERRIDE_SIGNAL_ABS = env_float(
+    "COOLDOWN_OVERRIDE_SIGNAL_ABS",
+    config.get("cooldown_override_signal_abs", 0.20)
+)
+MIN_SIGNAL_ABS_TO_TRADE = env_float(
+    "MIN_SIGNAL_ABS_TO_TRADE",
+    config.get("min_signal_abs_to_trade", 0.03)
+)
+NEGATIVE_SIGNAL_BUY_BLOCK = env_bool(
+    "NEGATIVE_SIGNAL_BUY_BLOCK",
+    config.get("negative_signal_buy_block", True)
+)
 
 PAIR_INFO_CACHE = None
+
+DECISION_CSV_FIELDS = [
+    "ts",
+    "cycle_id",
+    "event",
+    "side",
+    "reason",
+    "price",
+    "execution_signal",
+    "smoothed_signal",
+    "weighted_signal",
+    "confidence",
+    "volume",
+    "trade_value",
+    "base_balance",
+    "quote_balance",
+    "portfolio_value",
+    "allocation_current",
+    "allocation_target",
+    "raw_delta",
+    "delta",
+    "dry_run",
+    "order_txid",
+    "order_status",
+    "fill_volume",
+    "fill_cost",
+    "fill_fee",
+    "fill_price",
+    "result",
+    "min_signal_abs_to_trade",
+    "elapsed_minutes",
+    "cooldown_minutes",
+    "cooldown_override_signal_abs"
+]
 
 # ----------------------
 # LOGGING
@@ -170,7 +225,9 @@ def load_state():
             "skips": 0,
             "errors": 0
         },
-        "last_nonce": 0
+        "last_nonce": 0,
+        "last_trade_at": None,
+        "trade_history": []
     }
 
     if not os.path.exists(STATE_FILE):
@@ -189,6 +246,8 @@ def load_state():
     if not isinstance(state.get("signal_memory"), list):
         state["signal_memory"] = [0, 0]
     state["signal_memory"] = (state["signal_memory"] + [0, 0])[:2]
+    if not isinstance(state.get("trade_history"), list):
+        state["trade_history"] = []
 
     return state
 
@@ -203,6 +262,59 @@ def save_state(state):
 
 
 state = load_state()
+
+
+def parse_iso8601(value):
+    if not value:
+        return None
+
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def append_decision_csv(event, **kwargs):
+    row = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event": event
+    }
+    row.update(kwargs)
+
+    csv_dir = os.path.dirname(DECISION_CSV_FILE)
+    if csv_dir:
+        os.makedirs(csv_dir, exist_ok=True)
+
+    write_header = (
+        not os.path.exists(DECISION_CSV_FILE)
+        or os.path.getsize(DECISION_CSV_FILE) == 0
+    )
+
+    csv_row = {
+        field: row.get(field, "")
+        for field in DECISION_CSV_FIELDS
+    }
+
+    if isinstance(csv_row.get("result"), (dict, list)):
+        csv_row["result"] = json.dumps(csv_row["result"])
+
+    try:
+        with open(DECISION_CSV_FILE, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=DECISION_CSV_FIELDS)
+
+            if write_header:
+                writer.writeheader()
+
+            writer.writerow(csv_row)
+    except Exception as e:
+        log_event("CSV_WRITE_ERROR", message=str(e), file=DECISION_CSV_FILE)
+
+
+def record_trade_history(entry):
+    state.setdefault("trade_history", [])
+    state["trade_history"].append(entry)
+    state["trade_history"] = state["trade_history"][-250:]
+    save_state(state)
 
 # ----------------------
 # SAFE REQUEST HELPERS
@@ -397,6 +509,32 @@ def get_min_order_volume():
     return float(pair_info.get("ordermin") or 0)
 
 
+def query_order(txid):
+    result = safe_kraken_private(
+        "QUERY_ORDER",
+        "/0/private/QueryOrders",
+        {"txid": txid}
+    )
+
+    if not result:
+        return None
+
+    return result.get("result", {}).get(txid)
+
+
+def order_fill_summary(order):
+    if not order:
+        return {}
+
+    return {
+        "order_status": order.get("status"),
+        "fill_volume": order.get("vol_exec"),
+        "fill_cost": order.get("cost"),
+        "fill_fee": order.get("fee"),
+        "fill_price": order.get("price")
+    }
+
+
 # ----------------------
 # SIGNAL
 # ----------------------
@@ -462,7 +600,16 @@ def smooth_signal(current_signal):
 def place_market(side, volume, cycle_id):
     if DRY_RUN:
         state["stats"]["dry_run_trades"] += 1
-        save_state(state)
+        state["last_trade_at"] = datetime.now(timezone.utc).isoformat()
+        record_trade_history(
+            {
+                "ts": state["last_trade_at"],
+                "cycle_id": cycle_id,
+                "dry_run": True,
+                "side": side,
+                "volume": volume
+            }
+        )
         log_and_console(
             "DRY_RUN",
             message=f"{side} {volume}",
@@ -484,16 +631,33 @@ def place_market(side, volume, cycle_id):
     )
 
     if result:
+        txids = result.get("result", {}).get("txid", [])
+        txid = txids[0] if txids else None
+        fill = order_fill_summary(query_order(txid)) if txid else {}
         state["stats"]["trades_executed"] += 1
-        save_state(state)
+        state["last_trade_at"] = datetime.now(timezone.utc).isoformat()
+        record_trade_history(
+            {
+                "ts": state["last_trade_at"],
+                "cycle_id": cycle_id,
+                "dry_run": False,
+                "side": side,
+                "volume": volume,
+                "txid": txid,
+                **fill
+            }
+        )
         log_and_console(
             "TRADE_EXECUTED",
             message=f"{side} {volume}",
             cycle_id=cycle_id,
             side=side,
             volume=volume,
+            txid=txid,
+            **fill,
             result=result.get("result")
         )
+        result["fill"] = fill
 
     return result
 
@@ -513,6 +677,33 @@ def skip_cycle(reason, cycle_id, **kwargs):
         reason=reason,
         **kwargs
     )
+    append_decision_csv(
+        "hold",
+        cycle_id=cycle_id,
+        side="hold",
+        reason=reason,
+        dry_run=DRY_RUN,
+        **kwargs
+    )
+
+
+def cooldown_active(now, weighted_signal):
+    last_trade_at = parse_iso8601(state.get("last_trade_at"))
+    if REBALANCE_COOLDOWN_MINUTES <= 0 or last_trade_at is None:
+        return None
+
+    elapsed_minutes = (now - last_trade_at).total_seconds() / 60
+    if elapsed_minutes >= REBALANCE_COOLDOWN_MINUTES:
+        return None
+
+    if abs(weighted_signal) >= COOLDOWN_OVERRIDE_SIGNAL_ABS:
+        return None
+
+    return {
+        "elapsed_minutes": elapsed_minutes,
+        "cooldown_minutes": REBALANCE_COOLDOWN_MINUTES,
+        "cooldown_override_signal_abs": COOLDOWN_OVERRIDE_SIGNAL_ABS
+    }
 
 
 def run_cycle():
@@ -575,6 +766,19 @@ def run_cycle():
         processed_at=sentiment.get("processed_at")
     )
     console(f"Price: {price} | Signal: {raw_signal} | Confidence: {confidence}")
+
+    if abs(weighted_signal) < MIN_SIGNAL_ABS_TO_TRADE:
+        skip_cycle(
+            "weak_signal",
+            cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            min_signal_abs_to_trade=MIN_SIGNAL_ABS_TO_TRADE
+        )
+        return
 
     balances = get_balances()
     if balances is None:
@@ -639,6 +843,47 @@ def run_cycle():
         return
 
     side = "buy" if delta > 0 else "sell"
+
+    if NEGATIVE_SIGNAL_BUY_BLOCK and side == "buy" and weighted_signal < 0:
+        skip_cycle(
+            "negative_signal_buy_block",
+            cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            base_balance=base_balance,
+            quote_balance=quote_balance,
+            portfolio_value=portfolio_value,
+            allocation_current=allocation_current,
+            allocation_target=allocation_target,
+            raw_delta=raw_delta,
+            delta=delta
+        )
+        return
+
+    cooldown = cooldown_active(now, weighted_signal)
+    if cooldown is not None:
+        skip_cycle(
+            "cooldown",
+            cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            base_balance=base_balance,
+            quote_balance=quote_balance,
+            portfolio_value=portfolio_value,
+            allocation_current=allocation_current,
+            allocation_target=allocation_target,
+            raw_delta=raw_delta,
+            delta=delta,
+            **cooldown
+        )
+        return
+
     volume = round_volume(trade_value / price)
     min_volume = get_min_order_volume()
 
@@ -682,8 +927,56 @@ def run_cycle():
         weighted_signal=weighted_signal,
         confidence=confidence
     )
+    append_decision_csv(
+        "trade_decision",
+        cycle_id=cycle_id,
+        side=side,
+        reason="trade",
+        volume=volume,
+        price=price,
+        trade_value=trade_value,
+        base_balance=base_balance,
+        quote_balance=quote_balance,
+        portfolio_value=portfolio_value,
+        allocation_current=allocation_current,
+        allocation_target=allocation_target,
+        raw_delta=raw_delta,
+        delta=delta,
+        execution_signal=raw_signal,
+        smoothed_signal=smoothed_signal,
+        weighted_signal=weighted_signal,
+        confidence=confidence,
+        dry_run=DRY_RUN
+    )
 
-    place_market(side, volume, cycle_id)
+    result = place_market(side, volume, cycle_id)
+    result_payload = result.get("result") if isinstance(result, dict) else None
+    fill = result.get("fill", {}) if isinstance(result, dict) else {}
+    txids = result_payload.get("txid", []) if isinstance(result_payload, dict) else []
+    append_decision_csv(
+        "trade_executed" if result else "trade_rejected",
+        cycle_id=cycle_id,
+        side=side,
+        reason="dry_run" if DRY_RUN else ("submitted" if result else "rejected"),
+        volume=volume,
+        price=price,
+        trade_value=trade_value,
+        base_balance=base_balance,
+        quote_balance=quote_balance,
+        portfolio_value=portfolio_value,
+        allocation_current=allocation_current,
+        allocation_target=allocation_target,
+        raw_delta=raw_delta,
+        delta=delta,
+        execution_signal=raw_signal,
+        smoothed_signal=smoothed_signal,
+        weighted_signal=weighted_signal,
+        confidence=confidence,
+        dry_run=DRY_RUN,
+        order_txid=txids[0] if txids else "",
+        **fill,
+        result=result_payload or result
+    )
 
     log_event(
         "CYCLE_SUMMARY",
@@ -730,6 +1023,11 @@ def main():
         max_total_allocation=MAX_ALLOC,
         min_allocation_change=MIN_ALLOC_DELTA,
         execution_buffer_pct=EXECUTION_BUFFER_PCT,
+        rebalance_cooldown_minutes=REBALANCE_COOLDOWN_MINUTES,
+        cooldown_override_signal_abs=COOLDOWN_OVERRIDE_SIGNAL_ABS,
+        min_signal_abs_to_trade=MIN_SIGNAL_ABS_TO_TRADE,
+        negative_signal_buy_block=NEGATIVE_SIGNAL_BUY_BLOCK,
+        decision_csv_file=DECISION_CSV_FILE,
         price_check_interval_seconds=PRICE_CHECK_INTERVAL_SECONDS
     )
 
