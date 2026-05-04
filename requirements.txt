@@ -21,7 +21,6 @@ packaging==26.0
 pandas==2.3.3
 pillow==12.1.1
 protobuf==6.33.5
-pyarrow==23.0.1
 pydeck==0.9.1
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
@@ -33,7 +32,6 @@ rpds-py==0.30.0
 sgmllib3k==1.0.0
 six==1.17.0
 smmap==5.0.3
-streamlit==1.55.0
 tenacity==9.1.4
 toml==0.10.2
 tornado==6.5.5
