@@ -175,11 +175,12 @@ Grid levels are derived from:
 
 - `GRID_ANCHOR=mean`: levels are centered off the recent average price
 - `GRID_ANCHOR=median`: levels are centered off the recent median price
+- `GRID_ANCHOR=high`: buys only when market price is within `entry_step_pct` below the observed high
 - `GRID_ANCHOR=low`: levels are built downward from the observed low
 
 This is useful because anchor placement strongly affects how aggressively the bot averages into a range.
 
-For the current mean-reversion buy model, the buy ladder is centered off the selected anchor. The first rung sits at `entry_step_pct` below that anchor, and each additional rung steps another `entry_step_pct` lower.
+For the current mean-reversion buy model, the buy ladder is centered off the selected anchor. The first rung sits at `entry_step_pct` below that anchor, and each additional rung steps another `entry_step_pct` lower. The `high` anchor is intentionally different: it treats `entry_step_pct` as a tight band below the observed high, so with a high of `81000` and `entry_step_pct=0.005`, the bot can buy from `80595` through `81000` but skips prices below that band.
 
 Why `median` can help:
 

@@ -431,6 +431,15 @@ def compute_grid(low, high, mean):
     )
 
 
+def compute_high_anchor_grid(high, price):
+    lower_bound = high * (1 - entry_step_pct)
+
+    if lower_bound <= price <= high:
+        return [price]
+
+    return []
+
+
 # ----------------------
 # ORDER HELPERS
 # ----------------------
@@ -1013,6 +1022,10 @@ def main():
                     grid = compute_grid(low, high, median)
                     active_sell_pct_override = None
                     buy_source = "range_grid"
+                elif grid_anchor == "high":
+                    grid = compute_high_anchor_grid(high, price)
+                    active_sell_pct_override = None
+                    buy_source = "range_high_band"
                 else:
                     grid = compute_grid(low, high, low)
                     active_sell_pct_override = None
@@ -1195,6 +1208,8 @@ def main():
                 buy_source=(
                     "llm_target"
                     if low and high and execution_signal >= execution_signal_threshold and llm_target is not None
+                    else "range_high_band"
+                    if low and high and execution_signal >= execution_signal_threshold and grid_anchor == "high"
                     else "range_grid"
                 ),
                 grid_levels=(
