@@ -112,6 +112,7 @@ MAX_OPEN_SELL_ORDERS=1
 MAX_INVENTORY_USD=250
 PREVENT_BUY_ABOVE_LAST_SELL=true
 BUY_AFTER_SELL_DISCOUNT_PCT=0.0
+HIGH_PRICE_BUY_BLOCK_PCT=0.0005
 ```
 
 Lock down env file permissions because they contain Kraken secrets:

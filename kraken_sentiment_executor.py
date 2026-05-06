@@ -142,6 +142,10 @@ BUY_AFTER_SELL_DISCOUNT_PCT = env_float(
     "BUY_AFTER_SELL_DISCOUNT_PCT",
     config.get("buy_after_sell_discount_pct", 0.0)
 )
+HIGH_PRICE_BUY_BLOCK_PCT = env_float(
+    "HIGH_PRICE_BUY_BLOCK_PCT",
+    config.get("high_price_buy_block_pct", 0.0005)
+)
 
 PAIR_INFO_CACHE = None
 
@@ -179,7 +183,10 @@ DECISION_CSV_FIELDS = [
     "max_rebuy_price",
     "open_sell_count",
     "deployed_inventory_usd",
-    "max_inventory_usd"
+    "max_inventory_usd",
+    "price_high",
+    "high_price_buy_block_pct",
+    "max_high_buy_price"
 ]
 
 # ----------------------
@@ -589,8 +596,13 @@ def normalize_signal(signal):
     if not isinstance(signal, dict):
         return {
             "execution_signal": float(signal),
-            "confidence": 1.0
+            "confidence": 1.0,
+            "price_regime": {}
         }
+
+    price_regime = signal.get("price_regime")
+    if not isinstance(price_regime, dict):
+        price_regime = {}
 
     return {
         "execution_signal": float(signal.get("execution_signal", 0)),
@@ -603,7 +615,8 @@ def normalize_signal(signal):
         "raw_confidence": signal.get("raw_confidence"),
         "raw_direction_bias": signal.get("raw_direction_bias"),
         "fear_greed_index": signal.get("fear_greed_index"),
-        "processed_at": signal.get("processed_at")
+        "processed_at": signal.get("processed_at"),
+        "price_regime": price_regime
     }
 
 
@@ -830,6 +843,15 @@ def cooldown_active(now, weighted_signal):
         "cooldown_minutes": REBALANCE_COOLDOWN_MINUTES,
         "cooldown_override_signal_abs": COOLDOWN_OVERRIDE_SIGNAL_ABS
     }
+
+
+def numeric_or_none(value):
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
 
 
 def current_inventory_usd(current_price):
@@ -1076,6 +1098,25 @@ def run_cycle():
         )
         return
 
+    price_regime = sentiment.get("price_regime", {})
+    price_high = numeric_or_none(price_regime.get("price_high_24h"))
+    if price_high is not None and HIGH_PRICE_BUY_BLOCK_PCT >= 0:
+        max_high_buy_price = price_high * (1 - HIGH_PRICE_BUY_BLOCK_PCT)
+        if price >= max_high_buy_price:
+            skip_cycle(
+                "price_near_regime_high",
+                cycle_id,
+                price=price,
+                execution_signal=raw_signal,
+                smoothed_signal=smoothed_signal,
+                weighted_signal=weighted_signal,
+                confidence=confidence,
+                price_high=price_high,
+                high_price_buy_block_pct=HIGH_PRICE_BUY_BLOCK_PCT,
+                max_high_buy_price=max_high_buy_price
+            )
+            return
+
     cooldown = cooldown_active(now, weighted_signal)
     if cooldown is not None:
         skip_cycle(
@@ -1284,6 +1325,7 @@ def main():
         max_inventory_usd=MAX_INVENTORY_USD,
         prevent_buy_above_last_sell=PREVENT_BUY_ABOVE_LAST_SELL,
         buy_after_sell_discount_pct=BUY_AFTER_SELL_DISCOUNT_PCT,
+        high_price_buy_block_pct=HIGH_PRICE_BUY_BLOCK_PCT,
         decision_csv_file=DECISION_CSV_FILE,
         price_check_interval_seconds=PRICE_CHECK_INTERVAL_SECONDS
     )

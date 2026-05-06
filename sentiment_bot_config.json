@@ -18,6 +18,7 @@
   "max_inventory_usd": 250,
   "prevent_buy_above_last_sell": true,
   "buy_after_sell_discount_pct": 0.0,
+  "high_price_buy_block_pct": 0.0005,
 
   "dry_run": false
 }
