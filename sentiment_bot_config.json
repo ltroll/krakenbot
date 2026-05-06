@@ -1,7 +1,7 @@
 {
-  "base_btc_allocation": 0.50,
-  "max_adjustment_per_cycle": 0.10,
   "min_trade_usd": 30,
+  "position_size_pct": 0.10,
+  "max_trade_usd": 60,
 
   "confidence_threshold": 0.45,
   "confidence_weighting": true,
@@ -9,13 +9,15 @@
   "volatility_dampening": true,
   "volatility_cutoff": 0.0025,
 
-  "max_total_allocation": 0.95,
-  "min_total_allocation": 0.05,
-  "min_allocation_change": 0.08,
   "rebalance_cooldown_minutes": 15,
   "cooldown_override_signal_abs": 0.20,
-  "min_signal_abs_to_trade": 0.03,
-  "negative_signal_buy_block": true,
+  "sentiment_buy_threshold": 0.03,
+  "target_profit_pct": 0.006,
+  "round_trip_fee_pct": 0.0032,
+  "max_open_sell_orders": 1,
+  "max_inventory_usd": 250,
+  "prevent_buy_above_last_sell": true,
+  "buy_after_sell_discount_pct": 0.0,
 
   "dry_run": false
 }

@@ -81,14 +81,6 @@ PRICE_CHECK_INTERVAL_SECONDS = env_int(
     "PRICE_CHECK_INTERVAL_SECONDS",
     config.get("price_check_interval_seconds", 60)
 )
-BASE_ALLOCATION = env_float(
-    "BASE_BTC_ALLOCATION",
-    config.get("base_btc_allocation", 0.50)
-)
-MAX_STEP = env_float(
-    "MAX_ADJUSTMENT_PER_CYCLE",
-    config.get("max_adjustment_per_cycle", 0.10)
-)
 MIN_TRADE_USD = env_float(
     "MIN_TRADE_USD",
     config.get("min_trade_usd", 30)
@@ -102,18 +94,6 @@ CONFIDENCE_WEIGHTING = env_bool(
     config.get("confidence_weighting", True)
 )
 DRY_RUN = env_bool("DRY_RUN", config.get("dry_run", False))
-MIN_ALLOC = env_float(
-    "MIN_TOTAL_ALLOCATION",
-    config.get("min_total_allocation", 0.05)
-)
-MAX_ALLOC = env_float(
-    "MAX_TOTAL_ALLOCATION",
-    config.get("max_total_allocation", 0.95)
-)
-MIN_ALLOC_DELTA = env_float(
-    "MIN_ALLOCATION_CHANGE",
-    config.get("min_allocation_change", 0.02)
-)
 EXECUTION_BUFFER_PCT = env_float(
     "EXECUTION_BUFFER_PCT",
     config.get("execution_buffer_pct", 0.0025)
@@ -126,13 +106,41 @@ COOLDOWN_OVERRIDE_SIGNAL_ABS = env_float(
     "COOLDOWN_OVERRIDE_SIGNAL_ABS",
     config.get("cooldown_override_signal_abs", 0.20)
 )
-MIN_SIGNAL_ABS_TO_TRADE = env_float(
-    "MIN_SIGNAL_ABS_TO_TRADE",
-    config.get("min_signal_abs_to_trade", 0.03)
+SENTIMENT_BUY_THRESHOLD = env_float(
+    "SENTIMENT_BUY_THRESHOLD",
+    config.get("sentiment_buy_threshold", 0.03)
 )
-NEGATIVE_SIGNAL_BUY_BLOCK = env_bool(
-    "NEGATIVE_SIGNAL_BUY_BLOCK",
-    config.get("negative_signal_buy_block", True)
+POSITION_SIZE_PCT = env_float(
+    "POSITION_SIZE_PCT",
+    config.get("position_size_pct", 0.10)
+)
+MAX_TRADE_USD = env_float(
+    "MAX_TRADE_USD",
+    config.get("max_trade_usd", 0)
+)
+TARGET_PROFIT_PCT = env_float(
+    "TARGET_PROFIT_PCT",
+    config.get("target_profit_pct", 0.006)
+)
+ROUND_TRIP_FEE_PCT = env_float(
+    "ROUND_TRIP_FEE_PCT",
+    config.get("round_trip_fee_pct", 0.0032)
+)
+MAX_OPEN_SELL_ORDERS = env_int(
+    "MAX_OPEN_SELL_ORDERS",
+    config.get("max_open_sell_orders", 1)
+)
+MAX_INVENTORY_USD = env_float(
+    "MAX_INVENTORY_USD",
+    config.get("max_inventory_usd", 250)
+)
+PREVENT_BUY_ABOVE_LAST_SELL = env_bool(
+    "PREVENT_BUY_ABOVE_LAST_SELL",
+    config.get("prevent_buy_above_last_sell", True)
+)
+BUY_AFTER_SELL_DISCOUNT_PCT = env_float(
+    "BUY_AFTER_SELL_DISCOUNT_PCT",
+    config.get("buy_after_sell_discount_pct", 0.0)
 )
 
 PAIR_INFO_CACHE = None
@@ -153,10 +161,6 @@ DECISION_CSV_FIELDS = [
     "base_balance",
     "quote_balance",
     "portfolio_value",
-    "allocation_current",
-    "allocation_target",
-    "raw_delta",
-    "delta",
     "dry_run",
     "order_txid",
     "order_status",
@@ -165,10 +169,17 @@ DECISION_CSV_FIELDS = [
     "fill_fee",
     "fill_price",
     "result",
-    "min_signal_abs_to_trade",
     "elapsed_minutes",
     "cooldown_minutes",
-    "cooldown_override_signal_abs"
+    "cooldown_override_signal_abs",
+    "sentiment_buy_threshold",
+    "target_profit_pct",
+    "round_trip_fee_pct",
+    "last_sell_price",
+    "max_rebuy_price",
+    "open_sell_count",
+    "deployed_inventory_usd",
+    "max_inventory_usd"
 ]
 
 # ----------------------
@@ -223,11 +234,19 @@ def load_state():
             "trades_executed": 0,
             "dry_run_trades": 0,
             "skips": 0,
-            "errors": 0
+            "errors": 0,
+            "buy_orders_placed": 0,
+            "buy_orders_filled": 0,
+            "sell_orders_placed": 0,
+            "sell_orders_filled": 0
         },
         "last_nonce": 0,
         "last_trade_at": None,
-        "trade_history": []
+        "trade_history": [],
+        "open_buy_orders": {},
+        "open_sell_orders": {},
+        "last_sell_price": None,
+        "last_sell_at": None
     }
 
     if not os.path.exists(STATE_FILE):
@@ -248,6 +267,10 @@ def load_state():
     state["signal_memory"] = (state["signal_memory"] + [0, 0])[:2]
     if not isinstance(state.get("trade_history"), list):
         state["trade_history"] = []
+    if not isinstance(state.get("open_buy_orders"), dict):
+        state["open_buy_orders"] = {}
+    if not isinstance(state.get("open_sell_orders"), dict):
+        state["open_sell_orders"] = {}
 
     return state
 
@@ -504,6 +527,12 @@ def round_volume(volume):
     return math.floor(volume * factor) / factor
 
 
+def round_price(price):
+    pair_info = get_pair_info()
+    pair_decimals = int(pair_info.get("pair_decimals", 1))
+    return round(price, pair_decimals)
+
+
 def get_min_order_volume():
     pair_info = get_pair_info()
     return float(pair_info.get("ordermin") or 0)
@@ -597,34 +626,64 @@ def smooth_signal(current_signal):
 # ----------------------
 
 
-def place_market(side, volume, cycle_id):
+def fill_values(order, fallback_volume=None, fallback_price=None):
+    if not order:
+        return {
+            "volume": fallback_volume,
+            "price": fallback_price,
+            "cost": None,
+            "fee": None
+        }
+
+    fill_volume = float(order.get("vol_exec") or order.get("vol") or 0)
+    fill_cost = float(order.get("cost") or 0)
+    fill_fee = float(order.get("fee") or 0)
+    fill_price = float(order.get("price") or 0)
+
+    if fill_price <= 0 and fill_cost > 0 and fill_volume > 0:
+        fill_price = fill_cost / fill_volume
+
+    return {
+        "volume": fill_volume or fallback_volume,
+        "price": fill_price or fallback_price,
+        "cost": fill_cost or None,
+        "fee": fill_fee or None
+    }
+
+
+def sell_target_price(buy_price):
+    return buy_price * (1 + TARGET_PROFIT_PCT + ROUND_TRIP_FEE_PCT)
+
+
+def place_market_buy(volume, cycle_id):
     if DRY_RUN:
         state["stats"]["dry_run_trades"] += 1
+        state["stats"]["buy_orders_placed"] += 1
         state["last_trade_at"] = datetime.now(timezone.utc).isoformat()
         record_trade_history(
             {
                 "ts": state["last_trade_at"],
                 "cycle_id": cycle_id,
                 "dry_run": True,
-                "side": side,
+                "side": "buy",
                 "volume": volume
             }
         )
         log_and_console(
-            "DRY_RUN",
-            message=f"{side} {volume}",
+            "DRY_RUN_BUY",
+            message=f"buy {volume}",
             cycle_id=cycle_id,
-            side=side,
+            side="buy",
             volume=volume
         )
         return {"dry_run": True}
 
     result = safe_kraken_private(
-        "ADD_ORDER",
+        "BUY",
         "/0/private/AddOrder",
         {
             "pair": KRAKEN_PAIR,
-            "type": side,
+            "type": "buy",
             "ordertype": "market",
             "volume": volume
         }
@@ -635,29 +694,96 @@ def place_market(side, volume, cycle_id):
         txid = txids[0] if txids else None
         fill = order_fill_summary(query_order(txid)) if txid else {}
         state["stats"]["trades_executed"] += 1
+        state["stats"]["buy_orders_placed"] += 1
         state["last_trade_at"] = datetime.now(timezone.utc).isoformat()
         record_trade_history(
             {
                 "ts": state["last_trade_at"],
                 "cycle_id": cycle_id,
                 "dry_run": False,
-                "side": side,
+                "side": "buy",
                 "volume": volume,
                 "txid": txid,
                 **fill
             }
         )
         log_and_console(
-            "TRADE_EXECUTED",
-            message=f"{side} {volume}",
+            "BUY_ORDER_PLACED",
+            message=f"buy {volume}",
             cycle_id=cycle_id,
-            side=side,
+            side="buy",
             volume=volume,
             txid=txid,
             **fill,
             result=result.get("result")
         )
         result["fill"] = fill
+
+    return result
+
+
+def place_limit_sell(price, volume, cycle_id, buy_txid=None, buy_price=None):
+    sell_price = round_price(price)
+    sell_volume = round_volume(volume)
+
+    if DRY_RUN:
+        log_and_console(
+            "DRY_RUN_SELL",
+            message=f"sell {sell_volume} @ {sell_price}",
+            cycle_id=cycle_id,
+            side="sell",
+            volume=sell_volume,
+            price=sell_price,
+            buy_txid=buy_txid,
+            buy_price=buy_price
+        )
+        return {"dry_run": True}
+
+    result = safe_kraken_private(
+        "SELL",
+        "/0/private/AddOrder",
+        {
+            "pair": KRAKEN_PAIR,
+            "type": "sell",
+            "ordertype": "limit",
+            "price": str(sell_price),
+            "volume": str(sell_volume)
+        }
+    )
+
+    if result:
+        txids = result.get("result", {}).get("txid", [])
+        txid = txids[0] if txids else None
+        if not txid:
+            log_event(
+                "ORDER_REJECTED",
+                cycle_id=cycle_id,
+                side="sell",
+                reason="missing_txid",
+                result=result.get("result")
+            )
+            return result
+
+        state["stats"]["sell_orders_placed"] += 1
+        state["open_sell_orders"][txid] = {
+            "txid": txid,
+            "volume": sell_volume,
+            "buy_price": buy_price,
+            "sell_price": sell_price,
+            "buy_txid": buy_txid,
+            "placed_at": cycle_id
+        }
+        save_state(state)
+        log_and_console(
+            "SELL_ORDER_PLACED",
+            message=f"sell {sell_volume} @ {sell_price}",
+            cycle_id=cycle_id,
+            txid=txid,
+            volume=sell_volume,
+            price=sell_price,
+            buy_price=buy_price,
+            buy_txid=buy_txid
+        )
 
     return result
 
@@ -706,6 +832,176 @@ def cooldown_active(now, weighted_signal):
     }
 
 
+def current_inventory_usd(current_price):
+    open_buy_notional = sum(
+        (order.get("price") or current_price) * (order.get("volume") or 0)
+        for order in state["open_buy_orders"].values()
+    )
+    open_sell_notional = sum(
+        (order.get("buy_price") or current_price) * (order.get("volume") or 0)
+        for order in state["open_sell_orders"].values()
+    )
+    return open_buy_notional + open_sell_notional
+
+
+def place_profit_sell_for_buy(cycle_id, buy_txid, buy_price, volume):
+    target_price = sell_target_price(buy_price)
+    log_event(
+        "TRADE_DECISION",
+        cycle_id=cycle_id,
+        side="sell",
+        reason="profit_target_after_buy_fill",
+        buy_txid=buy_txid,
+        buy_price=buy_price,
+        price=round_price(target_price),
+        volume=round_volume(volume),
+        target_profit_pct=TARGET_PROFIT_PCT,
+        round_trip_fee_pct=ROUND_TRIP_FEE_PCT
+    )
+    append_decision_csv(
+        "trade_decision",
+        cycle_id=cycle_id,
+        side="sell",
+        reason="profit_target_after_buy_fill",
+        price=round_price(target_price),
+        volume=round_volume(volume),
+        dry_run=DRY_RUN,
+        order_txid=buy_txid
+    )
+    return place_limit_sell(
+        target_price,
+        volume,
+        cycle_id,
+        buy_txid=buy_txid,
+        buy_price=buy_price
+    )
+
+
+def process_open_buy_orders(cycle_id):
+    for txid, order in list(state["open_buy_orders"].items()):
+        status = query_order(txid)
+        if status is None:
+            continue
+
+        order_status = status.get("status")
+        if order_status == "closed":
+            fill = fill_values(
+                status,
+                fallback_volume=order.get("volume"),
+                fallback_price=order.get("price")
+            )
+            state["stats"]["buy_orders_filled"] += 1
+            del state["open_buy_orders"][txid]
+            save_state(state)
+            log_and_console(
+                "BUY_ORDER_FILLED",
+                message=f"buy filled @ {round_price(fill['price'])}",
+                cycle_id=cycle_id,
+                txid=txid,
+                volume=fill["volume"],
+                price=fill["price"],
+                cost=fill["cost"],
+                fee=fill["fee"]
+            )
+            place_profit_sell_for_buy(
+                cycle_id,
+                txid,
+                fill["price"],
+                fill["volume"]
+            )
+        elif order_status in ("canceled", "expired"):
+            del state["open_buy_orders"][txid]
+            save_state(state)
+            log_and_console(
+                "ORDER_" + order_status.upper(),
+                message=f"buy order {order_status}",
+                cycle_id=cycle_id,
+                txid=txid,
+                side="buy"
+            )
+
+
+def process_open_sell_orders(cycle_id):
+    for txid, order in list(state["open_sell_orders"].items()):
+        status = query_order(txid)
+        if status is None:
+            continue
+
+        order_status = status.get("status")
+        if order_status == "closed":
+            fill = fill_values(
+                status,
+                fallback_volume=order.get("volume"),
+                fallback_price=order.get("sell_price")
+            )
+            state["stats"]["sell_orders_filled"] += 1
+            state["last_sell_price"] = fill["price"] or order.get("sell_price")
+            state["last_sell_at"] = cycle_id
+            del state["open_sell_orders"][txid]
+            save_state(state)
+            log_and_console(
+                "SELL_ORDER_FILLED",
+                message=f"sell filled @ {round_price(state['last_sell_price'])}",
+                cycle_id=cycle_id,
+                txid=txid,
+                volume=fill["volume"],
+                price=state["last_sell_price"],
+                cost=fill["cost"],
+                fee=fill["fee"],
+                buy_price=order.get("buy_price")
+            )
+        elif order_status in ("canceled", "expired"):
+            del state["open_sell_orders"][txid]
+            save_state(state)
+            log_and_console(
+                "ORDER_" + order_status.upper(),
+                message=f"sell order {order_status}",
+                cycle_id=cycle_id,
+                txid=txid,
+                side="sell"
+            )
+
+
+def maybe_handle_submitted_buy(result, cycle_id, volume, price):
+    if DRY_RUN:
+        state["stats"]["buy_orders_filled"] += 1
+        save_state(state)
+        place_profit_sell_for_buy(
+            cycle_id,
+            "dry_run_buy",
+            price,
+            volume
+        )
+        return
+
+    if not result:
+        return
+
+    result_payload = result.get("result", {})
+    txids = result_payload.get("txid", [])
+    txid = txids[0] if txids else None
+    fill = result.get("fill", {})
+
+    fill_volume = float(fill.get("fill_volume") or 0)
+    fill_price = float(fill.get("fill_price") or 0)
+    order_status = fill.get("order_status")
+
+    if txid and order_status == "closed" and fill_volume > 0 and fill_price > 0:
+        state["stats"]["buy_orders_filled"] += 1
+        save_state(state)
+        place_profit_sell_for_buy(cycle_id, txid, fill_price, fill_volume)
+        return
+
+    if txid:
+        state["open_buy_orders"][txid] = {
+            "txid": txid,
+            "volume": volume,
+            "price": price,
+            "placed_at": cycle_id
+        }
+        save_state(state)
+
+
 def run_cycle():
     now = datetime.now(timezone.utc)
     cycle_id = now.isoformat()
@@ -713,41 +1009,28 @@ def run_cycle():
     state["stats"]["cycles"] += 1
     save_state(state)
 
+    price = get_price()
+    if price is None:
+        skip_cycle("missing_price", cycle_id)
+        return
+
+    process_open_buy_orders(cycle_id)
+    process_open_sell_orders(cycle_id)
+
     signal = load_signal()
     if signal is None:
-        skip_cycle("missing_signal", cycle_id)
+        skip_cycle("missing_signal", cycle_id, price=price)
         return
 
     sentiment = normalize_signal(signal)
     raw_signal = sentiment["execution_signal"]
     confidence = sentiment["confidence"]
-
-    if confidence < CONF_THRESHOLD:
-        skip_cycle(
-            "low_confidence",
-            cycle_id,
-            execution_signal=raw_signal,
-            confidence=confidence,
-            confidence_threshold=CONF_THRESHOLD
-        )
-        return
-
     smoothed_signal = smooth_signal(raw_signal)
     weighted_signal = (
         smoothed_signal * confidence
         if CONFIDENCE_WEIGHTING
         else smoothed_signal
     )
-
-    price = get_price()
-    if price is None:
-        skip_cycle(
-            "missing_price",
-            cycle_id,
-            execution_signal=raw_signal,
-            confidence=confidence
-        )
-        return
 
     log_event(
         "SIGNAL_UPDATE",
@@ -767,16 +1050,81 @@ def run_cycle():
     )
     console(f"Price: {price} | Signal: {raw_signal} | Confidence: {confidence}")
 
-    if abs(weighted_signal) < MIN_SIGNAL_ABS_TO_TRADE:
+    if confidence < CONF_THRESHOLD:
         skip_cycle(
-            "weak_signal",
+            "low_confidence",
             cycle_id,
             price=price,
             execution_signal=raw_signal,
             smoothed_signal=smoothed_signal,
             weighted_signal=weighted_signal,
             confidence=confidence,
-            min_signal_abs_to_trade=MIN_SIGNAL_ABS_TO_TRADE
+            confidence_threshold=CONF_THRESHOLD
+        )
+        return
+
+    if weighted_signal < SENTIMENT_BUY_THRESHOLD:
+        skip_cycle(
+            "sentiment_below_buy_threshold",
+            cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD
+        )
+        return
+
+    cooldown = cooldown_active(now, weighted_signal)
+    if cooldown is not None:
+        skip_cycle(
+            "cooldown",
+            cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            **cooldown
+        )
+        return
+
+    last_sell_price = state.get("last_sell_price")
+    if PREVENT_BUY_ABOVE_LAST_SELL and last_sell_price is not None:
+        max_rebuy_price = float(last_sell_price) * (
+            1 - BUY_AFTER_SELL_DISCOUNT_PCT
+        )
+        if price >= max_rebuy_price:
+            skip_cycle(
+                "price_above_last_sell",
+                cycle_id,
+                price=price,
+                execution_signal=raw_signal,
+                smoothed_signal=smoothed_signal,
+                weighted_signal=weighted_signal,
+                confidence=confidence,
+                last_sell_price=last_sell_price,
+                max_rebuy_price=max_rebuy_price
+            )
+            return
+
+    if len(state["open_sell_orders"]) >= MAX_OPEN_SELL_ORDERS:
+        skip_cycle(
+            "max_open_sell_orders",
+            cycle_id,
+            price=price,
+            open_sell_count=len(state["open_sell_orders"])
+        )
+        return
+
+    if current_inventory_usd(price) >= MAX_INVENTORY_USD:
+        skip_cycle(
+            "max_inventory_usd",
+            cycle_id,
+            price=price,
+            deployed_inventory_usd=current_inventory_usd(price),
+            max_inventory_usd=MAX_INVENTORY_USD
         )
         return
 
@@ -792,43 +1140,14 @@ def run_cycle():
         return
 
     base_balance, quote_balance = balances
-    portfolio_value = base_balance * price + quote_balance
-
-    if portfolio_value <= 0:
-        skip_cycle(
-            "empty_portfolio",
-            cycle_id,
-            price=price,
-            base_balance=base_balance,
-            quote_balance=quote_balance,
-            portfolio_value=portfolio_value
-        )
-        return
-
-    allocation_current = (base_balance * price) / portfolio_value
-    allocation_target = BASE_ALLOCATION + weighted_signal
-    allocation_target = max(MIN_ALLOC, allocation_target)
-    allocation_target = min(MAX_ALLOC, allocation_target)
-
-    raw_delta = allocation_target - allocation_current
-    delta = max(-MAX_STEP, min(MAX_STEP, raw_delta))
-
-    if abs(delta) < MIN_ALLOC_DELTA:
-        skip_cycle(
-            "small_delta",
-            cycle_id,
-            price=price,
-            execution_signal=raw_signal,
-            confidence=confidence,
-            allocation_current=allocation_current,
-            allocation_target=allocation_target,
-            raw_delta=raw_delta,
-            delta=delta
-        )
-        return
-
-    trade_value = abs(delta) * portfolio_value
+    trade_value = quote_balance * POSITION_SIZE_PCT
+    if MAX_TRADE_USD > 0:
+        trade_value = min(trade_value, MAX_TRADE_USD)
     trade_value *= max(0, 1 - EXECUTION_BUFFER_PCT)
+
+    projected_inventory = current_inventory_usd(price) + trade_value
+    if projected_inventory > MAX_INVENTORY_USD:
+        trade_value = max(0, MAX_INVENTORY_USD - current_inventory_usd(price))
 
     if trade_value < MIN_TRADE_USD:
         skip_cycle(
@@ -842,62 +1161,9 @@ def run_cycle():
         )
         return
 
-    side = "buy" if delta > 0 else "sell"
-
-    if NEGATIVE_SIGNAL_BUY_BLOCK and side == "buy" and weighted_signal < 0:
-        skip_cycle(
-            "negative_signal_buy_block",
-            cycle_id,
-            price=price,
-            execution_signal=raw_signal,
-            smoothed_signal=smoothed_signal,
-            weighted_signal=weighted_signal,
-            confidence=confidence,
-            base_balance=base_balance,
-            quote_balance=quote_balance,
-            portfolio_value=portfolio_value,
-            allocation_current=allocation_current,
-            allocation_target=allocation_target,
-            raw_delta=raw_delta,
-            delta=delta
-        )
-        return
-
-    cooldown = cooldown_active(now, weighted_signal)
-    if cooldown is not None:
-        skip_cycle(
-            "cooldown",
-            cycle_id,
-            price=price,
-            execution_signal=raw_signal,
-            smoothed_signal=smoothed_signal,
-            weighted_signal=weighted_signal,
-            confidence=confidence,
-            base_balance=base_balance,
-            quote_balance=quote_balance,
-            portfolio_value=portfolio_value,
-            allocation_current=allocation_current,
-            allocation_target=allocation_target,
-            raw_delta=raw_delta,
-            delta=delta,
-            **cooldown
-        )
-        return
-
     volume = round_volume(trade_value / price)
     min_volume = get_min_order_volume()
-
-    if volume <= 0:
-        skip_cycle(
-            "zero_volume",
-            cycle_id,
-            price=price,
-            trade_value=trade_value,
-            volume=volume
-        )
-        return
-
-    if volume < min_volume:
+    if volume <= 0 or volume < min_volume:
         skip_cycle(
             "below_min_volume",
             cycle_id,
@@ -911,37 +1177,29 @@ def run_cycle():
     log_event(
         "TRADE_DECISION",
         cycle_id=cycle_id,
-        side=side,
+        side="buy",
+        reason="sentiment_buy",
         volume=volume,
         price=price,
         trade_value=trade_value,
         base_balance=base_balance,
         quote_balance=quote_balance,
-        portfolio_value=portfolio_value,
-        allocation_current=allocation_current,
-        allocation_target=allocation_target,
-        raw_delta=raw_delta,
-        delta=delta,
         execution_signal=raw_signal,
         smoothed_signal=smoothed_signal,
         weighted_signal=weighted_signal,
-        confidence=confidence
+        confidence=confidence,
+        sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD
     )
     append_decision_csv(
         "trade_decision",
         cycle_id=cycle_id,
-        side=side,
-        reason="trade",
+        side="buy",
+        reason="sentiment_buy",
         volume=volume,
         price=price,
         trade_value=trade_value,
         base_balance=base_balance,
         quote_balance=quote_balance,
-        portfolio_value=portfolio_value,
-        allocation_current=allocation_current,
-        allocation_target=allocation_target,
-        raw_delta=raw_delta,
-        delta=delta,
         execution_signal=raw_signal,
         smoothed_signal=smoothed_signal,
         weighted_signal=weighted_signal,
@@ -949,25 +1207,20 @@ def run_cycle():
         dry_run=DRY_RUN
     )
 
-    result = place_market(side, volume, cycle_id)
+    result = place_market_buy(volume, cycle_id)
     result_payload = result.get("result") if isinstance(result, dict) else None
     fill = result.get("fill", {}) if isinstance(result, dict) else {}
     txids = result_payload.get("txid", []) if isinstance(result_payload, dict) else []
     append_decision_csv(
         "trade_executed" if result else "trade_rejected",
         cycle_id=cycle_id,
-        side=side,
+        side="buy",
         reason="dry_run" if DRY_RUN else ("submitted" if result else "rejected"),
         volume=volume,
         price=price,
         trade_value=trade_value,
         base_balance=base_balance,
         quote_balance=quote_balance,
-        portfolio_value=portfolio_value,
-        allocation_current=allocation_current,
-        allocation_target=allocation_target,
-        raw_delta=raw_delta,
-        delta=delta,
         execution_signal=raw_signal,
         smoothed_signal=smoothed_signal,
         weighted_signal=weighted_signal,
@@ -977,6 +1230,7 @@ def run_cycle():
         **fill,
         result=result_payload or result
     )
+    maybe_handle_submitted_buy(result, cycle_id, volume, price)
 
     log_event(
         "CYCLE_SUMMARY",
@@ -986,14 +1240,15 @@ def run_cycle():
         smoothed_signal=smoothed_signal,
         weighted_signal=weighted_signal,
         confidence=confidence,
-        side=side,
+        side="buy",
         volume=volume,
         trade_value=trade_value,
-        allocation_current=allocation_current,
-        allocation_target=allocation_target,
         base_balance=base_balance,
         quote_balance=quote_balance,
-        portfolio_value=portfolio_value,
+        open_buy_count=len(state["open_buy_orders"]),
+        open_sell_count=len(state["open_sell_orders"]),
+        deployed_inventory_usd=current_inventory_usd(price),
+        last_sell_price=state.get("last_sell_price"),
         dry_run=DRY_RUN
     )
 
@@ -1014,19 +1269,21 @@ def main():
         log_file=LOG_FILE,
         pair=KRAKEN_PAIR,
         dry_run=DRY_RUN,
-        base_btc_allocation=BASE_ALLOCATION,
-        max_adjustment_per_cycle=MAX_STEP,
         min_trade_usd=MIN_TRADE_USD,
         confidence_threshold=CONF_THRESHOLD,
         confidence_weighting=CONFIDENCE_WEIGHTING,
-        min_total_allocation=MIN_ALLOC,
-        max_total_allocation=MAX_ALLOC,
-        min_allocation_change=MIN_ALLOC_DELTA,
         execution_buffer_pct=EXECUTION_BUFFER_PCT,
         rebalance_cooldown_minutes=REBALANCE_COOLDOWN_MINUTES,
         cooldown_override_signal_abs=COOLDOWN_OVERRIDE_SIGNAL_ABS,
-        min_signal_abs_to_trade=MIN_SIGNAL_ABS_TO_TRADE,
-        negative_signal_buy_block=NEGATIVE_SIGNAL_BUY_BLOCK,
+        sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD,
+        position_size_pct=POSITION_SIZE_PCT,
+        max_trade_usd=MAX_TRADE_USD,
+        target_profit_pct=TARGET_PROFIT_PCT,
+        round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+        max_open_sell_orders=MAX_OPEN_SELL_ORDERS,
+        max_inventory_usd=MAX_INVENTORY_USD,
+        prevent_buy_above_last_sell=PREVENT_BUY_ABOVE_LAST_SELL,
+        buy_after_sell_discount_pct=BUY_AFTER_SELL_DISCOUNT_PCT,
         decision_csv_file=DECISION_CSV_FILE,
         price_check_interval_seconds=PRICE_CHECK_INTERVAL_SECONDS
     )
