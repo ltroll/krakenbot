@@ -87,6 +87,7 @@ BOT_CONFIG_FILE=range_grid_config.json
 BOT_STATE_FILE=last_state.json
 TRADE_LOG_FILE=trade_log.jsonl
 GRID_ANCHOR=mean
+ENTRY_STEP_PCT=0.005
 DISCORD_WEB_HOOK=
 ```
 
@@ -94,6 +95,7 @@ Notes:
 
 - `BOT_CONFIG_FILE` works with the range-grid bots, so config file selection can come from `.env`.
 - `GRID_ANCHOR` now also works from `.env`, which makes bot iteration easier than editing JSON every time.
+- `ENTRY_STEP_PCT` works from `.env`; for `GRID_ANCHOR=high`, `0.005` means the bot only buys inside the top 0.5% below the observed high.
 - If `GRID_ANCHOR` is not set, the bot falls back to the value in `range_grid_config.json`, then to `"low"`.
 
 ## Support data model
