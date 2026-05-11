@@ -1,5 +1,6 @@
 {
   "range_window_hours": 24,
+  "grid_anchor": "low,high",
 
   "max_grid_size": 4,
 

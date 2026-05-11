@@ -40,6 +40,18 @@ def env_float(name, default):
     value = os.getenv(name)
     return default if value is None else float(value)
 
+
+def parse_strategy_modes(raw_value):
+    if not raw_value:
+        return ["low"]
+
+    modes = [
+        mode.strip().lower()
+        for mode in raw_value.split(",")
+        if mode.strip()
+    ]
+    return modes or ["low"]
+
 with open(CONFIG_FILE, encoding="utf-8") as f:
     config = json.load(f)
 
@@ -105,6 +117,7 @@ high_anchor_profit_target_pct = env_float(
     config.get("high_anchor_profit_target_pct", profit_target_pct)
 )
 grid_anchor = (GRID_ANCHOR or config.get("grid_anchor", "low")).strip().lower()
+strategy_modes = parse_strategy_modes(grid_anchor)
 
 # ----------------------
 # KRAKEN INIT
@@ -651,6 +664,7 @@ def main():
         state_file=STATE_FILE,
         log_file=LOG_FILE,
         grid_anchor=grid_anchor,
+        strategy_modes=strategy_modes,
         range_window_hours=range_window_hours,
         max_grid_size=max_grid_size,
         profit_target_pct=profit_target_pct,
@@ -1062,26 +1076,51 @@ def main():
 
             # BUY CANDIDATES
             if low and high and execution_signal >= execution_signal_threshold:
+                candidate_levels = []
                 if llm_target is not None:
-                    grid = [llm_target["buy_price"]]
-                    active_sell_pct_override = llm_target["sell_pct"]
-                    buy_source = "llm_target"
-                elif grid_anchor == "mean":
-                    grid = compute_grid(low, high, mean)
-                    active_sell_pct_override = None
-                    buy_source = "range_grid"
-                elif grid_anchor == "median" and median is not None:
-                    grid = compute_grid(low, high, median)
-                    active_sell_pct_override = None
-                    buy_source = "range_grid"
-                elif grid_anchor == "high":
-                    grid = compute_high_anchor_grid(high, price)
-                    active_sell_pct_override = high_anchor_profit_target_pct
-                    buy_source = "range_high_band"
+                    candidate_levels = [
+                        {
+                            "level": llm_target["buy_price"],
+                            "sell_pct_override": llm_target["sell_pct"],
+                            "buy_source": "llm_target"
+                        }
+                    ]
                 else:
-                    grid = compute_grid(low, high, low)
-                    active_sell_pct_override = None
-                    buy_source = "range_grid"
+                    for strategy_mode in strategy_modes:
+                        if strategy_mode == "mean":
+                            grid = compute_grid(low, high, mean)
+                            sell_pct_override = None
+                            buy_source = "range_mean"
+                        elif strategy_mode == "median" and median is not None:
+                            grid = compute_grid(low, high, median)
+                            sell_pct_override = None
+                            buy_source = "range_median"
+                        elif strategy_mode == "high":
+                            grid = compute_high_anchor_grid(high, price)
+                            sell_pct_override = high_anchor_profit_target_pct
+                            buy_source = "range_high_band"
+                        else:
+                            grid = compute_grid(low, high, low)
+                            sell_pct_override = None
+                            buy_source = "range_low"
+
+                        for level in grid:
+                            candidate_levels.append(
+                                {
+                                    "level": level,
+                                    "sell_pct_override": sell_pct_override,
+                                    "buy_source": buy_source
+                                }
+                            )
+
+                deduped_candidates = []
+                seen_levels = set()
+                for candidate in candidate_levels:
+                    rounded_level = round(candidate["level"], PRICE_DECIMALS)
+                    if rounded_level in seen_levels:
+                        continue
+                    seen_levels.add(rounded_level)
+                    deduped_candidates.append(candidate)
 
                 bal = kraken_call("BALANCE", api.query_private, "Balance")
 
@@ -1109,7 +1148,10 @@ def main():
                     high_anchor_cooldown_remaining_minutes(now)
                 )
 
-                for level in grid:
+                for candidate in deduped_candidates:
+                    level = candidate["level"]
+                    active_sell_pct_override = candidate["sell_pct_override"]
+                    buy_source = candidate["buy_source"]
                     key = str(level)
                     skip_reason = None
 
@@ -1287,12 +1329,14 @@ def main():
                 buy_source=(
                     "llm_target"
                     if low and high and execution_signal >= execution_signal_threshold and llm_target is not None
-                    else "range_high_band"
-                    if low and high and execution_signal >= execution_signal_threshold and grid_anchor == "high"
-                    else "range_grid"
+                    else ",".join(strategy_modes)
                 ),
+                strategy_modes=strategy_modes,
                 grid_levels=(
-                    [round(level, PRICE_DECIMALS) for level in grid]
+                    [
+                        round(candidate["level"], PRICE_DECIMALS)
+                        for candidate in deduped_candidates
+                    ]
                     if low and high and execution_signal >= execution_signal_threshold
                     else []
                 ),
