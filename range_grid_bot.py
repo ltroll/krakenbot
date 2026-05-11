@@ -92,6 +92,18 @@ min_profit_target_pct = env_float(
     "MIN_PROFIT_TARGET_PCT",
     config.get("min_profit_target_pct", profit_target_pct)
 )
+high_anchor_buy_cooldown_minutes = env_int(
+    "HIGH_ANCHOR_BUY_COOLDOWN_MINUTES",
+    config.get("high_anchor_buy_cooldown_minutes", 15)
+)
+max_open_high_anchor_orders = env_int(
+    "MAX_OPEN_HIGH_ANCHOR_ORDERS",
+    config.get("max_open_high_anchor_orders", 3)
+)
+high_anchor_profit_target_pct = env_float(
+    "HIGH_ANCHOR_PROFIT_TARGET_PCT",
+    config.get("high_anchor_profit_target_pct", profit_target_pct)
+)
 grid_anchor = (GRID_ANCHOR or config.get("grid_anchor", "low")).strip().lower()
 
 # ----------------------
@@ -185,6 +197,7 @@ def load_state():
         "range_mean": None,
         "range_median": None,
         "last_range_refresh": None,
+        "last_high_anchor_buy_at": None,
         "stats": {
             "buy_orders_placed": 0,
             "buy_orders_filled": 0,
@@ -235,7 +248,8 @@ def normalize_state(state):
                 "volume": order.get("volume"),
                 "price": order.get("price", float(level)),
                 "placed_at": order.get("placed_at"),
-                "sell_pct_override": order.get("sell_pct_override")
+                "sell_pct_override": order.get("sell_pct_override"),
+                "buy_source": order.get("buy_source")
             }
         else:
             normalized_buy_orders[level] = {
@@ -243,7 +257,8 @@ def normalize_state(state):
                 "volume": None,
                 "price": float(level),
                 "placed_at": None,
-                "sell_pct_override": None
+                "sell_pct_override": None,
+                "buy_source": None
             }
 
     for txid, order in state["open_sell_orders"].items():
@@ -254,7 +269,8 @@ def normalize_state(state):
                 "buy_price": order.get("buy_price"),
                 "sell_price": order.get("sell_price"),
                 "placed_at": order.get("placed_at"),
-                "sell_pct_override": order.get("sell_pct_override")
+                "sell_pct_override": order.get("sell_pct_override"),
+                "buy_source": order.get("buy_source")
             }
         else:
             normalized_sell_orders[txid] = {
@@ -263,7 +279,8 @@ def normalize_state(state):
                 "buy_price": None,
                 "sell_price": None,
                 "placed_at": None,
-                "sell_pct_override": None
+                "sell_pct_override": None,
+                "buy_source": None
             }
 
     state["open_buy_orders"] = normalized_buy_orders
@@ -438,6 +455,30 @@ def compute_high_anchor_grid(high, price):
         return [price]
 
     return []
+
+
+def high_anchor_open_order_count():
+    open_buy_count = sum(
+        1
+        for order in state["open_buy_orders"].values()
+        if order.get("buy_source") == "range_high_band"
+    )
+    open_sell_count = sum(
+        1
+        for order in state["open_sell_orders"].values()
+        if order.get("buy_source") == "range_high_band"
+    )
+    return open_buy_count + open_sell_count
+
+
+def high_anchor_cooldown_remaining_minutes(now):
+    last_buy_at = parse_iso8601(state.get("last_high_anchor_buy_at"))
+
+    if last_buy_at is None:
+        return 0
+
+    elapsed_minutes = (now - last_buy_at).total_seconds() / 60
+    return max(0, high_anchor_buy_cooldown_minutes - elapsed_minutes)
 
 
 # ----------------------
@@ -625,7 +666,10 @@ def main():
         aging_start_minutes=aging_start_minutes,
         aging_step_minutes=aging_step_minutes,
         aging_profit_reduction_pct=aging_profit_reduction_pct,
-        min_profit_target_pct=min_profit_target_pct
+        min_profit_target_pct=min_profit_target_pct,
+        high_anchor_buy_cooldown_minutes=high_anchor_buy_cooldown_minutes,
+        max_open_high_anchor_orders=max_open_high_anchor_orders,
+        high_anchor_profit_target_pct=high_anchor_profit_target_pct
     )
 
     while True:
@@ -759,6 +803,7 @@ def main():
                         volume=volume,
                         buy_price=buy_price,
                         sell_price=sell_price,
+                        buy_source=order.get("buy_source"),
                         gross_pnl=gross_pnl,
                         estimated_net_pnl=estimated_net_pnl,
                         hold_minutes=hold_minutes
@@ -847,7 +892,8 @@ def main():
                         "buy_price": buy_price,
                         "sell_price": adjusted_sell_price,
                         "placed_at": order.get("placed_at"),
-                        "sell_pct_override": sell_pct_override
+                        "sell_pct_override": sell_pct_override,
+                        "buy_source": order.get("buy_source")
                     }
                     del state["open_sell_orders"][txid]
                     save_state(state)
@@ -870,7 +916,8 @@ def main():
                         sell_price=adjusted_sell_price,
                         age_minutes=age_minutes,
                         adjusted_profit_target_pct=adjusted_profit_target,
-                        sell_pct_override=sell_pct_override
+                        sell_pct_override=sell_pct_override,
+                        buy_source=order.get("buy_source")
                     )
                     continue
 
@@ -922,6 +969,7 @@ def main():
 
                 buy_price = float(level)
                 sell_pct_override = order.get("sell_pct_override")
+                buy_source = order.get("buy_source")
                 sell_price = compute_sell_target_price(
                     buy_price,
                     sell_pct_override
@@ -955,7 +1003,8 @@ def main():
                     volume=round(order["volume"], VOLUME_DECIMALS),
                     price=round(sell_price, PRICE_DECIMALS),
                     buy_price=round(buy_price, PRICE_DECIMALS),
-                    sell_pct_override=sell_pct_override
+                    sell_pct_override=sell_pct_override,
+                    buy_source=buy_source
                 )
 
                 sell_resp = kraken_call(
@@ -976,6 +1025,7 @@ def main():
                         buy_price=round(buy_price, PRICE_DECIMALS),
                         sell_price=round(sell_price, PRICE_DECIMALS),
                         sell_pct_override=sell_pct_override,
+                        buy_source=buy_source,
                         error=(
                             None if not sell_resp
                             else sell_resp.get("error")
@@ -986,12 +1036,13 @@ def main():
                 txid = sell_resp["result"]["txid"][0]
                 state["open_sell_orders"][txid] = {
                     "level": level,
-                        "volume": order["volume"],
-                        "buy_price": buy_price,
-                        "sell_price": sell_price,
-                        "placed_at": cycle_id,
-                        "sell_pct_override": sell_pct_override
-                    }
+                    "volume": order["volume"],
+                    "buy_price": buy_price,
+                    "sell_price": sell_price,
+                    "placed_at": cycle_id,
+                    "sell_pct_override": sell_pct_override,
+                    "buy_source": buy_source
+                }
                 del state["open_buy_orders"][level]
                 state["stats"]["sell_orders_placed"] += 1
                 save_state(state)
@@ -1002,11 +1053,12 @@ def main():
                     message=f"SELL placed @ {round(sell_price, PRICE_DECIMALS)}",
                     cycle_id=cycle_id,
                     txid=txid,
-                        volume=round(order["volume"], VOLUME_DECIMALS),
-                        price=round(sell_price, PRICE_DECIMALS),
-                        buy_price=round(buy_price, PRICE_DECIMALS),
-                        sell_pct_override=sell_pct_override
-                    )
+                    volume=round(order["volume"], VOLUME_DECIMALS),
+                    price=round(sell_price, PRICE_DECIMALS),
+                    buy_price=round(buy_price, PRICE_DECIMALS),
+                    sell_pct_override=sell_pct_override,
+                    buy_source=buy_source
+                )
 
             # BUY CANDIDATES
             if low and high and execution_signal >= execution_signal_threshold:
@@ -1024,7 +1076,7 @@ def main():
                     buy_source = "range_grid"
                 elif grid_anchor == "high":
                     grid = compute_high_anchor_grid(high, price)
-                    active_sell_pct_override = None
+                    active_sell_pct_override = high_anchor_profit_target_pct
                     buy_source = "range_high_band"
                 else:
                     grid = compute_grid(low, high, low)
@@ -1052,6 +1104,10 @@ def main():
                     for sell_order in state["open_sell_orders"].values()
                 }
                 deployed_inventory_usd = current_inventory_usd(price)
+                high_anchor_order_count = high_anchor_open_order_count()
+                high_anchor_cooldown_remaining = (
+                    high_anchor_cooldown_remaining_minutes(now)
+                )
 
                 for level in grid:
                     key = str(level)
@@ -1067,6 +1123,16 @@ def main():
                         skip_reason = "max_open_sell_orders"
                     elif deployed_inventory_usd >= max_inventory_usd:
                         skip_reason = "max_inventory_usd"
+                    elif (
+                        buy_source == "range_high_band"
+                        and high_anchor_cooldown_remaining > 0
+                    ):
+                        skip_reason = "high_anchor_cooldown"
+                    elif (
+                        buy_source == "range_high_band"
+                        and high_anchor_order_count >= max_open_high_anchor_orders
+                    ):
+                        skip_reason = "max_open_high_anchor_orders"
 
                     volume = (usd * position_size_pct) / level
                     projected_inventory_usd = deployed_inventory_usd + (
@@ -1091,6 +1157,11 @@ def main():
                             execution_signal=execution_signal,
                             usd_balance=usd,
                             deployed_inventory_usd=deployed_inventory_usd,
+                            high_anchor_order_count=high_anchor_order_count,
+                            high_anchor_cooldown_remaining_minutes=round(
+                                high_anchor_cooldown_remaining,
+                                2
+                            ),
                             buy_source=buy_source,
                             reason=skip_reason
                         )
@@ -1108,6 +1179,7 @@ def main():
                         range_mean=mean,
                         range_median=median,
                         buy_source=buy_source,
+                        high_anchor_order_count=high_anchor_order_count,
                         sell_pct_override=active_sell_pct_override
                     )
 
@@ -1142,8 +1214,15 @@ def main():
                         "volume": volume,
                         "price": level,
                         "placed_at": cycle_id,
-                        "sell_pct_override": active_sell_pct_override
+                        "sell_pct_override": active_sell_pct_override,
+                        "buy_source": buy_source
                     }
+                    if buy_source == "range_high_band":
+                        state["last_high_anchor_buy_at"] = cycle_id
+                        high_anchor_order_count += 1
+                        high_anchor_cooldown_remaining = (
+                            high_anchor_buy_cooldown_minutes
+                        )
                     state["stats"]["buy_orders_placed"] += 1
                     save_state(state)
                     actions.append("buy_placed")
@@ -1216,6 +1295,11 @@ def main():
                     [round(level, PRICE_DECIMALS) for level in grid]
                     if low and high and execution_signal >= execution_signal_threshold
                     else []
+                ),
+                high_anchor_order_count=high_anchor_open_order_count(),
+                high_anchor_cooldown_remaining_minutes=round(
+                    high_anchor_cooldown_remaining_minutes(now),
+                    2
                 ),
                 deployed_inventory_usd=round(
                     current_inventory_usd(price), 8

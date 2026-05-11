@@ -15,6 +15,9 @@
   "aging_step_minutes": 180,
   "aging_profit_reduction_pct": 0.001,
   "min_profit_target_pct": 0.0045,
+  "high_anchor_buy_cooldown_minutes": 15,
+  "max_open_high_anchor_orders": 3,
+  "high_anchor_profit_target_pct": 0.006,
 
   "execution_signal_threshold": 0.00,
 

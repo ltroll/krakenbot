@@ -88,6 +88,9 @@ BOT_STATE_FILE=last_state.json
 TRADE_LOG_FILE=trade_log.jsonl
 GRID_ANCHOR=mean
 ENTRY_STEP_PCT=0.005
+HIGH_ANCHOR_BUY_COOLDOWN_MINUTES=15
+MAX_OPEN_HIGH_ANCHOR_ORDERS=3
+HIGH_ANCHOR_PROFIT_TARGET_PCT=0.006
 DISCORD_WEB_HOOK=
 ```
 
@@ -96,6 +99,7 @@ Notes:
 - `BOT_CONFIG_FILE` works with the range-grid bots, so config file selection can come from `.env`.
 - `GRID_ANCHOR` now also works from `.env`, which makes bot iteration easier than editing JSON every time.
 - `ENTRY_STEP_PCT` works from `.env`; for `GRID_ANCHOR=high`, `0.005` means the bot only buys inside the top 0.5% below the observed high.
+- `HIGH_ANCHOR_BUY_COOLDOWN_MINUTES`, `MAX_OPEN_HIGH_ANCHOR_ORDERS`, and `HIGH_ANCHOR_PROFIT_TARGET_PCT` tune the extra guardrails used by `GRID_ANCHOR=high`.
 - If `GRID_ANCHOR` is not set, the bot falls back to the value in `range_grid_config.json`, then to `"low"`.
 
 ## Support data model
@@ -199,6 +203,9 @@ Important values in [`range_grid_config.json`](/C:/Users/bgert/krakenbot/range_g
 - `profit_target_pct`: sell markup after a filled buy
 - `entry_step_pct`: spacing between buy levels below the selected anchor
 - `llm_target_proximity_pct`: how close market price must be to an LLM-provided target before the bot will act on it
+- `high_anchor_buy_cooldown_minutes`: minimum minutes between `GRID_ANCHOR=high` buys
+- `max_open_high_anchor_orders`: cap on active high-anchor buys and sells
+- `high_anchor_profit_target_pct`: profit target used for high-anchor buys before fees
 - `round_trip_fee_pct`: fee allowance added to sell pricing
 - `position_size_pct`: fraction of available USD allocated per buy level
 - `execution_signal_threshold`: minimum signal required before placing new buys
