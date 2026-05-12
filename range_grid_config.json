@@ -19,6 +19,16 @@
   "high_anchor_buy_cooldown_minutes": 15,
   "max_open_high_anchor_orders": 3,
   "high_anchor_profit_target_pct": 0.006,
+  "sentiment_defensive_threshold": 0.03,
+  "sentiment_risk_on_threshold": 0.12,
+  "sentiment_defensive_size_multiplier": 0.65,
+  "sentiment_risk_on_size_multiplier": 1.2,
+  "sentiment_defensive_inventory_multiplier": 0.7,
+  "sentiment_risk_on_inventory_multiplier": 1.2,
+  "sentiment_defensive_open_sell_multiplier": 0.75,
+  "sentiment_risk_on_open_sell_multiplier": 1.25,
+  "sentiment_disable_high_anchor_below": 0.05,
+  "sentiment_defensive_extra_aging_reduction_pct": 0.001,
 
   "execution_signal_threshold": 0.00,
 

@@ -116,6 +116,46 @@ high_anchor_profit_target_pct = env_float(
     "HIGH_ANCHOR_PROFIT_TARGET_PCT",
     config.get("high_anchor_profit_target_pct", profit_target_pct)
 )
+sentiment_defensive_threshold = env_float(
+    "SENTIMENT_DEFENSIVE_THRESHOLD",
+    config.get("sentiment_defensive_threshold", max(0.03, execution_signal_threshold))
+)
+sentiment_risk_on_threshold = env_float(
+    "SENTIMENT_RISK_ON_THRESHOLD",
+    config.get("sentiment_risk_on_threshold", 0.12)
+)
+sentiment_defensive_size_multiplier = env_float(
+    "SENTIMENT_DEFENSIVE_SIZE_MULTIPLIER",
+    config.get("sentiment_defensive_size_multiplier", 0.65)
+)
+sentiment_risk_on_size_multiplier = env_float(
+    "SENTIMENT_RISK_ON_SIZE_MULTIPLIER",
+    config.get("sentiment_risk_on_size_multiplier", 1.2)
+)
+sentiment_defensive_inventory_multiplier = env_float(
+    "SENTIMENT_DEFENSIVE_INVENTORY_MULTIPLIER",
+    config.get("sentiment_defensive_inventory_multiplier", 0.7)
+)
+sentiment_risk_on_inventory_multiplier = env_float(
+    "SENTIMENT_RISK_ON_INVENTORY_MULTIPLIER",
+    config.get("sentiment_risk_on_inventory_multiplier", 1.2)
+)
+sentiment_defensive_open_sell_multiplier = env_float(
+    "SENTIMENT_DEFENSIVE_OPEN_SELL_MULTIPLIER",
+    config.get("sentiment_defensive_open_sell_multiplier", 0.75)
+)
+sentiment_risk_on_open_sell_multiplier = env_float(
+    "SENTIMENT_RISK_ON_OPEN_SELL_MULTIPLIER",
+    config.get("sentiment_risk_on_open_sell_multiplier", 1.25)
+)
+sentiment_disable_high_anchor_below = env_float(
+    "SENTIMENT_DISABLE_HIGH_ANCHOR_BELOW",
+    config.get("sentiment_disable_high_anchor_below", 0.05)
+)
+sentiment_defensive_extra_aging_reduction_pct = env_float(
+    "SENTIMENT_DEFENSIVE_EXTRA_AGING_REDUCTION_PCT",
+    config.get("sentiment_defensive_extra_aging_reduction_pct", 0.001)
+)
 grid_anchor = (GRID_ANCHOR or config.get("grid_anchor", "low")).strip().lower()
 strategy_modes = parse_strategy_modes(grid_anchor)
 
@@ -640,6 +680,49 @@ def compute_adjusted_profit_target(age_minutes, base_profit_target=None):
     return max(min_profit_target_pct, adjusted_profit)
 
 
+def sentiment_regime(execution_signal):
+    if execution_signal < execution_signal_threshold:
+        return {
+            "name": "paused",
+            "position_size_multiplier": 0.0,
+            "inventory_multiplier": 0.0,
+            "open_sell_multiplier": 0.0,
+            "allow_high_anchor": False,
+            "extra_aging_reduction_pct": sentiment_defensive_extra_aging_reduction_pct
+        }
+
+    if execution_signal < sentiment_defensive_threshold:
+        return {
+            "name": "defensive",
+            "position_size_multiplier": sentiment_defensive_size_multiplier,
+            "inventory_multiplier": sentiment_defensive_inventory_multiplier,
+            "open_sell_multiplier": sentiment_defensive_open_sell_multiplier,
+            "allow_high_anchor": (
+                execution_signal >= sentiment_disable_high_anchor_below
+            ),
+            "extra_aging_reduction_pct": sentiment_defensive_extra_aging_reduction_pct
+        }
+
+    if execution_signal >= sentiment_risk_on_threshold:
+        return {
+            "name": "risk_on",
+            "position_size_multiplier": sentiment_risk_on_size_multiplier,
+            "inventory_multiplier": sentiment_risk_on_inventory_multiplier,
+            "open_sell_multiplier": sentiment_risk_on_open_sell_multiplier,
+            "allow_high_anchor": True,
+            "extra_aging_reduction_pct": 0.0
+        }
+
+    return {
+        "name": "neutral",
+        "position_size_multiplier": 1.0,
+        "inventory_multiplier": 1.0,
+        "open_sell_multiplier": 1.0,
+        "allow_high_anchor": True,
+        "extra_aging_reduction_pct": 0.0
+    }
+
+
 def current_inventory_usd(current_price):
     open_buy_notional = sum(
         (order.get("price") or current_price) * (order.get("volume") or 0)
@@ -683,7 +766,31 @@ def main():
         min_profit_target_pct=min_profit_target_pct,
         high_anchor_buy_cooldown_minutes=high_anchor_buy_cooldown_minutes,
         max_open_high_anchor_orders=max_open_high_anchor_orders,
-        high_anchor_profit_target_pct=high_anchor_profit_target_pct
+        high_anchor_profit_target_pct=high_anchor_profit_target_pct,
+        sentiment_defensive_threshold=sentiment_defensive_threshold,
+        sentiment_risk_on_threshold=sentiment_risk_on_threshold,
+        sentiment_defensive_size_multiplier=(
+            sentiment_defensive_size_multiplier
+        ),
+        sentiment_risk_on_size_multiplier=sentiment_risk_on_size_multiplier,
+        sentiment_defensive_inventory_multiplier=(
+            sentiment_defensive_inventory_multiplier
+        ),
+        sentiment_risk_on_inventory_multiplier=(
+            sentiment_risk_on_inventory_multiplier
+        ),
+        sentiment_defensive_open_sell_multiplier=(
+            sentiment_defensive_open_sell_multiplier
+        ),
+        sentiment_risk_on_open_sell_multiplier=(
+            sentiment_risk_on_open_sell_multiplier
+        ),
+        sentiment_disable_high_anchor_below=(
+            sentiment_disable_high_anchor_below
+        ),
+        sentiment_defensive_extra_aging_reduction_pct=(
+            sentiment_defensive_extra_aging_reduction_pct
+        )
     )
 
     while True:
@@ -711,6 +818,19 @@ def main():
             target_prices = sentiment_payload.get("target_prices", [])
             llm_target = select_llm_target(target_prices, price)
             price_regime = sentiment_payload.get("price_regime", {})
+            regime = sentiment_regime(execution_signal)
+            effective_position_size_pct = (
+                position_size_pct * regime["position_size_multiplier"]
+            )
+            effective_max_inventory_usd = (
+                max_inventory_usd * regime["inventory_multiplier"]
+            )
+            effective_max_open_sell_orders = max(
+                1,
+                int(round(
+                    max_open_sell_orders * regime["open_sell_multiplier"]
+                ))
+            )
 
             log_event(
                 "SIGNAL_UPDATE",
@@ -731,7 +851,12 @@ def main():
                 price_regime_range_position=price_regime.get("range_position_24h"),
                 price_regime_volatility_pct=price_regime.get(
                     "realized_volatility_24h_pct"
-                )
+                ),
+                sentiment_regime=regime["name"],
+                effective_position_size_pct=effective_position_size_pct,
+                effective_max_inventory_usd=effective_max_inventory_usd,
+                effective_max_open_sell_orders=effective_max_open_sell_orders,
+                high_anchor_enabled=regime["allow_high_anchor"]
             )
             console(f"Price: {price} | Signal: {execution_signal}")
 
@@ -838,6 +963,11 @@ def main():
                     adjusted_profit_target = compute_adjusted_profit_target(
                         age_minutes,
                         sell_pct_override
+                    )
+                    adjusted_profit_target = max(
+                        min_profit_target_pct,
+                        adjusted_profit_target
+                        - regime["extra_aging_reduction_pct"]
                     )
 
                     if buy_price is None or current_sell_price is None:
@@ -1096,6 +1226,8 @@ def main():
                             sell_pct_override = None
                             buy_source = "range_median"
                         elif strategy_mode == "high":
+                            if not regime["allow_high_anchor"]:
+                                continue
                             grid = compute_high_anchor_grid(high, price)
                             sell_pct_override = high_anchor_profit_target_pct
                             buy_source = "range_high_band"
@@ -1161,9 +1293,12 @@ def main():
                         skip_reason = "open_sell_order"
                     elif buy_source != "llm_target" and price > level:
                         skip_reason = "price_above_level"
-                    elif len(state["open_sell_orders"]) >= max_open_sell_orders:
+                    elif (
+                        len(state["open_sell_orders"])
+                        >= effective_max_open_sell_orders
+                    ):
                         skip_reason = "max_open_sell_orders"
-                    elif deployed_inventory_usd >= max_inventory_usd:
+                    elif deployed_inventory_usd >= effective_max_inventory_usd:
                         skip_reason = "max_inventory_usd"
                     elif (
                         buy_source == "range_high_band"
@@ -1176,14 +1311,14 @@ def main():
                     ):
                         skip_reason = "max_open_high_anchor_orders"
 
-                    volume = (usd * position_size_pct) / level
+                    volume = (usd * effective_position_size_pct) / level
                     projected_inventory_usd = deployed_inventory_usd + (
                         level * volume
                     )
 
                     if (
                         skip_reason is None
-                        and projected_inventory_usd > max_inventory_usd
+                        and projected_inventory_usd > effective_max_inventory_usd
                     ):
                         skip_reason = "max_inventory_usd"
 
@@ -1204,6 +1339,16 @@ def main():
                                 high_anchor_cooldown_remaining,
                                 2
                             ),
+                            sentiment_regime=regime["name"],
+                            effective_position_size_pct=(
+                                effective_position_size_pct
+                            ),
+                            effective_max_inventory_usd=(
+                                effective_max_inventory_usd
+                            ),
+                            effective_max_open_sell_orders=(
+                                effective_max_open_sell_orders
+                            ),
                             buy_source=buy_source,
                             reason=skip_reason
                         )
@@ -1220,6 +1365,8 @@ def main():
                         range_high=high,
                         range_mean=mean,
                         range_median=median,
+                        sentiment_regime=regime["name"],
+                        effective_position_size_pct=effective_position_size_pct,
                         buy_source=buy_source,
                         high_anchor_order_count=high_anchor_order_count,
                         sell_pct_override=active_sell_pct_override
@@ -1291,6 +1438,7 @@ def main():
                     range_high=high,
                     range_mean=mean,
                     range_median=median,
+                    sentiment_regime=regime["name"],
                     reason="signal_below_threshold_or_range_unavailable",
                     cycle_id=cycle_id,
                     price_regime_range_position=price_regime.get(
@@ -1325,6 +1473,11 @@ def main():
                 price_regime_median_reversion_buy_target=price_regime.get(
                     "median_reversion_buy_target"
                 ),
+                sentiment_regime=regime["name"],
+                effective_position_size_pct=effective_position_size_pct,
+                effective_max_inventory_usd=effective_max_inventory_usd,
+                effective_max_open_sell_orders=effective_max_open_sell_orders,
+                high_anchor_enabled=regime["allow_high_anchor"],
                 grid_anchor=grid_anchor,
                 buy_source=(
                     "llm_target"
