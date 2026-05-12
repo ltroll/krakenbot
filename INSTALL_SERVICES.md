@@ -46,7 +46,7 @@ KRAKEN_API_URL=https://api.kraken.com
 KRAKEN_TICKER_URL=https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD
 LLM_SIGNAL_URL=http://<host>/bot/llm_signal.json
 BOT_CONFIG_FILE=
-STRATEGY_PROFILE=default
+STRATEGY_PROFILE=
 BOT_STATE_FILE=
 TRADE_LOG_FILE=
 ```
@@ -69,7 +69,7 @@ LLM_SIGNAL_URL=http://<host>/bot/llm_signal.json
 PRICE_LOG_URL=http://<host>/bot/btc_price_log.jsonl
 
 BOT_CONFIG_FILE=range_grid_config.json
-STRATEGY_PROFILE=default
+STRATEGY_PROFILE=range_grid_strategy_default.json
 BOT_STATE_FILE=range_grid_state.json
 TRADE_LOG_FILE=range_grid_trade_log.jsonl
 ```
@@ -86,7 +86,7 @@ KRAKEN_TICKER_URL=https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD
 LLM_SIGNAL_URL=http://<host>/bot/llm_signal.json
 
 BOT_CONFIG_FILE=sentiment_bot_config.json
-STRATEGY_PROFILE=default
+STRATEGY_PROFILE=sentiment_strategy_default.json
 BOT_STATE_FILE=sentiment_state.json
 TRADE_LOG_FILE=sentiment_trade_log.jsonl
 SENTIMENT_DECISION_CSV_FILE=sentiment_decisions.csv
@@ -98,7 +98,7 @@ KRAKEN_NONCE_RETRIES=2
 
 Bot tuning values such as grid anchor, entry spacing, position sizing,
 profit targets, thresholds, dry-run mode, and loop intervals now live in the
-selected `strategy_profiles.<name>` object inside the JSON config file.
+strategy JSON file named by `STRATEGY_PROFILE`.
 
 Lock down env file permissions because they contain Kraken secrets:
 

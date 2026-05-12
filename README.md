@@ -58,7 +58,7 @@ The repo intentionally splits runtime configuration into two layers.
 - Kraken endpoints
 - external support file URLs
 - filenames and file paths
-- `STRATEGY_PROFILE`, which selects the active strategy profile from JSON
+- `STRATEGY_PROFILE`, which points to the active strategy JSON file
 
 JSON config files are for strategy tuning:
 
@@ -86,15 +86,16 @@ PRICE_LOG_URL=http://192.168.50.211/bot/btc_price_log.jsonl
 BOT_CONFIG_FILE=range_grid_config.json
 BOT_STATE_FILE=last_state.json
 TRADE_LOG_FILE=trade_log.jsonl
-STRATEGY_PROFILE=default
+STRATEGY_PROFILE=range_grid_strategy_default.json
 DISCORD_WEB_HOOK=
 ```
 
 Notes:
 
 - `BOT_CONFIG_FILE` works with the range-grid bots, so config file selection can come from `.env`.
-- `STRATEGY_PROFILE` selects the matching key under `strategy_profiles` in the JSON config file.
-- Strategy tunables such as `grid_anchor`, `entry_step_pct`, and profit targets now live in that selected strategy profile instead of `.env`.
+- `STRATEGY_PROFILE` can point directly to a strategy JSON file, such as `range_grid_strategy_default.json`.
+- For compatibility, `STRATEGY_PROFILE=default` still selects a matching key under `strategy_profiles` in `BOT_CONFIG_FILE`.
+- Strategy tunables such as `grid_anchor`, `entry_step_pct`, and profit targets now live in the selected strategy file instead of `.env`.
 
 ## Support data model
 
@@ -190,7 +191,7 @@ Why `median` can help:
 
 ### Strategy values from `range_grid_config.json`
 
-Important values in the selected `strategy_profiles.<name>` object in [`range_grid_config.json`](/C:/Users/bgert/krakenbot/range_grid_config.json):
+Important values in the selected strategy file, such as [`range_grid_strategy_default.json`](/C:/Users/bgert/krakenbot/range_grid_strategy_default.json):
 
 - `range_window_hours`: how much recent history is used for the observed range
 - `max_grid_size`: number of buy levels

@@ -24,7 +24,7 @@ load_dotenv()
 # ----------------------
 
 CONFIG_FILE = os.getenv("BOT_CONFIG_FILE", "sentiment_bot_config.json")
-STRATEGY_PROFILE = os.getenv("STRATEGY_PROFILE", "default")
+STRATEGY_PROFILE = os.getenv("STRATEGY_PROFILE") or "default"
 STATE_FILE = os.getenv("BOT_STATE_FILE", "sentiment_state.json")
 LOG_FILE = os.getenv("TRADE_LOG_FILE", "sentiment_trade_log.jsonl")
 DECISION_CSV_FILE = os.getenv(
@@ -41,15 +41,28 @@ SIGNAL_FILE = os.getenv("SIGNAL_FILE")
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
 
 
+def load_json_file(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def strategy_profile_is_file():
+    if not STRATEGY_PROFILE:
+        return False
+
+    expanded_path = os.path.expanduser(STRATEGY_PROFILE)
+    return (
+        os.path.exists(expanded_path)
+        or STRATEGY_PROFILE.endswith(".json")
+        or os.sep in STRATEGY_PROFILE
+    )
+
+
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         return {}
 
-    with open(CONFIG_FILE, encoding="utf-8") as f:
-        return json.load(f)
-
-
-config = load_config()
+    return load_json_file(CONFIG_FILE)
 
 
 def select_strategy_profile(config_data):
@@ -71,7 +84,18 @@ def select_strategy_profile(config_data):
     return profile
 
 
-strategy_config = select_strategy_profile(config)
+def load_strategy_config():
+    if strategy_profile_is_file():
+        path = os.path.expanduser(STRATEGY_PROFILE)
+        if not os.path.exists(path):
+            raise RuntimeError(f"Strategy profile file not found: {path}")
+
+        return load_json_file(path)
+
+    return select_strategy_profile(load_config())
+
+
+strategy_config = load_strategy_config()
 
 
 def profile_bool(name, default):

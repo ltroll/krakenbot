@@ -21,7 +21,7 @@ load_dotenv()
 # ----------------------
 
 CONFIG_FILE = os.getenv("BOT_CONFIG_FILE", "range_grid_config.json")
-STRATEGY_PROFILE = os.getenv("STRATEGY_PROFILE", "default")
+STRATEGY_PROFILE = os.getenv("STRATEGY_PROFILE") or "default"
 STATE_FILE = os.getenv("BOT_STATE_FILE", "last_state.json")
 LOG_FILE = os.getenv("TRADE_LOG_FILE", "trade_log.jsonl")
 
@@ -42,9 +42,25 @@ def parse_strategy_modes(raw_value):
     ]
     return modes or ["low"]
 
-def load_config():
-    with open(CONFIG_FILE, encoding="utf-8") as f:
+def load_json_file(path):
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def strategy_profile_is_file():
+    if not STRATEGY_PROFILE:
+        return False
+
+    expanded_path = os.path.expanduser(STRATEGY_PROFILE)
+    return (
+        os.path.exists(expanded_path)
+        or STRATEGY_PROFILE.endswith(".json")
+        or os.sep in STRATEGY_PROFILE
+    )
+
+
+def load_config():
+    return load_json_file(CONFIG_FILE)
 
 
 def select_strategy_profile(config_data):
@@ -66,6 +82,17 @@ def select_strategy_profile(config_data):
     return profile
 
 
+def load_strategy_config():
+    if strategy_profile_is_file():
+        path = os.path.expanduser(STRATEGY_PROFILE)
+        if not os.path.exists(path):
+            raise RuntimeError(f"Strategy profile file not found: {path}")
+
+        return load_json_file(path)
+
+    return select_strategy_profile(load_config())
+
+
 def profile_int(name, default):
     value = strategy_config.get(name, default)
     return default if value is None else int(value)
@@ -76,8 +103,7 @@ def profile_float(name, default):
     return default if value is None else float(value)
 
 
-config = load_config()
-strategy_config = select_strategy_profile(config)
+strategy_config = load_strategy_config()
 
 range_window_hours = profile_int("range_window_hours", 24)
 max_grid_size = profile_int("max_grid_size", 4)
