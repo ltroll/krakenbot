@@ -20,10 +20,26 @@ load_dotenv()
 # CONFIG
 # ----------------------
 
-CONFIG_FILE = os.getenv("BOT_CONFIG_FILE", "range_grid_config.json")
-STRATEGY_PROFILE = os.getenv("STRATEGY_PROFILE") or "default"
-STATE_FILE = os.getenv("BOT_STATE_FILE", "last_state.json")
-LOG_FILE = os.getenv("TRADE_LOG_FILE", "trade_log.jsonl")
+CONFIG_FILE = (
+    os.getenv("RANGE_GRID_CONFIG_FILE")
+    or os.getenv("BOT_CONFIG_FILE")
+    or "range_grid_config.json"
+)
+STRATEGY_PROFILE = (
+    os.getenv("RANGE_GRID_STRATEGY_PROFILE")
+    or os.getenv("STRATEGY_PROFILE")
+    or "range_grid_strategy_default.json"
+)
+STATE_FILE = (
+    os.getenv("RANGE_GRID_STATE_FILE")
+    or os.getenv("BOT_STATE_FILE")
+    or "last_state.json"
+)
+LOG_FILE = (
+    os.getenv("RANGE_GRID_TRADE_LOG_FILE")
+    or os.getenv("TRADE_LOG_FILE")
+    or "trade_log.jsonl"
+)
 
 KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")

@@ -45,66 +45,62 @@ KRAKEN_API_SECRET=
 KRAKEN_API_URL=https://api.kraken.com
 KRAKEN_TICKER_URL=https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD
 LLM_SIGNAL_URL=http://<host>/bot/llm_signal.json
-BOT_CONFIG_FILE=
-STRATEGY_PROFILE=
-BOT_STATE_FILE=
-TRADE_LOG_FILE=
+PRICE_LOG_URL=http://<host>/bot/btc_price_log.jsonl
+RANGE_GRID_STRATEGY_PROFILE=range_grid_strategy_default.json
+SENTIMENT_STRATEGY_PROFILE=sentiment_strategy_default.json
 ```
 
 ## 2. Choose One Bot Configuration
 
-Use one service per bot. The easiest pattern is to create a dedicated env file
-for each bot, then point the service at that file.
+Use one service per bot, but point both services at the same `.env`. The shared
+file holds Kraken secrets, URLs, support-file paths, and the per-bot operation
+paths. Each bot then loads its own strategy JSON file.
 
-### Range Grid Bot Env
+### Shared Bot Env
 
-Create `/home/<user>/tradingbot/krakenbot/.env.range_grid`:
+Create `/home/<user>/tradingbot/krakenbot/.env`:
 
 ```env
 KRAKEN_API_KEY=<key>
 KRAKEN_API_SECRET=<secret>
 KRAKEN_API_URL=https://api.kraken.com
 KRAKEN_TICKER_URL=https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD
+KRAKEN_ORDERBOOK_URL=https://api.kraken.com/0/public/Depth?pair=XBTUSD&count=5
+KRAKEN_OHLC_URL=https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=60
 LLM_SIGNAL_URL=http://<host>/bot/llm_signal.json
 PRICE_LOG_URL=http://<host>/bot/btc_price_log.jsonl
+BOT_DIR_LIST_FILE=/home/<user>/tradingbot/bot_dirs.txt
 
 BOT_CONFIG_FILE=range_grid_config.json
-STRATEGY_PROFILE=range_grid_strategy_default.json
-BOT_STATE_FILE=range_grid_state.json
-TRADE_LOG_FILE=range_grid_trade_log.jsonl
-```
+BOT_STATE_FILE=last_state.json
+TRADE_LOG_FILE=trade_log.jsonl
 
-### Sentiment Executor Env
+RANGE_GRID_CONFIG_FILE=range_grid_config.json
+RANGE_GRID_STATE_FILE=last_state.json
+RANGE_GRID_TRADE_LOG_FILE=trade_log.jsonl
+RANGE_GRID_STRATEGY_PROFILE=range_grid_strategy_default.json
 
-Create `/home/<user>/tradingbot/krakenbot/.env.sentiment`:
-
-```env
-KRAKEN_API_KEY=<key>
-KRAKEN_API_SECRET=<secret>
-KRAKEN_API_URL=https://api.kraken.com
-KRAKEN_TICKER_URL=https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD
-LLM_SIGNAL_URL=http://<host>/bot/llm_signal.json
-
-BOT_CONFIG_FILE=sentiment_bot_config.json
-STRATEGY_PROFILE=sentiment_strategy_default.json
-BOT_STATE_FILE=sentiment_state.json
-TRADE_LOG_FILE=sentiment_trade_log.jsonl
+SENTIMENT_CONFIG_FILE=sentiment_bot_config.json
+SENTIMENT_STATE_FILE=sentiment_state.json
+SENTIMENT_TRADE_LOG_FILE=sentiment_trade_log.jsonl
 SENTIMENT_DECISION_CSV_FILE=sentiment_decisions.csv
+SENTIMENT_STRATEGY_PROFILE=sentiment_strategy_default.json
 
 KRAKEN_PAIR=XXBTZUSD
+SIGNAL_FILE=
 REQUEST_TIMEOUT_SECONDS=10
 KRAKEN_NONCE_RETRIES=2
 ```
 
 Bot tuning values such as grid anchor, entry spacing, position sizing,
 profit targets, thresholds, dry-run mode, and loop intervals now live in the
-strategy JSON file named by `STRATEGY_PROFILE`.
+strategy JSON files named by `RANGE_GRID_STRATEGY_PROFILE` and
+`SENTIMENT_STRATEGY_PROFILE`.
 
 Lock down env file permissions because they contain Kraken secrets:
 
 ```bash
-chmod 600 /home/<user>/tradingbot/krakenbot/.env.range_grid
-chmod 600 /home/<user>/tradingbot/krakenbot/.env.sentiment
+chmod 600 /home/<user>/tradingbot/krakenbot/.env
 ```
 
 ## 3. Install The Range Grid Service
@@ -122,7 +118,7 @@ Type=simple
 User=<user>
 Group=<user>
 WorkingDirectory=/home/<user>/tradingbot/krakenbot
-EnvironmentFile=/home/<user>/tradingbot/krakenbot/.env.range_grid
+EnvironmentFile=/home/<user>/tradingbot/krakenbot/.env
 ExecStart=/home/<user>/tradingbot/krakenbot/.venv/bin/python /home/<user>/tradingbot/krakenbot/range_grid_bot.py
 Restart=always
 RestartSec=15
@@ -164,7 +160,7 @@ Type=simple
 User=<user>
 Group=<user>
 WorkingDirectory=/home/<user>/tradingbot/krakenbot
-EnvironmentFile=/home/<user>/tradingbot/krakenbot/.env.sentiment
+EnvironmentFile=/home/<user>/tradingbot/krakenbot/.env
 ExecStart=/home/<user>/tradingbot/krakenbot/.venv/bin/python /home/<user>/tradingbot/krakenbot/kraken_sentiment_executor.py
 Restart=always
 RestartSec=15

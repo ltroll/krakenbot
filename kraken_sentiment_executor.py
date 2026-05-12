@@ -23,10 +23,26 @@ load_dotenv()
 # CONFIG
 # ----------------------
 
-CONFIG_FILE = os.getenv("BOT_CONFIG_FILE", "sentiment_bot_config.json")
-STRATEGY_PROFILE = os.getenv("STRATEGY_PROFILE") or "default"
-STATE_FILE = os.getenv("BOT_STATE_FILE", "sentiment_state.json")
-LOG_FILE = os.getenv("TRADE_LOG_FILE", "sentiment_trade_log.jsonl")
+CONFIG_FILE = (
+    os.getenv("SENTIMENT_CONFIG_FILE")
+    or os.getenv("BOT_CONFIG_FILE")
+    or "sentiment_bot_config.json"
+)
+STRATEGY_PROFILE = (
+    os.getenv("SENTIMENT_STRATEGY_PROFILE")
+    or os.getenv("STRATEGY_PROFILE")
+    or "sentiment_strategy_default.json"
+)
+STATE_FILE = (
+    os.getenv("SENTIMENT_STATE_FILE")
+    or os.getenv("BOT_STATE_FILE")
+    or "sentiment_state.json"
+)
+LOG_FILE = (
+    os.getenv("SENTIMENT_TRADE_LOG_FILE")
+    or os.getenv("TRADE_LOG_FILE")
+    or "sentiment_trade_log.jsonl"
+)
 DECISION_CSV_FILE = os.getenv(
     "SENTIMENT_DECISION_CSV_FILE",
     "sentiment_decisions.csv"

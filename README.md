@@ -58,9 +58,9 @@ The repo intentionally splits runtime configuration into two layers.
 - Kraken endpoints
 - external support file URLs
 - filenames and file paths
-- `STRATEGY_PROFILE`, which points to the active strategy JSON file
+- per-bot strategy file selectors
 
-JSON config files are for strategy tuning:
+Strategy JSON files are for bot-function tuning:
 
 - thresholds
 - position sizing
@@ -86,15 +86,30 @@ PRICE_LOG_URL=http://192.168.50.211/bot/btc_price_log.jsonl
 BOT_CONFIG_FILE=range_grid_config.json
 BOT_STATE_FILE=last_state.json
 TRADE_LOG_FILE=trade_log.jsonl
-STRATEGY_PROFILE=range_grid_strategy_default.json
+BOT_DIR_LIST_FILE=/home/losttroll/tradingbot/bot_dirs.txt
+
+RANGE_GRID_CONFIG_FILE=range_grid_config.json
+RANGE_GRID_STATE_FILE=last_state.json
+RANGE_GRID_TRADE_LOG_FILE=trade_log.jsonl
+RANGE_GRID_STRATEGY_PROFILE=range_grid_strategy_default.json
+
+SENTIMENT_CONFIG_FILE=sentiment_bot_config.json
+SENTIMENT_STATE_FILE=sentiment_state.json
+SENTIMENT_TRADE_LOG_FILE=sentiment_trade_log.jsonl
+SENTIMENT_DECISION_CSV_FILE=sentiment_decisions.csv
+SENTIMENT_STRATEGY_PROFILE=sentiment_strategy_default.json
+KRAKEN_PAIR=XXBTZUSD
+SIGNAL_FILE=
+REQUEST_TIMEOUT_SECONDS=10
+KRAKEN_NONCE_RETRIES=2
 DISCORD_WEB_HOOK=
 ```
 
 Notes:
 
-- `BOT_CONFIG_FILE` works with the range-grid bots, so config file selection can come from `.env`.
-- `STRATEGY_PROFILE` can point directly to a strategy JSON file, such as `range_grid_strategy_default.json`.
-- For compatibility, `STRATEGY_PROFILE=default` still selects a matching key under `strategy_profiles` in `BOT_CONFIG_FILE`.
+- Both `range_grid_bot.py` and `kraken_sentiment_executor.py` can now use the same `.env`.
+- `RANGE_GRID_STRATEGY_PROFILE` and `SENTIMENT_STRATEGY_PROFILE` point directly to each bot's strategy JSON file.
+- The generic `BOT_CONFIG_FILE`, `BOT_STATE_FILE`, `TRADE_LOG_FILE`, and `STRATEGY_PROFILE` keys are kept for compatibility with older scripts and single-bot setups.
 - Strategy tunables such as `grid_anchor`, `entry_step_pct`, and profit targets now live in the selected strategy file instead of `.env`.
 
 ## Support data model
@@ -143,8 +158,9 @@ This bot combines a recent BTC trading range with a sentiment gate.
 On startup it:
 
 - loads `.env`
-- selects the config JSON from `BOT_CONFIG_FILE` or defaults to `range_grid_config.json`
-- loads prior state from `BOT_STATE_FILE`
+- selects the config JSON from `RANGE_GRID_CONFIG_FILE`, then `BOT_CONFIG_FILE`, then `range_grid_config.json`
+- loads the strategy JSON from `RANGE_GRID_STRATEGY_PROFILE`
+- loads prior state from `RANGE_GRID_STATE_FILE`, then `BOT_STATE_FILE`
 - initializes the Kraken client
 - queries Kraken `AssetPairs` to discover valid price and volume precision
 - writes a `BOT_START` record to the trade log
