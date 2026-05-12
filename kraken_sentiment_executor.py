@@ -24,6 +24,7 @@ load_dotenv()
 # ----------------------
 
 CONFIG_FILE = os.getenv("BOT_CONFIG_FILE", "sentiment_bot_config.json")
+STRATEGY_PROFILE = os.getenv("STRATEGY_PROFILE", "default")
 STATE_FILE = os.getenv("BOT_STATE_FILE", "sentiment_state.json")
 LOG_FILE = os.getenv("TRADE_LOG_FILE", "sentiment_trade_log.jsonl")
 DECISION_CSV_FILE = os.getenv(
@@ -51,101 +52,69 @@ def load_config():
 config = load_config()
 
 
-def env_bool(name, default):
-    value = os.getenv(name)
+def select_strategy_profile(config_data):
+    profiles = config_data.get("strategy_profiles")
+    if profiles is None:
+        return config_data
+
+    if not isinstance(profiles, dict):
+        raise RuntimeError(f"{CONFIG_FILE} strategy_profiles must be an object")
+
+    profile = profiles.get(STRATEGY_PROFILE)
+    if profile is None:
+        available = ", ".join(sorted(profiles)) or "<none>"
+        raise RuntimeError(
+            f"Strategy profile '{STRATEGY_PROFILE}' not found in "
+            f"{CONFIG_FILE}. Available profiles: {available}"
+        )
+
+    return profile
+
+
+strategy_config = select_strategy_profile(config)
+
+
+def profile_bool(name, default):
+    value = strategy_config.get(name, default)
     if value is None:
         return default
 
-    return value.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(value, bool):
+        return value
+
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
-def env_float(name, default):
-    value = os.getenv(name)
+def profile_float(name, default):
+    value = strategy_config.get(name, default)
     return default if value is None else float(value)
 
 
-def env_int(name, default):
-    value = os.getenv(name)
+def profile_int(name, default):
+    value = strategy_config.get(name, default)
     return default if value is None else int(value)
 
 
-REQUEST_TIMEOUT = env_int(
-    "REQUEST_TIMEOUT_SECONDS",
-    config.get("request_timeout_seconds", 10)
-)
-KRAKEN_NONCE_RETRIES = env_int(
-    "KRAKEN_NONCE_RETRIES",
-    config.get("kraken_nonce_retries", 2)
-)
-PRICE_CHECK_INTERVAL_SECONDS = env_int(
-    "PRICE_CHECK_INTERVAL_SECONDS",
-    config.get("price_check_interval_seconds", 60)
-)
-MIN_TRADE_USD = env_float(
-    "MIN_TRADE_USD",
-    config.get("min_trade_usd", 30)
-)
-CONF_THRESHOLD = env_float(
-    "CONFIDENCE_THRESHOLD",
-    config.get("confidence_threshold", 0.45)
-)
-CONFIDENCE_WEIGHTING = env_bool(
-    "CONFIDENCE_WEIGHTING",
-    config.get("confidence_weighting", True)
-)
-DRY_RUN = env_bool("DRY_RUN", config.get("dry_run", False))
-EXECUTION_BUFFER_PCT = env_float(
-    "EXECUTION_BUFFER_PCT",
-    config.get("execution_buffer_pct", 0.0025)
-)
-REBALANCE_COOLDOWN_MINUTES = env_float(
-    "REBALANCE_COOLDOWN_MINUTES",
-    config.get("rebalance_cooldown_minutes", 15)
-)
-COOLDOWN_OVERRIDE_SIGNAL_ABS = env_float(
-    "COOLDOWN_OVERRIDE_SIGNAL_ABS",
-    config.get("cooldown_override_signal_abs", 0.20)
-)
-SENTIMENT_BUY_THRESHOLD = env_float(
-    "SENTIMENT_BUY_THRESHOLD",
-    config.get("sentiment_buy_threshold", 0.03)
-)
-POSITION_SIZE_PCT = env_float(
-    "POSITION_SIZE_PCT",
-    config.get("position_size_pct", 0.10)
-)
-MAX_TRADE_USD = env_float(
-    "MAX_TRADE_USD",
-    config.get("max_trade_usd", 0)
-)
-TARGET_PROFIT_PCT = env_float(
-    "TARGET_PROFIT_PCT",
-    config.get("target_profit_pct", 0.006)
-)
-ROUND_TRIP_FEE_PCT = env_float(
-    "ROUND_TRIP_FEE_PCT",
-    config.get("round_trip_fee_pct", 0.0032)
-)
-MAX_OPEN_SELL_ORDERS = env_int(
-    "MAX_OPEN_SELL_ORDERS",
-    config.get("max_open_sell_orders", 1)
-)
-MAX_INVENTORY_USD = env_float(
-    "MAX_INVENTORY_USD",
-    config.get("max_inventory_usd", 250)
-)
-PREVENT_BUY_ABOVE_LAST_SELL = env_bool(
-    "PREVENT_BUY_ABOVE_LAST_SELL",
-    config.get("prevent_buy_above_last_sell", True)
-)
-BUY_AFTER_SELL_DISCOUNT_PCT = env_float(
-    "BUY_AFTER_SELL_DISCOUNT_PCT",
-    config.get("buy_after_sell_discount_pct", 0.0)
-)
-HIGH_PRICE_BUY_BLOCK_PCT = env_float(
-    "HIGH_PRICE_BUY_BLOCK_PCT",
-    config.get("high_price_buy_block_pct", 0.0005)
-)
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
+KRAKEN_NONCE_RETRIES = int(os.getenv("KRAKEN_NONCE_RETRIES", "2"))
+PRICE_CHECK_INTERVAL_SECONDS = profile_int("price_check_interval_seconds", 60)
+MIN_TRADE_USD = profile_float("min_trade_usd", 30)
+CONF_THRESHOLD = profile_float("confidence_threshold", 0.45)
+CONFIDENCE_WEIGHTING = profile_bool("confidence_weighting", True)
+DRY_RUN = profile_bool("dry_run", False)
+EXECUTION_BUFFER_PCT = profile_float("execution_buffer_pct", 0.0025)
+REBALANCE_COOLDOWN_MINUTES = profile_float("rebalance_cooldown_minutes", 15)
+COOLDOWN_OVERRIDE_SIGNAL_ABS = profile_float("cooldown_override_signal_abs", 0.20)
+SENTIMENT_BUY_THRESHOLD = profile_float("sentiment_buy_threshold", 0.03)
+POSITION_SIZE_PCT = profile_float("position_size_pct", 0.10)
+MAX_TRADE_USD = profile_float("max_trade_usd", 0)
+TARGET_PROFIT_PCT = profile_float("target_profit_pct", 0.006)
+ROUND_TRIP_FEE_PCT = profile_float("round_trip_fee_pct", 0.0032)
+MAX_OPEN_SELL_ORDERS = profile_int("max_open_sell_orders", 1)
+MAX_INVENTORY_USD = profile_float("max_inventory_usd", 250)
+PREVENT_BUY_ABOVE_LAST_SELL = profile_bool("prevent_buy_above_last_sell", True)
+BUY_AFTER_SELL_DISCOUNT_PCT = profile_float("buy_after_sell_discount_pct", 0.0)
+HIGH_PRICE_BUY_BLOCK_PCT = profile_float("high_price_buy_block_pct", 0.0005)
 
 PAIR_INFO_CACHE = None
 
@@ -1306,6 +1275,7 @@ def main():
         "BOT_START",
         message="Sentiment executor starting",
         config_file=CONFIG_FILE,
+        strategy_profile=STRATEGY_PROFILE,
         state_file=STATE_FILE,
         log_file=LOG_FILE,
         pair=KRAKEN_PAIR,

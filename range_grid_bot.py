@@ -21,6 +21,7 @@ load_dotenv()
 # ----------------------
 
 CONFIG_FILE = os.getenv("BOT_CONFIG_FILE", "range_grid_config.json")
+STRATEGY_PROFILE = os.getenv("STRATEGY_PROFILE", "default")
 STATE_FILE = os.getenv("BOT_STATE_FILE", "last_state.json")
 LOG_FILE = os.getenv("TRADE_LOG_FILE", "trade_log.jsonl")
 
@@ -28,17 +29,6 @@ KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL")
 PRICE_LOG_URL = os.getenv("PRICE_LOG_URL")
-GRID_ANCHOR = os.getenv("GRID_ANCHOR")
-
-
-def env_int(name, default):
-    value = os.getenv(name)
-    return default if value is None else int(value)
-
-
-def env_float(name, default):
-    value = os.getenv(name)
-    return default if value is None else float(value)
 
 
 def parse_strategy_modes(raw_value):
@@ -52,111 +42,112 @@ def parse_strategy_modes(raw_value):
     ]
     return modes or ["low"]
 
-with open(CONFIG_FILE, encoding="utf-8") as f:
-    config = json.load(f)
+def load_config():
+    with open(CONFIG_FILE, encoding="utf-8") as f:
+        return json.load(f)
 
-range_window_hours = env_int("RANGE_WINDOW_HOURS", config["range_window_hours"])
-max_grid_size = env_int("MAX_GRID_SIZE", config["max_grid_size"])
-profit_target_pct = env_float("PROFIT_TARGET_PCT", config["profit_target_pct"])
-entry_step_pct = env_float(
-    "ENTRY_STEP_PCT",
-    config.get("entry_step_pct", profit_target_pct / 2)
+
+def select_strategy_profile(config_data):
+    profiles = config_data.get("strategy_profiles")
+    if profiles is None:
+        return config_data
+
+    if not isinstance(profiles, dict):
+        raise RuntimeError(f"{CONFIG_FILE} strategy_profiles must be an object")
+
+    profile = profiles.get(STRATEGY_PROFILE)
+    if profile is None:
+        available = ", ".join(sorted(profiles)) or "<none>"
+        raise RuntimeError(
+            f"Strategy profile '{STRATEGY_PROFILE}' not found in "
+            f"{CONFIG_FILE}. Available profiles: {available}"
+        )
+
+    return profile
+
+
+def profile_int(name, default):
+    value = strategy_config.get(name, default)
+    return default if value is None else int(value)
+
+
+def profile_float(name, default):
+    value = strategy_config.get(name, default)
+    return default if value is None else float(value)
+
+
+config = load_config()
+strategy_config = select_strategy_profile(config)
+
+range_window_hours = profile_int("range_window_hours", 24)
+max_grid_size = profile_int("max_grid_size", 4)
+profit_target_pct = profile_float("profit_target_pct", 0.01)
+entry_step_pct = profile_float("entry_step_pct", profit_target_pct / 2)
+round_trip_fee_pct = profile_float("round_trip_fee_pct", 0.0032)
+position_size_pct = profile_float("position_size_pct", 0.10)
+execution_signal_threshold = profile_float("execution_signal_threshold", 0.0)
+llm_target_proximity_pct = profile_float(
+    "llm_target_proximity_pct",
+    entry_step_pct
 )
-round_trip_fee_pct = env_float("ROUND_TRIP_FEE_PCT", config["round_trip_fee_pct"])
-position_size_pct = env_float("POSITION_SIZE_PCT", config["position_size_pct"])
-execution_signal_threshold = env_float(
-    "EXECUTION_SIGNAL_THRESHOLD",
-    config["execution_signal_threshold"]
+price_check_interval_seconds = profile_int("price_check_interval_seconds", 120)
+range_refresh_interval_minutes = profile_int("range_refresh_interval_minutes", 60)
+max_open_sell_orders = profile_int("max_open_sell_orders", 999999)
+max_inventory_usd = profile_float("max_inventory_usd", 1e18)
+aging_start_minutes = profile_int("aging_start_minutes", 999999)
+aging_step_minutes = profile_int("aging_step_minutes", 60)
+aging_profit_reduction_pct = profile_float("aging_profit_reduction_pct", 0.0)
+min_profit_target_pct = profile_float(
+    "min_profit_target_pct",
+    profit_target_pct
 )
-llm_target_proximity_pct = env_float(
-    "LLM_TARGET_PROXIMITY_PCT",
-    config.get("llm_target_proximity_pct", entry_step_pct)
+high_anchor_buy_cooldown_minutes = profile_int(
+    "high_anchor_buy_cooldown_minutes",
+    15
 )
-price_check_interval_seconds = env_int(
-    "PRICE_CHECK_INTERVAL_SECONDS",
-    config.get("price_check_interval_seconds", 120)
+max_open_high_anchor_orders = profile_int("max_open_high_anchor_orders", 3)
+high_anchor_profit_target_pct = profile_float(
+    "high_anchor_profit_target_pct",
+    profit_target_pct
 )
-range_refresh_interval_minutes = env_int(
-    "RANGE_REFRESH_INTERVAL_MINUTES",
-    config.get("range_refresh_interval_minutes", 60)
+sentiment_defensive_threshold = profile_float(
+    "sentiment_defensive_threshold",
+    max(0.03, execution_signal_threshold)
 )
-max_open_sell_orders = env_int(
-    "MAX_OPEN_SELL_ORDERS",
-    config.get("max_open_sell_orders", 999999)
+sentiment_risk_on_threshold = profile_float("sentiment_risk_on_threshold", 0.12)
+sentiment_defensive_size_multiplier = profile_float(
+    "sentiment_defensive_size_multiplier",
+    0.65
 )
-max_inventory_usd = env_float(
-    "MAX_INVENTORY_USD",
-    config.get("max_inventory_usd", 1e18)
+sentiment_risk_on_size_multiplier = profile_float(
+    "sentiment_risk_on_size_multiplier",
+    1.2
 )
-aging_start_minutes = env_int(
-    "AGING_START_MINUTES",
-    config.get("aging_start_minutes", 999999)
+sentiment_defensive_inventory_multiplier = profile_float(
+    "sentiment_defensive_inventory_multiplier",
+    0.7
 )
-aging_step_minutes = env_int(
-    "AGING_STEP_MINUTES",
-    config.get("aging_step_minutes", 60)
+sentiment_risk_on_inventory_multiplier = profile_float(
+    "sentiment_risk_on_inventory_multiplier",
+    1.2
 )
-aging_profit_reduction_pct = env_float(
-    "AGING_PROFIT_REDUCTION_PCT",
-    config.get("aging_profit_reduction_pct", 0.0)
+sentiment_defensive_open_sell_multiplier = profile_float(
+    "sentiment_defensive_open_sell_multiplier",
+    0.75
 )
-min_profit_target_pct = env_float(
-    "MIN_PROFIT_TARGET_PCT",
-    config.get("min_profit_target_pct", profit_target_pct)
+sentiment_risk_on_open_sell_multiplier = profile_float(
+    "sentiment_risk_on_open_sell_multiplier",
+    1.25
 )
-high_anchor_buy_cooldown_minutes = env_int(
-    "HIGH_ANCHOR_BUY_COOLDOWN_MINUTES",
-    config.get("high_anchor_buy_cooldown_minutes", 15)
+sentiment_disable_high_anchor_below = profile_float(
+    "sentiment_disable_high_anchor_below",
+    0.05
 )
-max_open_high_anchor_orders = env_int(
-    "MAX_OPEN_HIGH_ANCHOR_ORDERS",
-    config.get("max_open_high_anchor_orders", 3)
+sentiment_defensive_extra_aging_reduction_pct = profile_float(
+    "sentiment_defensive_extra_aging_reduction_pct",
+    0.001
 )
-high_anchor_profit_target_pct = env_float(
-    "HIGH_ANCHOR_PROFIT_TARGET_PCT",
-    config.get("high_anchor_profit_target_pct", profit_target_pct)
-)
-sentiment_defensive_threshold = env_float(
-    "SENTIMENT_DEFENSIVE_THRESHOLD",
-    config.get("sentiment_defensive_threshold", max(0.03, execution_signal_threshold))
-)
-sentiment_risk_on_threshold = env_float(
-    "SENTIMENT_RISK_ON_THRESHOLD",
-    config.get("sentiment_risk_on_threshold", 0.12)
-)
-sentiment_defensive_size_multiplier = env_float(
-    "SENTIMENT_DEFENSIVE_SIZE_MULTIPLIER",
-    config.get("sentiment_defensive_size_multiplier", 0.65)
-)
-sentiment_risk_on_size_multiplier = env_float(
-    "SENTIMENT_RISK_ON_SIZE_MULTIPLIER",
-    config.get("sentiment_risk_on_size_multiplier", 1.2)
-)
-sentiment_defensive_inventory_multiplier = env_float(
-    "SENTIMENT_DEFENSIVE_INVENTORY_MULTIPLIER",
-    config.get("sentiment_defensive_inventory_multiplier", 0.7)
-)
-sentiment_risk_on_inventory_multiplier = env_float(
-    "SENTIMENT_RISK_ON_INVENTORY_MULTIPLIER",
-    config.get("sentiment_risk_on_inventory_multiplier", 1.2)
-)
-sentiment_defensive_open_sell_multiplier = env_float(
-    "SENTIMENT_DEFENSIVE_OPEN_SELL_MULTIPLIER",
-    config.get("sentiment_defensive_open_sell_multiplier", 0.75)
-)
-sentiment_risk_on_open_sell_multiplier = env_float(
-    "SENTIMENT_RISK_ON_OPEN_SELL_MULTIPLIER",
-    config.get("sentiment_risk_on_open_sell_multiplier", 1.25)
-)
-sentiment_disable_high_anchor_below = env_float(
-    "SENTIMENT_DISABLE_HIGH_ANCHOR_BELOW",
-    config.get("sentiment_disable_high_anchor_below", 0.05)
-)
-sentiment_defensive_extra_aging_reduction_pct = env_float(
-    "SENTIMENT_DEFENSIVE_EXTRA_AGING_REDUCTION_PCT",
-    config.get("sentiment_defensive_extra_aging_reduction_pct", 0.001)
-)
-grid_anchor = (GRID_ANCHOR or config.get("grid_anchor", "low")).strip().lower()
+grid_anchor = strategy_config.get("grid_anchor", "low").strip().lower()
 strategy_modes = parse_strategy_modes(grid_anchor)
 
 # ----------------------
@@ -744,6 +735,7 @@ def main():
         "BOT_START",
         message="Range Grid Average bot starting",
         config_file=CONFIG_FILE,
+        strategy_profile=STRATEGY_PROFILE,
         state_file=STATE_FILE,
         log_file=LOG_FILE,
         grid_anchor=grid_anchor,

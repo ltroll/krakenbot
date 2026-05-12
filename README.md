@@ -58,7 +58,7 @@ The repo intentionally splits runtime configuration into two layers.
 - Kraken endpoints
 - external support file URLs
 - filenames and file paths
-- runtime toggles you may want to switch quickly between bots
+- `STRATEGY_PROFILE`, which selects the active strategy profile from JSON
 
 JSON config files are for strategy tuning:
 
@@ -86,21 +86,15 @@ PRICE_LOG_URL=http://192.168.50.211/bot/btc_price_log.jsonl
 BOT_CONFIG_FILE=range_grid_config.json
 BOT_STATE_FILE=last_state.json
 TRADE_LOG_FILE=trade_log.jsonl
-GRID_ANCHOR=mean
-ENTRY_STEP_PCT=0.005
-HIGH_ANCHOR_BUY_COOLDOWN_MINUTES=15
-MAX_OPEN_HIGH_ANCHOR_ORDERS=3
-HIGH_ANCHOR_PROFIT_TARGET_PCT=0.006
+STRATEGY_PROFILE=default
 DISCORD_WEB_HOOK=
 ```
 
 Notes:
 
 - `BOT_CONFIG_FILE` works with the range-grid bots, so config file selection can come from `.env`.
-- `GRID_ANCHOR` now also works from `.env`, which makes bot iteration easier than editing JSON every time.
-- `ENTRY_STEP_PCT` works from `.env`; for `GRID_ANCHOR=high`, `0.005` means the bot only buys inside the top 0.5% below the observed high.
-- `HIGH_ANCHOR_BUY_COOLDOWN_MINUTES`, `MAX_OPEN_HIGH_ANCHOR_ORDERS`, and `HIGH_ANCHOR_PROFIT_TARGET_PCT` tune the extra guardrails used by `GRID_ANCHOR=high`.
-- If `GRID_ANCHOR` is not set, the bot falls back to the value in `range_grid_config.json`, then to `"low"`.
+- `STRATEGY_PROFILE` selects the matching key under `strategy_profiles` in the JSON config file.
+- Strategy tunables such as `grid_anchor`, `entry_step_pct`, and profit targets now live in that selected strategy profile instead of `.env`.
 
 ## Support data model
 
@@ -177,12 +171,12 @@ Grid levels are derived from:
 - the configured grid depth
 - the chosen anchor point
 
-`GRID_ANCHOR` controls that anchor:
+The selected strategy profile's `grid_anchor` controls that anchor:
 
-- `GRID_ANCHOR=mean`: levels are centered off the recent average price
-- `GRID_ANCHOR=median`: levels are centered off the recent median price
-- `GRID_ANCHOR=high`: buys only when market price is within `entry_step_pct` below the observed high
-- `GRID_ANCHOR=low`: levels are built downward from the observed low
+- `grid_anchor: "mean"`: levels are centered off the recent average price
+- `grid_anchor: "median"`: levels are centered off the recent median price
+- `grid_anchor: "high"`: buys only when market price is within `entry_step_pct` below the observed high
+- `grid_anchor: "low"`: levels are built downward from the observed low
 
 This is useful because anchor placement strongly affects how aggressively the bot averages into a range.
 
@@ -196,14 +190,14 @@ Why `median` can help:
 
 ### Strategy values from `range_grid_config.json`
 
-Important values in [`range_grid_config.json`](/C:/Users/bgert/krakenbot/range_grid_config.json):
+Important values in the selected `strategy_profiles.<name>` object in [`range_grid_config.json`](/C:/Users/bgert/krakenbot/range_grid_config.json):
 
 - `range_window_hours`: how much recent history is used for the observed range
 - `max_grid_size`: number of buy levels
 - `profit_target_pct`: sell markup after a filled buy
 - `entry_step_pct`: spacing between buy levels below the selected anchor
 - `llm_target_proximity_pct`: how close market price must be to an LLM-provided target before the bot will act on it
-- `high_anchor_buy_cooldown_minutes`: minimum minutes between `GRID_ANCHOR=high` buys
+- `high_anchor_buy_cooldown_minutes`: minimum minutes between `grid_anchor: "high"` buys
 - `max_open_high_anchor_orders`: cap on active high-anchor buys and sells
 - `high_anchor_profit_target_pct`: profit target used for high-anchor buys before fees
 - `round_trip_fee_pct`: fee allowance added to sell pricing
@@ -369,9 +363,9 @@ If the grid feels too aggressive or too passive:
 - adjust `execution_signal_threshold`
 - adjust `position_size_pct`
 - adjust `max_grid_size`
-- change `GRID_ANCHOR` in `.env`
+- change `grid_anchor` in the selected strategy profile
 - adjust `profit_target_pct` to move the buy ladder closer to or farther from the anchor
-- try `GRID_ANCHOR=median` if `mean` is being pushed around by noisy price spikes
+- try `grid_anchor: "median"` if `mean` is being pushed around by noisy price spikes
 
 ## Current assumptions
 

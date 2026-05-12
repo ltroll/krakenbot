@@ -1,24 +1,26 @@
 {
-  "min_trade_usd": 30,
-  "position_size_pct": 0.10,
-  "max_trade_usd": 60,
-
-  "confidence_threshold": 0.45,
-  "confidence_weighting": true,
-
-  "volatility_dampening": true,
-  "volatility_cutoff": 0.0025,
-
-  "rebalance_cooldown_minutes": 15,
-  "cooldown_override_signal_abs": 0.20,
-  "sentiment_buy_threshold": 0.03,
-  "target_profit_pct": 0.006,
-  "round_trip_fee_pct": 0.0032,
-  "max_open_sell_orders": 1,
-  "max_inventory_usd": 250,
-  "prevent_buy_above_last_sell": true,
-  "buy_after_sell_discount_pct": 0.0,
-  "high_price_buy_block_pct": 0.0005,
-
-  "dry_run": false
+  "strategy_profiles": {
+    "default": {
+      "min_trade_usd": 20,
+      "position_size_pct": 0.15,
+      "max_trade_usd": 90,
+      "confidence_threshold": 0.45,
+      "confidence_weighting": true,
+      "volatility_dampening": true,
+      "volatility_cutoff": 0.0025,
+      "rebalance_cooldown_minutes": 10,
+      "cooldown_override_signal_abs": 0.2,
+      "sentiment_buy_threshold": 0.02,
+      "target_profit_pct": 0.008,
+      "round_trip_fee_pct": 0.006,
+      "max_open_sell_orders": 2,
+      "max_inventory_usd": 400,
+      "prevent_buy_above_last_sell": true,
+      "buy_after_sell_discount_pct": 0.001,
+      "high_price_buy_block_pct": 0.001,
+      "dry_run": false,
+      "execution_buffer_pct": 0.0025,
+      "price_check_interval_seconds": 60
+    }
+  }
 }

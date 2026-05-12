@@ -46,9 +46,9 @@ KRAKEN_API_URL=https://api.kraken.com
 KRAKEN_TICKER_URL=https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD
 LLM_SIGNAL_URL=http://<host>/bot/llm_signal.json
 BOT_CONFIG_FILE=
+STRATEGY_PROFILE=default
 BOT_STATE_FILE=
 TRADE_LOG_FILE=
-PRICE_CHECK_INTERVAL_SECONDS=60
 ```
 
 ## 2. Choose One Bot Configuration
@@ -69,16 +69,9 @@ LLM_SIGNAL_URL=http://<host>/bot/llm_signal.json
 PRICE_LOG_URL=http://<host>/bot/btc_price_log.jsonl
 
 BOT_CONFIG_FILE=range_grid_config.json
+STRATEGY_PROFILE=default
 BOT_STATE_FILE=range_grid_state.json
 TRADE_LOG_FILE=range_grid_trade_log.jsonl
-
-GRID_ANCHOR=median
-ENTRY_STEP_PCT=0.005
-HIGH_ANCHOR_BUY_COOLDOWN_MINUTES=15
-MAX_OPEN_HIGH_ANCHOR_ORDERS=3
-HIGH_ANCHOR_PROFIT_TARGET_PCT=0.006
-PRICE_CHECK_INTERVAL_SECONDS=60
-RANGE_REFRESH_INTERVAL_MINUTES=15
 ```
 
 ### Sentiment Executor Env
@@ -93,31 +86,19 @@ KRAKEN_TICKER_URL=https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD
 LLM_SIGNAL_URL=http://<host>/bot/llm_signal.json
 
 BOT_CONFIG_FILE=sentiment_bot_config.json
+STRATEGY_PROFILE=default
 BOT_STATE_FILE=sentiment_state.json
 TRADE_LOG_FILE=sentiment_trade_log.jsonl
 SENTIMENT_DECISION_CSV_FILE=sentiment_decisions.csv
 
 KRAKEN_PAIR=XXBTZUSD
-PRICE_CHECK_INTERVAL_SECONDS=60
+REQUEST_TIMEOUT_SECONDS=10
 KRAKEN_NONCE_RETRIES=2
-MIN_TRADE_USD=30
-POSITION_SIZE_PCT=0.10
-MAX_TRADE_USD=60
-CONFIDENCE_THRESHOLD=0.45
-CONFIDENCE_WEIGHTING=true
-DRY_RUN=false
-EXECUTION_BUFFER_PCT=0.0025
-REBALANCE_COOLDOWN_MINUTES=15
-COOLDOWN_OVERRIDE_SIGNAL_ABS=0.20
-SENTIMENT_BUY_THRESHOLD=0.03
-TARGET_PROFIT_PCT=0.006
-ROUND_TRIP_FEE_PCT=0.0032
-MAX_OPEN_SELL_ORDERS=1
-MAX_INVENTORY_USD=250
-PREVENT_BUY_ABOVE_LAST_SELL=true
-BUY_AFTER_SELL_DISCOUNT_PCT=0.0
-HIGH_PRICE_BUY_BLOCK_PCT=0.0005
 ```
+
+Bot tuning values such as grid anchor, entry spacing, position sizing,
+profit targets, thresholds, dry-run mode, and loop intervals now live in the
+selected `strategy_profiles.<name>` object inside the JSON config file.
 
 Lock down env file permissions because they contain Kraken secrets:
 
@@ -244,7 +225,7 @@ journalctl -u kraken-sentiment.service -n 100 --no-pager
 
 Before enabling live trading:
 
-- Run with `DRY_RUN=true` for the sentiment executor until logs look correct.
+- Set `dry_run` to `true` in the selected sentiment strategy profile until logs look correct.
 - Confirm the bot writes to the intended `TRADE_LOG_FILE`.
 - Confirm the bot writes to the intended `BOT_STATE_FILE`.
 - Confirm only one service is controlling the same strategy state file.
