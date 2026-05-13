@@ -5,6 +5,7 @@
   "profit_target_pct": 0.01,
   "entry_step_pct": 0.0045,
   "llm_target_proximity_pct": 0.003,
+  "llm_target_min_signal": -0.05,
   "round_trip_fee_pct": 0.0032,
   "position_size_pct": 0.1,
   "max_open_sell_orders": 12,
