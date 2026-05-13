@@ -136,6 +136,22 @@ llm_target_min_signal = profile_float(
     "llm_target_min_signal",
     min(-0.05, execution_signal_threshold)
 )
+low_min_signal = profile_float(
+    "low_min_signal",
+    min(-0.05, execution_signal_threshold)
+)
+mean_min_signal = profile_float(
+    "mean_min_signal",
+    execution_signal_threshold
+)
+median_min_signal = profile_float(
+    "median_min_signal",
+    execution_signal_threshold
+)
+high_min_signal = profile_float(
+    "high_min_signal",
+    max(0.05, execution_signal_threshold)
+)
 price_check_interval_seconds = profile_int("price_check_interval_seconds", 120)
 range_refresh_interval_minutes = profile_int("range_refresh_interval_minutes", 60)
 max_open_sell_orders = profile_int("max_open_sell_orders", 999999)
@@ -760,6 +776,18 @@ def sentiment_regime(execution_signal):
     }
 
 
+def min_signal_for_buy_source(buy_source):
+    if buy_source == "llm_target":
+        return llm_target_min_signal
+    if buy_source == "range_mean":
+        return mean_min_signal
+    if buy_source == "range_median":
+        return median_min_signal
+    if buy_source == "range_high_band":
+        return high_min_signal
+    return low_min_signal
+
+
 def current_inventory_usd(current_price):
     open_buy_notional = sum(
         (order.get("price") or current_price) * (order.get("volume") or 0)
@@ -795,6 +823,10 @@ def main():
         execution_signal_threshold=execution_signal_threshold,
         llm_target_proximity_pct=llm_target_proximity_pct,
         llm_target_min_signal=llm_target_min_signal,
+        low_min_signal=low_min_signal,
+        mean_min_signal=mean_min_signal,
+        median_min_signal=median_min_signal,
+        high_min_signal=high_min_signal,
         price_check_interval_seconds=price_check_interval_seconds,
         range_refresh_interval_minutes=range_refresh_interval_minutes,
         max_open_sell_orders=max_open_sell_orders,
@@ -1243,9 +1275,6 @@ def main():
                     buy_source=buy_source
                 )
 
-            normal_grid_buy_allowed = (
-                low and high and execution_signal >= execution_signal_threshold
-            )
             llm_buy_allowed = (
                 low and high
                 and llm_target is not None
@@ -1253,7 +1282,14 @@ def main():
             )
 
             # BUY CANDIDATES
-            if llm_buy_allowed or normal_grid_buy_allowed:
+            if low and high and (
+                llm_buy_allowed or execution_signal >= min(
+                    low_min_signal,
+                    mean_min_signal,
+                    median_min_signal,
+                    high_min_signal
+                )
+            ):
                 candidate_levels = []
                 if llm_buy_allowed:
                     candidate_levels = [
@@ -1266,20 +1302,28 @@ def main():
                 else:
                     for strategy_mode in strategy_modes:
                         if strategy_mode == "mean":
+                            if execution_signal < mean_min_signal:
+                                continue
                             grid = compute_grid(low, high, mean)
                             sell_pct_override = None
                             buy_source = "range_mean"
                         elif strategy_mode == "median" and median is not None:
+                            if execution_signal < median_min_signal:
+                                continue
                             grid = compute_grid(low, high, median)
                             sell_pct_override = None
                             buy_source = "range_median"
                         elif strategy_mode == "high":
+                            if execution_signal < high_min_signal:
+                                continue
                             if not regime["allow_high_anchor"]:
                                 continue
                             grid = compute_high_anchor_grid(high, price)
                             sell_pct_override = high_anchor_profit_target_pct
                             buy_source = "range_high_band"
                         else:
+                            if execution_signal < low_min_signal:
+                                continue
                             grid = compute_grid(low, high, low)
                             sell_pct_override = None
                             buy_source = "range_low"
@@ -1353,6 +1397,11 @@ def main():
                         and execution_signal < llm_target_min_signal
                     ):
                         skip_reason = "llm_signal_below_min"
+                    elif (
+                        buy_source != "llm_target"
+                        and execution_signal < min_signal_for_buy_source(buy_source)
+                    ):
+                        skip_reason = "strategy_signal_below_min"
                     elif (
                         buy_source == "range_high_band"
                         and high_anchor_cooldown_remaining > 0
@@ -1488,6 +1537,10 @@ def main():
                     execution_signal=execution_signal,
                     threshold=execution_signal_threshold,
                     llm_target_min_signal=llm_target_min_signal,
+                    low_min_signal=low_min_signal,
+                    mean_min_signal=mean_min_signal,
+                    median_min_signal=median_min_signal,
+                    high_min_signal=high_min_signal,
                     range_low=low,
                     range_high=high,
                     range_mean=mean,
@@ -1511,6 +1564,10 @@ def main():
                 execution_signal=execution_signal,
                 threshold=execution_signal_threshold,
                 llm_target_min_signal=llm_target_min_signal,
+                low_min_signal=low_min_signal,
+                mean_min_signal=mean_min_signal,
+                median_min_signal=median_min_signal,
+                high_min_signal=high_min_signal,
                 range_low=low,
                 range_high=high,
                 range_mean=mean,
@@ -1545,7 +1602,14 @@ def main():
                         round(candidate["level"], PRICE_DECIMALS)
                         for candidate in deduped_candidates
                     ]
-                    if llm_buy_allowed or normal_grid_buy_allowed
+                    if low and high and (
+                        llm_buy_allowed or execution_signal >= min(
+                            low_min_signal,
+                            mean_min_signal,
+                            median_min_signal,
+                            high_min_signal
+                        )
+                    )
                     else []
                 ),
                 high_anchor_order_count=high_anchor_open_order_count(),
