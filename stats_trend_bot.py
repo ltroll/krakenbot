@@ -40,6 +40,7 @@ KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY")
 KRAKEN_API_SECRET = os.getenv("KRAKEN_API_SECRET")
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL", "https://api.kraken.com")
 KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
+KRAKEN_ORDERBOOK_URL = os.getenv("KRAKEN_ORDERBOOK_URL")
 PRICE_LOG_URL = os.getenv("PRICE_LOG_URL")
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
 
@@ -79,6 +80,19 @@ def profile_int(name, default):
     return default if value is None else int(value)
 
 
+def profile_float_list(name, default):
+    value = strategy_config.get(name, default)
+    if value is None:
+        return default
+    if isinstance(value, list):
+        return [float(item) for item in value]
+    return [
+        float(item.strip())
+        for item in str(value).split(",")
+        if item.strip()
+    ]
+
+
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
 KRAKEN_NONCE_RETRIES = int(os.getenv("KRAKEN_NONCE_RETRIES", "2"))
 DRY_RUN = profile_bool("dry_run", True)
@@ -89,7 +103,6 @@ FAST_MA_SAMPLES = profile_int("fast_ma_samples", 6)
 SLOW_MA_SAMPLES = profile_int("slow_ma_samples", 24)
 MOMENTUM_LOOKBACK_SAMPLES = profile_int("momentum_lookback_samples", 12)
 BREAKOUT_LOOKBACK_SAMPLES = profile_int("breakout_lookback_samples", 24)
-TREND_BUY_THRESHOLD = profile_float("trend_buy_threshold", 0.65)
 TREND_EXIT_THRESHOLD = profile_float("trend_exit_threshold", -0.25)
 MIN_MOMENTUM_PCT = profile_float("min_momentum_pct", 0.0015)
 MIN_MA_SPREAD_PCT = profile_float("min_ma_spread_pct", 0.0008)
@@ -100,6 +113,30 @@ POSITION_SIZE_PCT = profile_float("position_size_pct", 0.1)
 MAX_TRADE_USD = profile_float("max_trade_usd", 90)
 DRY_RUN_BASE_BALANCE = profile_float("dry_run_base_balance", 0)
 DRY_RUN_QUOTE_BALANCE = profile_float("dry_run_quote_balance", 1000)
+ORDERBOOK_DEPTH_COUNT = profile_int("orderbook_depth_count", 50)
+ORDERBOOK_CANDIDATE_COUNT = profile_int("orderbook_candidate_count", 5)
+ORDERBOOK_ENTRY_STEP_PCT = profile_float("orderbook_entry_step_pct", 0.0015)
+ORDERBOOK_EXIT_TARGET_PCTS = profile_float_list(
+    "orderbook_exit_target_pcts",
+    [0.004, 0.007, 0.01]
+)
+ORDERBOOK_MIN_ENTRY_PROBABILITY = profile_float(
+    "orderbook_min_entry_probability",
+    0.28
+)
+ORDERBOOK_MIN_EXIT_PROBABILITY = profile_float(
+    "orderbook_min_exit_probability",
+    0.42
+)
+ORDERBOOK_MIN_EXPECTED_VALUE_PCT = profile_float(
+    "orderbook_min_expected_value_pct",
+    0.0015
+)
+ORDERBOOK_MAX_ENTRY_DROP_PCT = profile_float("orderbook_max_entry_drop_pct", 0.012)
+ORDERBOOK_PRESSURE_WINDOW_PCT = profile_float(
+    "orderbook_pressure_window_pct",
+    0.004
+)
 MAX_OPEN_SELL_ORDERS = profile_int("max_open_sell_orders", 2)
 MAX_INVENTORY_USD = profile_float("max_inventory_usd", 400)
 REBALANCE_COOLDOWN_MINUTES = profile_float("rebalance_cooldown_minutes", 15)
@@ -126,6 +163,13 @@ DECISION_CSV_FIELDS = [
     "breakout_pct",
     "volatility_pct",
     "range_position",
+    "candidate_entry_price",
+    "candidate_exit_price",
+    "candidate_entry_probability",
+    "candidate_exit_probability",
+    "candidate_joint_probability",
+    "candidate_expected_value_pct",
+    "candidate_entry_drop_pct",
     "volume",
     "trade_value",
     "base_balance",
@@ -438,6 +482,47 @@ def get_price():
         return None
 
 
+def get_orderbook():
+    try:
+        if KRAKEN_ORDERBOOK_URL:
+            r = requests.get(KRAKEN_ORDERBOOK_URL, timeout=REQUEST_TIMEOUT)
+        else:
+            url = KRAKEN_API_URL.rstrip("/") + "/0/public/Depth"
+            r = requests.get(
+                url,
+                params={"pair": KRAKEN_PAIR, "count": ORDERBOOK_DEPTH_COUNT},
+                timeout=REQUEST_TIMEOUT
+            )
+        r.raise_for_status()
+        data = r.json()
+
+        if data.get("error"):
+            raise RuntimeError(data["error"])
+
+        book = next(iter(data["result"].values()), None)
+        if not book:
+            raise RuntimeError(f"Order book not found for {KRAKEN_PAIR}")
+
+        bids = [
+            {"price": float(row[0]), "volume": float(row[1])}
+            for row in book.get("bids", [])
+        ]
+        asks = [
+            {"price": float(row[0]), "volume": float(row[1])}
+            for row in book.get("asks", [])
+        ]
+        bids.sort(key=lambda item: item["price"], reverse=True)
+        asks.sort(key=lambda item: item["price"])
+
+        if not bids or not asks:
+            raise RuntimeError("Order book missing bids or asks")
+
+        return {"bids": bids, "asks": asks}
+    except Exception as e:
+        log_event("ORDERBOOK_ERROR", message=str(e))
+        return None
+
+
 def get_balances():
     if DRY_RUN and (not KRAKEN_API_KEY or not KRAKEN_API_SECRET):
         return DRY_RUN_BASE_BALANCE, DRY_RUN_QUOTE_BALANCE
@@ -622,6 +707,165 @@ def compute_trend_signal(price):
     }
 
 
+def depth_notional(levels, predicate):
+    return sum(
+        level["price"] * level["volume"]
+        for level in levels
+        if predicate(level["price"])
+    )
+
+
+def estimate_exit_probability(entry_price, exit_price, book, trend_signal):
+    asks_between = depth_notional(
+        book["asks"],
+        lambda ask_price: entry_price <= ask_price <= exit_price
+    )
+    bid_support = depth_notional(
+        book["bids"],
+        lambda bid_price: bid_price >= entry_price * (1 - ORDERBOOK_PRESSURE_WINDOW_PCT)
+    )
+    depth_total = max(asks_between + bid_support, 1e-9)
+    resistance_ratio = asks_between / depth_total
+    trend_bias = clamp((trend_signal["trend_score"] + 1) / 2, 0, 1)
+    momentum_bias = clamp(
+        trend_signal["momentum_pct"] / max(MIN_MOMENTUM_PCT * 4, 1e-9),
+        -1,
+        1
+    )
+    distance_pct = pct_change(exit_price, entry_price)
+    distance_penalty = clamp(
+        distance_pct / max(max(ORDERBOOK_EXIT_TARGET_PCTS), 1e-9),
+        0,
+        1
+    )
+    probability = (
+        0.25
+        + 0.35 * trend_bias
+        + 0.20 * max(0, momentum_bias)
+        + 0.20 * (1 - resistance_ratio)
+        - 0.15 * distance_penalty
+    )
+    return clamp(probability, 0.05, 0.95)
+
+
+def estimate_entry_probability(price, entry_price, book, trend_signal):
+    drop_pct = max(0, pct_change(price, entry_price))
+    asks_near = depth_notional(
+        book["asks"],
+        lambda ask_price: price <= ask_price <= price * (1 + ORDERBOOK_PRESSURE_WINDOW_PCT)
+    )
+    bids_to_entry = depth_notional(
+        book["bids"],
+        lambda bid_price: entry_price <= bid_price <= price
+    )
+    pressure_total = max(asks_near + bids_to_entry, 1e-9)
+    sell_pressure = asks_near / pressure_total
+    trend_down_bias = clamp((-trend_signal["trend_score"] + 1) / 2, 0, 1)
+    distance_penalty = clamp(
+        drop_pct / max(ORDERBOOK_MAX_ENTRY_DROP_PCT, 1e-9),
+        0,
+        1
+    )
+    probability = (
+        0.15
+        + 0.45 * sell_pressure
+        + 0.25 * trend_down_bias
+        + 0.15 * (1 - distance_penalty)
+    )
+    return clamp(probability, 0.03, 0.9)
+
+
+def candidate_csv_kwargs(candidate):
+    if not candidate:
+        return {
+            "candidate_entry_price": None,
+            "candidate_exit_price": None,
+            "candidate_entry_probability": None,
+            "candidate_exit_probability": None,
+            "candidate_joint_probability": None,
+            "candidate_expected_value_pct": None,
+            "candidate_entry_drop_pct": None
+        }
+
+    return {
+        "candidate_entry_price": candidate.get("entry_price"),
+        "candidate_exit_price": candidate.get("exit_price"),
+        "candidate_entry_probability": candidate.get("entry_probability"),
+        "candidate_exit_probability": candidate.get("exit_probability"),
+        "candidate_joint_probability": candidate.get("joint_probability"),
+        "candidate_expected_value_pct": candidate.get("expected_value_pct"),
+        "candidate_entry_drop_pct": candidate.get("entry_drop_pct")
+    }
+
+
+def compute_orderbook_candidates(price, trend_signal):
+    book = get_orderbook()
+    if book is None:
+        return {
+            "usable": False,
+            "reason": "missing_orderbook",
+            "candidates": []
+        }
+
+    candidates = []
+    for index in range(ORDERBOOK_CANDIDATE_COUNT):
+        entry_drop_pct = ORDERBOOK_ENTRY_STEP_PCT * (index + 1)
+        if entry_drop_pct > ORDERBOOK_MAX_ENTRY_DROP_PCT:
+            continue
+
+        entry_price = price * (1 - entry_drop_pct)
+        entry_probability = estimate_entry_probability(
+            price,
+            entry_price,
+            book,
+            trend_signal
+        )
+
+        for exit_target_pct in ORDERBOOK_EXIT_TARGET_PCTS:
+            exit_price = entry_price * (1 + exit_target_pct + ROUND_TRIP_FEE_PCT)
+            exit_probability = estimate_exit_probability(
+                entry_price,
+                exit_price,
+                book,
+                trend_signal
+            )
+            joint_probability = entry_probability * exit_probability
+            gross_reward_pct = exit_target_pct
+            expected_value_pct = (
+                entry_probability
+                * (
+                    exit_probability * gross_reward_pct
+                    - (1 - exit_probability) * entry_drop_pct
+                )
+            )
+            candidates.append(
+                {
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "entry_drop_pct": entry_drop_pct,
+                    "exit_target_pct": exit_target_pct,
+                    "entry_probability": entry_probability,
+                    "exit_probability": exit_probability,
+                    "joint_probability": joint_probability,
+                    "expected_value_pct": expected_value_pct
+                }
+            )
+
+    if not candidates:
+        return {
+            "usable": False,
+            "reason": "no_orderbook_candidates",
+            "candidates": []
+        }
+
+    best = max(candidates, key=lambda item: item["expected_value_pct"])
+    return {
+        "usable": True,
+        "best": best,
+        "candidates": candidates
+    }
+
+
 # ----------------------
 # ORDER EXECUTION
 # ----------------------
@@ -656,28 +900,52 @@ def sell_target_price(buy_price):
     return buy_price * (1 + TARGET_PROFIT_PCT + ROUND_TRIP_FEE_PCT)
 
 
-def place_market_buy(volume, cycle_id):
+def sell_target_price_for_order(order, buy_price):
+    exit_price = order.get("candidate_exit_price")
+    if exit_price:
+        return float(exit_price)
+    return sell_target_price(buy_price)
+
+
+def place_limit_buy(price, volume, cycle_id, candidate_exit_price=None):
+    buy_price = round_price(price)
+    buy_volume = round_volume(volume)
+
     if DRY_RUN:
         state["stats"]["dry_run_trades"] += 1
         state["stats"]["buy_orders_placed"] += 1
+        txid = f"dry_run_buy_{int(time.time() * 1000)}"
         state["last_trade_at"] = datetime.now(timezone.utc).isoformat()
+        state["open_buy_orders"][txid] = {
+            "txid": txid,
+            "volume": buy_volume,
+            "price": buy_price,
+            "placed_at": cycle_id,
+            "candidate_exit_price": candidate_exit_price,
+            "dry_run": True
+        }
+        save_state(state)
         record_trade_history(
             {
                 "ts": state["last_trade_at"],
                 "cycle_id": cycle_id,
                 "dry_run": True,
                 "side": "buy",
-                "volume": volume
+                "volume": buy_volume,
+                "price": buy_price,
+                "txid": txid
             }
         )
         log_and_console(
             "DRY_RUN_BUY",
-            message=f"buy {volume}",
+            message=f"limit buy {buy_volume} @ {buy_price}",
             cycle_id=cycle_id,
             side="buy",
-            volume=volume
+            volume=buy_volume,
+            price=buy_price,
+            txid=txid
         )
-        return {"dry_run": True}
+        return {"dry_run": True, "result": {"txid": [txid]}}
 
     result = safe_kraken_private(
         "BUY",
@@ -685,8 +953,9 @@ def place_market_buy(volume, cycle_id):
         {
             "pair": KRAKEN_PAIR,
             "type": "buy",
-            "ordertype": "market",
-            "volume": volume
+            "ordertype": "limit",
+            "price": str(buy_price),
+            "volume": buy_volume
         }
     )
 
@@ -703,17 +972,19 @@ def place_market_buy(volume, cycle_id):
                 "cycle_id": cycle_id,
                 "dry_run": False,
                 "side": "buy",
-                "volume": volume,
+                "volume": buy_volume,
+                "price": buy_price,
                 "txid": txid,
                 **fill
             }
         )
         log_and_console(
             "BUY_ORDER_PLACED",
-            message=f"buy {volume}",
+            message=f"limit buy {buy_volume} @ {buy_price}",
             cycle_id=cycle_id,
             side="buy",
-            volume=volume,
+            volume=buy_volume,
+            price=buy_price,
             txid=txid,
             **fill,
             result=result.get("result")
@@ -728,6 +999,18 @@ def place_limit_sell(price, volume, cycle_id, buy_txid=None, buy_price=None):
     sell_volume = round_volume(volume)
 
     if DRY_RUN:
+        txid = f"dry_run_sell_{int(time.time() * 1000)}"
+        state["stats"]["sell_orders_placed"] += 1
+        state["open_sell_orders"][txid] = {
+            "txid": txid,
+            "volume": sell_volume,
+            "buy_price": buy_price,
+            "sell_price": sell_price,
+            "buy_txid": buy_txid,
+            "placed_at": cycle_id,
+            "dry_run": True
+        }
+        save_state(state)
         log_and_console(
             "DRY_RUN_SELL",
             message=f"sell {sell_volume} @ {sell_price}",
@@ -736,9 +1019,10 @@ def place_limit_sell(price, volume, cycle_id, buy_txid=None, buy_price=None):
             volume=sell_volume,
             price=sell_price,
             buy_txid=buy_txid,
-            buy_price=buy_price
+            buy_price=buy_price,
+            txid=txid
         )
-        return {"dry_run": True}
+        return {"dry_run": True, "result": {"txid": [txid]}}
 
     result = safe_kraken_private(
         "SELL",
@@ -801,8 +1085,9 @@ def current_inventory_usd(current_price):
     return open_buy_notional + open_sell_notional
 
 
-def place_profit_sell_for_buy(cycle_id, buy_txid, buy_price, volume):
-    target_price = sell_target_price(buy_price)
+def place_profit_sell_for_buy(cycle_id, buy_txid, buy_price, volume, order=None):
+    order = order or {}
+    target_price = sell_target_price_for_order(order, buy_price)
     log_event(
         "TRADE_DECISION",
         cycle_id=cycle_id,
@@ -812,7 +1097,9 @@ def place_profit_sell_for_buy(cycle_id, buy_txid, buy_price, volume):
         buy_price=buy_price,
         price=round_price(target_price),
         volume=round_volume(volume),
-        target_profit_pct=TARGET_PROFIT_PCT,
+        target_profit_pct=(
+            pct_change(target_price, buy_price) - ROUND_TRIP_FEE_PCT
+        ),
         round_trip_fee_pct=ROUND_TRIP_FEE_PCT
     )
     return place_limit_sell(
@@ -824,8 +1111,39 @@ def place_profit_sell_for_buy(cycle_id, buy_txid, buy_price, volume):
     )
 
 
-def process_open_buy_orders(cycle_id):
+def process_open_buy_orders(cycle_id, current_price=None):
     for txid, order in list(state["open_buy_orders"].items()):
+        if DRY_RUN and order.get("dry_run"):
+            if current_price is None or current_price > order.get("price", 0):
+                continue
+
+            fill = {
+                "volume": order.get("volume"),
+                "price": order.get("price"),
+                "cost": order.get("volume", 0) * order.get("price", 0),
+                "fee": None
+            }
+            state["stats"]["buy_orders_filled"] += 1
+            del state["open_buy_orders"][txid]
+            save_state(state)
+            log_and_console(
+                "DRY_RUN_BUY_FILLED",
+                message=f"buy filled @ {round_price(fill['price'])}",
+                cycle_id=cycle_id,
+                txid=txid,
+                volume=fill["volume"],
+                price=fill["price"],
+                cost=fill["cost"]
+            )
+            place_profit_sell_for_buy(
+                cycle_id,
+                txid,
+                fill["price"],
+                fill["volume"],
+                order=order
+            )
+            continue
+
         status = query_order(txid)
         if status is None:
             continue
@@ -854,7 +1172,8 @@ def process_open_buy_orders(cycle_id):
                 cycle_id,
                 txid,
                 fill["price"],
-                fill["volume"]
+                fill["volume"],
+                order=order
             )
         elif order_status in ("canceled", "expired"):
             del state["open_buy_orders"][txid]
@@ -868,8 +1187,28 @@ def process_open_buy_orders(cycle_id):
             )
 
 
-def process_open_sell_orders(cycle_id):
+def process_open_sell_orders(cycle_id, current_price=None):
     for txid, order in list(state["open_sell_orders"].items()):
+        if DRY_RUN and order.get("dry_run"):
+            if current_price is None or current_price < order.get("sell_price", 0):
+                continue
+
+            state["stats"]["sell_orders_filled"] += 1
+            state["last_sell_price"] = order.get("sell_price")
+            state["last_sell_at"] = cycle_id
+            del state["open_sell_orders"][txid]
+            save_state(state)
+            log_and_console(
+                "DRY_RUN_SELL_FILLED",
+                message=f"sell filled @ {round_price(state['last_sell_price'])}",
+                cycle_id=cycle_id,
+                txid=txid,
+                volume=order.get("volume"),
+                price=state["last_sell_price"],
+                buy_price=order.get("buy_price")
+            )
+            continue
+
         status = query_order(txid)
         if status is None:
             continue
@@ -909,11 +1248,14 @@ def process_open_sell_orders(cycle_id):
             )
 
 
-def maybe_handle_submitted_buy(result, cycle_id, volume, price):
+def maybe_handle_submitted_buy(
+    result,
+    cycle_id,
+    volume,
+    price,
+    candidate_exit_price=None
+):
     if DRY_RUN:
-        state["stats"]["buy_orders_filled"] += 1
-        save_state(state)
-        place_profit_sell_for_buy(cycle_id, "dry_run_buy", price, volume)
         return
 
     if not result:
@@ -931,7 +1273,13 @@ def maybe_handle_submitted_buy(result, cycle_id, volume, price):
     if txid and order_status == "closed" and fill_volume > 0 and fill_price > 0:
         state["stats"]["buy_orders_filled"] += 1
         save_state(state)
-        place_profit_sell_for_buy(cycle_id, txid, fill_price, fill_volume)
+        place_profit_sell_for_buy(
+            cycle_id,
+            txid,
+            fill_price,
+            fill_volume,
+            order={"candidate_exit_price": candidate_exit_price}
+        )
         return
 
     if txid:
@@ -939,7 +1287,8 @@ def maybe_handle_submitted_buy(result, cycle_id, volume, price):
             "txid": txid,
             "volume": volume,
             "price": price,
-            "placed_at": cycle_id
+            "placed_at": cycle_id,
+            "candidate_exit_price": candidate_exit_price
         }
         save_state(state)
 
@@ -1011,8 +1360,8 @@ def run_cycle():
         skip_cycle("missing_price", cycle_id)
         return
 
-    process_open_buy_orders(cycle_id)
-    process_open_sell_orders(cycle_id)
+    process_open_buy_orders(cycle_id, current_price=price)
+    process_open_sell_orders(cycle_id, current_price=price)
 
     try:
         trend_signal = compute_trend_signal(price)
@@ -1034,7 +1383,12 @@ def run_cycle():
     save_state(state)
 
     trend_score = trend_signal["trend_score"]
-    signal_fields = signal_csv_kwargs(trend_signal)
+    orderbook_result = compute_orderbook_candidates(price, trend_signal)
+    best_candidate = orderbook_result.get("best")
+    signal_fields = {
+        **signal_csv_kwargs(trend_signal),
+        **candidate_csv_kwargs(best_candidate)
+    }
     log_event(
         "SIGNAL_UPDATE",
         cycle_id=cycle_id,
@@ -1044,13 +1398,25 @@ def run_cycle():
         slow_ma=trend_signal["slow_ma"],
         range_low=trend_signal["range_low"],
         range_high=trend_signal["range_high"],
+        orderbook_candidate_count=len(orderbook_result.get("candidates", [])),
         **signal_fields
     )
     console(
         "Price: "
         f"{price} | Trend score: {round(trend_score, 4)} | "
-        f"Momentum: {round(trend_signal['momentum_pct'], 5)}"
+        f"Momentum: {round(trend_signal['momentum_pct'], 5)} | "
+        f"Best EV: "
+        f"{None if not best_candidate else round(best_candidate['expected_value_pct'], 5)}"
     )
+
+    if not orderbook_result.get("usable"):
+        skip_cycle(
+            orderbook_result.get("reason", "unusable_orderbook_model"),
+            cycle_id,
+            price=price,
+            **signal_fields
+        )
+        return
 
     if trend_signal["volatility_pct"] > MAX_VOLATILITY_PCT:
         skip_cycle(
@@ -1062,44 +1428,42 @@ def run_cycle():
         )
         return
 
-    if trend_signal["momentum_pct"] < MIN_MOMENTUM_PCT:
+    if trend_score < TREND_EXIT_THRESHOLD:
         skip_cycle(
-            "momentum_below_min",
+            "trend_score_below_exit_threshold",
             cycle_id,
             price=price,
-            min_momentum_pct=MIN_MOMENTUM_PCT,
+            trend_exit_threshold=TREND_EXIT_THRESHOLD,
             **signal_fields
         )
         return
 
-    if trend_signal["ma_spread_pct"] < MIN_MA_SPREAD_PCT:
+    if best_candidate["entry_probability"] < ORDERBOOK_MIN_ENTRY_PROBABILITY:
         skip_cycle(
-            "ma_spread_below_min",
+            "entry_probability_below_min",
             cycle_id,
             price=price,
-            min_ma_spread_pct=MIN_MA_SPREAD_PCT,
+            orderbook_min_entry_probability=ORDERBOOK_MIN_ENTRY_PROBABILITY,
             **signal_fields
         )
         return
 
-    if trend_score < TREND_BUY_THRESHOLD:
+    if best_candidate["exit_probability"] < ORDERBOOK_MIN_EXIT_PROBABILITY:
         skip_cycle(
-            "trend_score_below_buy_threshold",
+            "exit_probability_below_min",
             cycle_id,
             price=price,
-            trend_buy_threshold=TREND_BUY_THRESHOLD,
+            orderbook_min_exit_probability=ORDERBOOK_MIN_EXIT_PROBABILITY,
             **signal_fields
         )
         return
 
-    max_high_buy_price = trend_signal["range_high"] * (1 - HIGH_RANGE_BUY_BLOCK_PCT)
-    if price >= max_high_buy_price and trend_signal["breakout_pct"] < BREAKOUT_BUFFER_PCT:
+    if best_candidate["expected_value_pct"] < ORDERBOOK_MIN_EXPECTED_VALUE_PCT:
         skip_cycle(
-            "price_near_range_high_without_breakout",
+            "expected_value_below_min",
             cycle_id,
             price=price,
-            max_high_buy_price=max_high_buy_price,
-            breakout_buffer_pct=BREAKOUT_BUFFER_PCT,
+            orderbook_min_expected_value_pct=ORDERBOOK_MIN_EXPECTED_VALUE_PCT,
             **signal_fields
         )
         return
@@ -1177,7 +1541,9 @@ def run_cycle():
         )
         return
 
-    volume = round_volume(trade_value / price)
+    entry_price = best_candidate["entry_price"]
+    exit_price = best_candidate["exit_price"]
+    volume = round_volume(trade_value / entry_price)
     min_volume = get_min_order_volume()
     if volume <= 0 or volume < min_volume:
         skip_cycle(
@@ -1197,7 +1563,8 @@ def run_cycle():
         side="buy",
         reason="stats_trend_buy",
         volume=volume,
-        price=price,
+        price=entry_price,
+        current_price=price,
         trade_value=trade_value,
         base_balance=base_balance,
         quote_balance=quote_balance,
@@ -1209,7 +1576,8 @@ def run_cycle():
         side="buy",
         reason="stats_trend_buy",
         volume=volume,
-        price=price,
+        price=entry_price,
+        current_price=price,
         trade_value=trade_value,
         base_balance=base_balance,
         quote_balance=quote_balance,
@@ -1217,7 +1585,12 @@ def run_cycle():
         **signal_fields
     )
 
-    result = place_market_buy(volume, cycle_id)
+    result = place_limit_buy(
+        entry_price,
+        volume,
+        cycle_id,
+        candidate_exit_price=exit_price
+    )
     result_payload = result.get("result") if isinstance(result, dict) else None
     fill = result.get("fill", {}) if isinstance(result, dict) else {}
     txids = result_payload.get("txid", []) if isinstance(result_payload, dict) else []
@@ -1227,7 +1600,8 @@ def run_cycle():
         side="buy",
         reason="dry_run" if DRY_RUN else ("submitted" if result else "rejected"),
         volume=volume,
-        price=price,
+        price=entry_price,
+        current_price=price,
         trade_value=trade_value,
         base_balance=base_balance,
         quote_balance=quote_balance,
@@ -1237,7 +1611,13 @@ def run_cycle():
         **fill,
         result=result_payload or result
     )
-    maybe_handle_submitted_buy(result, cycle_id, volume, price)
+    maybe_handle_submitted_buy(
+        result,
+        cycle_id,
+        volume,
+        entry_price,
+        candidate_exit_price=exit_price
+    )
 
     log_event(
         "CYCLE_SUMMARY",
@@ -1280,12 +1660,20 @@ def main():
         slow_ma_samples=SLOW_MA_SAMPLES,
         momentum_lookback_samples=MOMENTUM_LOOKBACK_SAMPLES,
         breakout_lookback_samples=BREAKOUT_LOOKBACK_SAMPLES,
-        trend_buy_threshold=TREND_BUY_THRESHOLD,
         trend_exit_threshold=TREND_EXIT_THRESHOLD,
         min_momentum_pct=MIN_MOMENTUM_PCT,
         min_ma_spread_pct=MIN_MA_SPREAD_PCT,
         breakout_buffer_pct=BREAKOUT_BUFFER_PCT,
         max_volatility_pct=MAX_VOLATILITY_PCT,
+        orderbook_depth_count=ORDERBOOK_DEPTH_COUNT,
+        orderbook_candidate_count=ORDERBOOK_CANDIDATE_COUNT,
+        orderbook_entry_step_pct=ORDERBOOK_ENTRY_STEP_PCT,
+        orderbook_exit_target_pcts=ORDERBOOK_EXIT_TARGET_PCTS,
+        orderbook_min_entry_probability=ORDERBOOK_MIN_ENTRY_PROBABILITY,
+        orderbook_min_exit_probability=ORDERBOOK_MIN_EXIT_PROBABILITY,
+        orderbook_min_expected_value_pct=ORDERBOOK_MIN_EXPECTED_VALUE_PCT,
+        orderbook_max_entry_drop_pct=ORDERBOOK_MAX_ENTRY_DROP_PCT,
+        orderbook_pressure_window_pct=ORDERBOOK_PRESSURE_WINDOW_PCT,
         min_trade_usd=MIN_TRADE_USD,
         position_size_pct=POSITION_SIZE_PCT,
         max_trade_usd=MAX_TRADE_USD,

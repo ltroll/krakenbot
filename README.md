@@ -101,6 +101,7 @@ SENTIMENT_TRADE_LOG_FILE=sentiment_trade_log.jsonl
 SENTIMENT_DECISION_CSV_FILE=sentiment_decisions.csv
 SENTIMENT_STRATEGY_PROFILE=sentiment_strategy_default.json
 
+KRAKEN_ORDERBOOK_URL=https://api.kraken.com/0/public/Depth?pair=XBTUSD&count=50
 STATS_TREND_STATE_FILE=stats_trend_state.json
 STATS_TREND_TRADE_LOG_FILE=stats_trend_trade_log.jsonl
 STATS_TREND_DECISION_CSV_FILE=stats_trend_decisions.csv
@@ -254,7 +255,16 @@ The default profile is intentionally `dry_run: true`. Its signal uses:
 - range position inside the recent price window
 - realized volatility as a dampener
 
-The buy gate requires the combined `trend_score` to clear `trend_buy_threshold`, while also enforcing minimum momentum, minimum moving-average spread, maximum volatility, cooldown, inventory cap, open-sell cap, and minimum order size checks. After a buy fills, it places a limit sell at `target_profit_pct + round_trip_fee_pct`.
+The bot also reads the Kraken order book and scores several possible limit-buy entries below the current price. For each entry it estimates:
+
+- probability price reaches the entry
+- probability price reaches each configured exit target after that entry
+- joint probability of entry plus exit
+- expected value after allowing for failed exits
+
+The order-book probabilities are heuristic, not a market forecast with statistical guarantees. They are intended as a ranking/gating model over live liquidity, support, resistance, and the trend signal.
+
+The buy gate requires the best order-book candidate to clear minimum entry probability, exit probability, and expected value thresholds, while also enforcing volatility, cooldown, inventory cap, open-sell cap, and minimum order size checks. The bot places a limit buy at the selected entry, and after it fills, places a limit sell at the selected candidate exit.
 
 Runtime files use their own names by default:
 
