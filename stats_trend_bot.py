@@ -137,7 +137,9 @@ ORDERBOOK_PRESSURE_WINDOW_PCT = profile_float(
     "orderbook_pressure_window_pct",
     0.004
 )
+MAX_OPEN_BUY_ORDERS = profile_int("max_open_buy_orders", 2)
 MAX_OPEN_SELL_ORDERS = profile_int("max_open_sell_orders", 2)
+MAX_OPEN_ORDERS = profile_int("max_open_orders", 4)
 MAX_INVENTORY_USD = profile_float("max_inventory_usd", 400)
 REBALANCE_COOLDOWN_MINUTES = profile_float("rebalance_cooldown_minutes", 15)
 COOLDOWN_OVERRIDE_SCORE = profile_float("cooldown_override_score", 0.85)
@@ -1503,6 +1505,34 @@ def run_cycle():
         )
         return
 
+    if len(state["open_buy_orders"]) >= MAX_OPEN_BUY_ORDERS:
+        skip_cycle(
+            "max_open_buy_orders",
+            cycle_id,
+            price=price,
+            open_buy_count=len(state["open_buy_orders"]),
+            max_open_buy_orders=MAX_OPEN_BUY_ORDERS,
+            **signal_fields
+        )
+        return
+
+    open_order_count = (
+        len(state["open_buy_orders"])
+        + len(state["open_sell_orders"])
+    )
+    if open_order_count >= MAX_OPEN_ORDERS:
+        skip_cycle(
+            "max_open_orders",
+            cycle_id,
+            price=price,
+            open_order_count=open_order_count,
+            open_buy_count=len(state["open_buy_orders"]),
+            open_sell_count=len(state["open_sell_orders"]),
+            max_open_orders=MAX_OPEN_ORDERS,
+            **signal_fields
+        )
+        return
+
     deployed_inventory_usd = current_inventory_usd(price)
     if deployed_inventory_usd >= MAX_INVENTORY_USD:
         skip_cycle(
@@ -1677,7 +1707,9 @@ def main():
         min_trade_usd=MIN_TRADE_USD,
         position_size_pct=POSITION_SIZE_PCT,
         max_trade_usd=MAX_TRADE_USD,
+        max_open_buy_orders=MAX_OPEN_BUY_ORDERS,
         max_open_sell_orders=MAX_OPEN_SELL_ORDERS,
+        max_open_orders=MAX_OPEN_ORDERS,
         max_inventory_usd=MAX_INVENTORY_USD,
         target_profit_pct=TARGET_PROFIT_PCT,
         round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
