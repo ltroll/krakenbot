@@ -17,12 +17,14 @@ Core bot files:
 - [`range_grid_bot.py`](/C:/Users/bgert/krakenbot/range_grid_bot.py): the current range/grid bot using recent BTC price range plus external sentiment.
 - [`range_grid_bot_average.py`](/C:/Users/bgert/krakenbot/range_grid_bot_average.py): test/alternate range-grid variant.
 - [`kraken_sentiment_executor.py`](/C:/Users/bgert/krakenbot/kraken_sentiment_executor.py): allocation-style sentiment trader.
+- [`stats_trend_bot.py`](/C:/Users/bgert/krakenbot/stats_trend_bot.py): stats/trend trader that derives entries from price history instead of sentiment.
 - [`kraken_bot.py`](/C:/Users/bgert/krakenbot/kraken_bot.py): older/general Kraken bot logic.
 - [`account_value_usd.py`](/C:/Users/bgert/krakenbot/account_value_usd.py): account value helper.
 
 Config and state:
 
 - `range_grid_config.json`: tuning values for the range-grid bot.
+- `stats_trend_strategy_default.json`: default dry-run stats/trend strategy profile.
 - `bot_config.json`, `bot_config_prod.json`, `bot_config_experimental1.json`, `sentiment_bot_config.json`: tuning profiles for other bots.
 - `.env`: secrets, URLs, and path overrides.
 - `last_state.json` or the file pointed to by `BOT_STATE_FILE`: persisted bot state.
@@ -98,6 +100,11 @@ SENTIMENT_STATE_FILE=sentiment_state.json
 SENTIMENT_TRADE_LOG_FILE=sentiment_trade_log.jsonl
 SENTIMENT_DECISION_CSV_FILE=sentiment_decisions.csv
 SENTIMENT_STRATEGY_PROFILE=sentiment_strategy_default.json
+
+STATS_TREND_STATE_FILE=stats_trend_state.json
+STATS_TREND_TRADE_LOG_FILE=stats_trend_trade_log.jsonl
+STATS_TREND_DECISION_CSV_FILE=stats_trend_decisions.csv
+STATS_TREND_STRATEGY_PROFILE=stats_trend_strategy_default.json
 KRAKEN_PAIR=XXBTZUSD
 SIGNAL_FILE=
 REQUEST_TIMEOUT_SECONDS=10
@@ -234,6 +241,35 @@ State includes:
 - `range_mean`
 - `range_median`
 - `last_range_refresh`
+
+## How `stats_trend_bot.py` works
+
+This bot does not read the sentiment/LLM signal. It reads the recent BTC price log from `PRICE_LOG_URL`, computes a statistical trend score, and buys only when price action is strong enough under the selected profile.
+
+The default profile is intentionally `dry_run: true`. Its signal uses:
+
+- fast moving average versus slow moving average
+- recent momentum
+- breakout distance versus the recent high
+- range position inside the recent price window
+- realized volatility as a dampener
+
+The buy gate requires the combined `trend_score` to clear `trend_buy_threshold`, while also enforcing minimum momentum, minimum moving-average spread, maximum volatility, cooldown, inventory cap, open-sell cap, and minimum order size checks. After a buy fills, it places a limit sell at `target_profit_pct + round_trip_fee_pct`.
+
+Runtime files use their own names by default:
+
+- `stats_trend_state.json`
+- `stats_trend_trade_log.jsonl`
+- `stats_trend_decisions.csv`
+
+Example launch:
+
+```bash
+set -a
+source env.stats
+set +a
+python stats_trend_bot.py
+```
 
 ## Logging
 
