@@ -80,9 +80,9 @@ Based on the support-file notes, a typical `.env` looks like this:
 KRAKEN_API_KEY=
 KRAKEN_API_SECRET=
 KRAKEN_API_URL=https://api.kraken.com
-KRAKEN_TICKER_URL=https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD
-KRAKEN_ORDERBOOK_URL=https://api.kraken.com/0/public/Depth?pair=XBTUSD&count=5
-KRAKEN_OHLC_URL=https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=60
+KRAKEN_TICKER_URL="https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD"
+KRAKEN_ORDERBOOK_URL="https://api.kraken.com/0/public/Depth?pair=XBTUSD&count=5"
+KRAKEN_OHLC_URL="https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=60"
 LLM_SIGNAL_URL=http://192.168.50.211/bot/llm_signal.json
 PRICE_LOG_URL=http://192.168.50.211/bot/btc_price_log.jsonl
 BOT_CONFIG_FILE=range_grid_config.json
@@ -101,11 +101,17 @@ SENTIMENT_TRADE_LOG_FILE=sentiment_trade_log.jsonl
 SENTIMENT_DECISION_CSV_FILE=sentiment_decisions.csv
 SENTIMENT_STRATEGY_PROFILE=sentiment_strategy_default.json
 
-KRAKEN_ORDERBOOK_URL=https://api.kraken.com/0/public/Depth?pair=XBTUSD&count=50
+KRAKEN_ORDERBOOK_URL="https://api.kraken.com/0/public/Depth?pair=XBTUSD&count=50"
 STATS_TREND_STATE_FILE=stats_trend_state.json
 STATS_TREND_TRADE_LOG_FILE=stats_trend_trade_log.jsonl
 STATS_TREND_DECISION_CSV_FILE=stats_trend_decisions.csv
 STATS_TREND_STRATEGY_PROFILE=stats_trend_strategy_default.json
+STATS_TREND_DRY_RUN=true
+STATS_TREND_BACKTEST_MODE=false
+STATS_TREND_BACKTEST_STEP_PATH=/admin/api/backtest/step
+STATS_TREND_BACKTEST_STEPS_PER_CYCLE=1
+STATS_TREND_BACKTEST_USE_API_MARKET_DATA=true
+STATS_TREND_MARKET_HISTORY_SOURCE=price_log
 KRAKEN_PAIR=XXBTZUSD
 SIGNAL_FILE=
 REQUEST_TIMEOUT_SECONDS=10
@@ -280,6 +286,41 @@ source env.stats
 set +a
 python stats_trend_bot.py
 ```
+
+### Backtesting
+
+The stats/trend bot can run against a Kraken-compatible sandbox by switching on `STATS_TREND_BACKTEST_MODE`. In backtest mode, ticker, order book, pair metadata, balances, and order calls are derived from `KRAKEN_API_URL`; the bot ignores fixed real-Kraken ticker/depth URLs when `STATS_TREND_BACKTEST_USE_API_MARKET_DATA=true`.
+
+`env.stats.backtest` sets `STATS_TREND_DRY_RUN=false` so orders go to the sandbox instead of the local dry-run simulator. For paper-only backtests, set it back to `true`.
+
+After each bot cycle, it can advance the sandbox with:
+
+```bash
+POST {KRAKEN_API_URL}/admin/api/backtest/step?steps=1
+```
+
+Use the included backtest env template:
+
+```bash
+set -a
+source env.stats.backtest
+set +a
+python stats_trend_bot.py
+```
+
+Or run a finite backtest batch from the repo root:
+
+```bash
+./run_stats_backtest.sh 100 1
+```
+
+The first argument is cycle count. The second argument is sandbox steps per cycle. The script lets `stats_trend_bot.py` read `KRAKEN_API_URL` from `.env` and writes to the backtest state/log/CSV files by default.
+
+Backtest-specific outputs default to:
+
+- `stats_trend_backtest_state.json`
+- `stats_trend_backtest_trade_log.jsonl`
+- `stats_trend_backtest_decisions.csv`
 
 ## Logging
 

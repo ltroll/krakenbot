@@ -408,6 +408,7 @@ def load_state():
         "open_buy_orders": {},
         "open_sell_orders": {},
         "trade_history": [],
+        "backtest_price_history": [],
         "last_signal": None,
         "stats": {
             "cycles": 0,
@@ -441,6 +442,8 @@ def load_state():
         state["open_sell_orders"] = {}
     if not isinstance(state.get("trade_history"), list):
         state["trade_history"] = []
+    if not isinstance(state.get("backtest_price_history"), list):
+        state["backtest_price_history"] = []
 
     return state
 
@@ -472,6 +475,42 @@ def record_trade_history(entry):
     state["trade_history"].append(entry)
     state["trade_history"] = state["trade_history"][-250:]
     save_state(state)
+
+
+def record_backtest_price(price):
+    if not BACKTEST_MODE:
+        return []
+
+    history = state.setdefault("backtest_price_history", [])
+    history.append(
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "price": price
+        }
+    )
+    max_points = max(
+        MIN_SAMPLES,
+        int(
+            math.ceil(
+                (HISTORY_WINDOW_HOURS * 60)
+                / max(KRAKEN_OHLC_INTERVAL_MINUTES, 1)
+            )
+        )
+    )
+    state["backtest_price_history"] = history[-max_points:]
+    save_state(state)
+
+    records = []
+    for item in state["backtest_price_history"]:
+        try:
+            ts = datetime.fromisoformat(item["timestamp"])
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            records.append({"timestamp": ts, "price": float(item["price"])})
+        except Exception:
+            continue
+
+    return records
 
 
 # ----------------------
@@ -866,6 +905,9 @@ def clamp(value, low, high):
 
 def compute_trend_signal(price):
     history = load_price_history()
+    if BACKTEST_MODE and not history:
+        history = record_backtest_price(price)
+
     prices = [item["price"] for item in history]
 
     if len(prices) < MIN_SAMPLES:
