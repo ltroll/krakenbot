@@ -905,8 +905,10 @@ def clamp(value, low, high):
 
 def compute_trend_signal(price):
     history = load_price_history()
-    if BACKTEST_MODE and not history:
-        history = record_backtest_price(price)
+    if BACKTEST_MODE and len(history) < MIN_SAMPLES:
+        fallback_history = record_backtest_price(price)
+        if len(fallback_history) > len(history):
+            history = fallback_history
 
     prices = [item["price"] for item in history]
 
