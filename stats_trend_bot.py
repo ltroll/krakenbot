@@ -41,6 +41,7 @@ KRAKEN_API_SECRET = os.getenv("KRAKEN_API_SECRET")
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL", "https://api.kraken.com")
 KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
 KRAKEN_ORDERBOOK_URL = os.getenv("KRAKEN_ORDERBOOK_URL")
+KRAKEN_OHLC_URL = os.getenv("KRAKEN_OHLC_URL")
 PRICE_LOG_URL = os.getenv("PRICE_LOG_URL")
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
 
@@ -68,6 +69,23 @@ def profile_bool(name, default):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def env_bool(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def env_int(name, default):
+    value = os.getenv(name)
+    return default if value is None or value == "" else int(value)
+
+
+def env_float(name, default):
+    value = os.getenv(name)
+    return default if value is None or value == "" else float(value)
 
 
 def profile_float(name, default):
@@ -100,6 +118,41 @@ def profile_float_list(name, default):
 
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
 KRAKEN_NONCE_RETRIES = int(os.getenv("KRAKEN_NONCE_RETRIES", "2"))
+BACKTEST_MODE = env_bool(
+    "STATS_TREND_BACKTEST_MODE",
+    profile_bool("backtest_mode", False)
+)
+BACKTEST_STEP_PATH = (
+    os.getenv("STATS_TREND_BACKTEST_STEP_PATH")
+    or profile_str("backtest_step_path", "/admin/api/backtest/step")
+)
+BACKTEST_STEPS_PER_CYCLE = env_int(
+    "STATS_TREND_BACKTEST_STEPS_PER_CYCLE",
+    profile_int("backtest_steps_per_cycle", 1)
+)
+BACKTEST_STEP_AFTER_CYCLE = env_bool(
+    "STATS_TREND_BACKTEST_STEP_AFTER_CYCLE",
+    profile_bool("backtest_step_after_cycle", True)
+)
+BACKTEST_SLEEP_SECONDS = env_float(
+    "STATS_TREND_BACKTEST_SLEEP_SECONDS",
+    profile_float("backtest_sleep_seconds", 0)
+)
+BACKTEST_USE_API_MARKET_DATA = env_bool(
+    "STATS_TREND_BACKTEST_USE_API_MARKET_DATA",
+    profile_bool("backtest_use_api_market_data", True)
+)
+MARKET_HISTORY_SOURCE = (
+    os.getenv("STATS_TREND_MARKET_HISTORY_SOURCE")
+    or profile_str(
+        "market_history_source",
+        "ohlc" if BACKTEST_MODE else "price_log"
+    )
+).strip().lower()
+KRAKEN_OHLC_INTERVAL_MINUTES = env_int(
+    "KRAKEN_OHLC_INTERVAL_MINUTES",
+    profile_int("kraken_ohlc_interval_minutes", 60)
+)
 ORDER_TRACKER_URL = (
     os.getenv("ORDER_TRACKER_URL")
     or profile_str("order_tracker_url")
@@ -114,7 +167,7 @@ ORDER_TRACKER_SYMBOL = (
     or profile_str("order_tracker_symbol", KRAKEN_PAIR)
 )
 ORDER_TRACKER_TIMEOUT = profile_float("order_tracker_timeout_seconds", 5)
-DRY_RUN = profile_bool("dry_run", True)
+DRY_RUN = env_bool("STATS_TREND_DRY_RUN", profile_bool("dry_run", True))
 PRICE_CHECK_INTERVAL_SECONDS = profile_int("price_check_interval_seconds", 60)
 HISTORY_WINDOW_HOURS = profile_int("history_window_hours", 48)
 MIN_SAMPLES = profile_int("min_samples", 24)
@@ -427,10 +480,9 @@ def record_trade_history(entry):
 
 
 def require_runtime_config():
-    required = {
-        "KRAKEN_API_URL": KRAKEN_API_URL,
-        "PRICE_LOG_URL": PRICE_LOG_URL
-    }
+    required = {"KRAKEN_API_URL": KRAKEN_API_URL}
+    if MARKET_HISTORY_SOURCE == "price_log":
+        required["PRICE_LOG_URL"] = PRICE_LOG_URL
     if not DRY_RUN:
         required["KRAKEN_API_KEY"] = KRAKEN_API_KEY
         required["KRAKEN_API_SECRET"] = KRAKEN_API_SECRET
@@ -542,7 +594,9 @@ def get_pair_info():
 
 def get_price():
     try:
-        if KRAKEN_TICKER_URL:
+        if KRAKEN_TICKER_URL and not (
+            BACKTEST_MODE and BACKTEST_USE_API_MARKET_DATA
+        ):
             r = requests.get(KRAKEN_TICKER_URL, timeout=REQUEST_TIMEOUT)
             r.raise_for_status()
             data = r.json()
@@ -576,7 +630,9 @@ def get_price():
 
 def get_orderbook():
     try:
-        if KRAKEN_ORDERBOOK_URL:
+        if KRAKEN_ORDERBOOK_URL and not (
+            BACKTEST_MODE and BACKTEST_USE_API_MARKET_DATA
+        ):
             r = requests.get(KRAKEN_ORDERBOOK_URL, timeout=REQUEST_TIMEOUT)
         else:
             url = KRAKEN_API_URL.rstrip("/") + "/0/public/Depth"
@@ -682,7 +738,7 @@ def order_fill_summary(order):
 # ----------------------
 
 
-def load_price_history():
+def load_price_history_from_jsonl():
     r = requests.get(PRICE_LOG_URL, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     cutoff = datetime.now(timezone.utc) - timedelta(hours=HISTORY_WINDOW_HOURS)
@@ -710,6 +766,75 @@ def load_price_history():
 
     records.sort(key=lambda item: item["timestamp"])
     return records
+
+
+def load_price_history_from_ohlc():
+    if KRAKEN_OHLC_URL and not (
+        BACKTEST_MODE and BACKTEST_USE_API_MARKET_DATA
+    ):
+        r = requests.get(KRAKEN_OHLC_URL, timeout=REQUEST_TIMEOUT)
+    else:
+        url = KRAKEN_API_URL.rstrip("/") + "/0/public/OHLC"
+        r = requests.get(
+            url,
+            params={
+                "pair": KRAKEN_PAIR,
+                "interval": KRAKEN_OHLC_INTERVAL_MINUTES
+            },
+            timeout=REQUEST_TIMEOUT
+        )
+    r.raise_for_status()
+    data = r.json()
+
+    if data.get("error"):
+        raise RuntimeError(data["error"])
+
+    rows = None
+    for key, value in data.get("result", {}).items():
+        if key != "last":
+            rows = value
+            break
+
+    if not rows:
+        return []
+
+    cutoff = None
+    if not BACKTEST_MODE:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=HISTORY_WINDOW_HOURS)
+
+    records = []
+    for row in rows:
+        try:
+            ts = datetime.fromtimestamp(float(row[0]), tz=timezone.utc)
+            if cutoff is not None and ts < cutoff:
+                continue
+            records.append(
+                {
+                    "timestamp": ts,
+                    "price": float(row[4])
+                }
+            )
+        except Exception:
+            continue
+
+    records.sort(key=lambda item: item["timestamp"])
+    if BACKTEST_MODE:
+        max_points = int(
+            math.ceil(
+                (HISTORY_WINDOW_HOURS * 60)
+                / max(KRAKEN_OHLC_INTERVAL_MINUTES, 1)
+            )
+        )
+        records = records[-max(max_points, MIN_SAMPLES):]
+
+    return records
+
+
+def load_price_history():
+    if MARKET_HISTORY_SOURCE == "ohlc":
+        return load_price_history_from_ohlc()
+
+    return load_price_history_from_jsonl()
 
 
 def pct_change(current, previous):
@@ -1519,6 +1644,7 @@ def run_cycle():
         orderbook_candidate_count=len(orderbook_result.get("candidates", [])),
         **signal_fields
     )
+
     console(
         "Price: "
         f"{price} | Trend score: {round(trend_score, 4)} | "
@@ -1783,6 +1909,50 @@ def run_cycle():
     )
 
 
+def backtest_loop_sleep_seconds(on_error=False):
+    if BACKTEST_MODE:
+        if on_error:
+            return max(BACKTEST_SLEEP_SECONDS, 1)
+        return BACKTEST_SLEEP_SECONDS
+    return PRICE_CHECK_INTERVAL_SECONDS
+
+
+def step_backtest():
+    if not BACKTEST_MODE or not BACKTEST_STEP_AFTER_CYCLE:
+        return
+
+    if BACKTEST_STEPS_PER_CYCLE <= 0:
+        return
+
+    url = KRAKEN_API_URL.rstrip("/") + BACKTEST_STEP_PATH
+    try:
+        r = requests.post(
+            url,
+            params={"steps": BACKTEST_STEPS_PER_CYCLE},
+            timeout=REQUEST_TIMEOUT
+        )
+        r.raise_for_status()
+        try:
+            payload = r.json()
+        except Exception:
+            payload = r.text
+
+        log_event(
+            "BACKTEST_STEP",
+            steps=BACKTEST_STEPS_PER_CYCLE,
+            url=url,
+            result=payload
+        )
+    except Exception as e:
+        log_event(
+            "BACKTEST_STEP_ERROR",
+            steps=BACKTEST_STEPS_PER_CYCLE,
+            url=url,
+            message=str(e)
+        )
+        raise
+
+
 # ----------------------
 # MAIN LOOP
 # ----------------------
@@ -1800,6 +1970,14 @@ def main():
         decision_csv_file=DECISION_CSV_FILE,
         pair=KRAKEN_PAIR,
         dry_run=DRY_RUN,
+        backtest_mode=BACKTEST_MODE,
+        backtest_step_path=BACKTEST_STEP_PATH,
+        backtest_steps_per_cycle=BACKTEST_STEPS_PER_CYCLE,
+        backtest_step_after_cycle=BACKTEST_STEP_AFTER_CYCLE,
+        backtest_sleep_seconds=BACKTEST_SLEEP_SECONDS,
+        backtest_use_api_market_data=BACKTEST_USE_API_MARKET_DATA,
+        market_history_source=MARKET_HISTORY_SOURCE,
+        kraken_ohlc_interval_minutes=KRAKEN_OHLC_INTERVAL_MINUTES,
         history_window_hours=HISTORY_WINDOW_HOURS,
         min_samples=MIN_SAMPLES,
         fast_ma_samples=FAST_MA_SAMPLES,
@@ -1835,7 +2013,8 @@ def main():
     while True:
         try:
             run_cycle()
-            time.sleep(PRICE_CHECK_INTERVAL_SECONDS)
+            step_backtest()
+            time.sleep(backtest_loop_sleep_seconds())
         except KeyboardInterrupt:
             log_and_console("BOT_STOP", message="Stats/trend bot stopped")
             break
@@ -1844,7 +2023,7 @@ def main():
             save_state(state)
             log_event("LOOP_ERROR", message=str(e))
             console(f"Loop error: {e}")
-            time.sleep(PRICE_CHECK_INTERVAL_SECONDS)
+            time.sleep(backtest_loop_sleep_seconds(on_error=True))
 
 
 if __name__ == "__main__":

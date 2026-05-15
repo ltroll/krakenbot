@@ -1,5 +1,13 @@
 {
   "dry_run": true,
+  "backtest_mode": false,
+  "backtest_step_path": "/admin/api/backtest/step",
+  "backtest_steps_per_cycle": 1,
+  "backtest_step_after_cycle": true,
+  "backtest_sleep_seconds": 0,
+  "backtest_use_api_market_data": true,
+  "market_history_source": "price_log",
+  "kraken_ohlc_interval_minutes": 60,
   "price_check_interval_seconds": 60,
   "history_window_hours": 48,
   "min_samples": 24,
