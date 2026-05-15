@@ -80,6 +80,11 @@ def profile_int(name, default):
     return default if value is None else int(value)
 
 
+def profile_str(name, default=""):
+    value = strategy_config.get(name, default)
+    return default if value is None else str(value)
+
+
 def profile_float_list(name, default):
     value = strategy_config.get(name, default)
     if value is None:
@@ -95,6 +100,20 @@ def profile_float_list(name, default):
 
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
 KRAKEN_NONCE_RETRIES = int(os.getenv("KRAKEN_NONCE_RETRIES", "2"))
+ORDER_TRACKER_URL = (
+    os.getenv("ORDER_TRACKER_URL")
+    or profile_str("order_tracker_url")
+    or profile_str("external_order_tracker_url")
+)
+ORDER_TRACKER_USER_AGENT = (
+    os.getenv("ORDER_TRACKER_USER_AGENT")
+    or profile_str("order_tracker_user_agent", "mean-reversion-bot/1.0")
+)
+ORDER_TRACKER_SYMBOL = (
+    os.getenv("ORDER_TRACKER_SYMBOL")
+    or profile_str("order_tracker_symbol", KRAKEN_PAIR)
+)
+ORDER_TRACKER_TIMEOUT = profile_float("order_tracker_timeout_seconds", 5)
 DRY_RUN = profile_bool("dry_run", True)
 PRICE_CHECK_INTERVAL_SECONDS = profile_int("price_check_interval_seconds", 60)
 HISTORY_WINDOW_HOURS = profile_int("history_window_hours", 48)
@@ -218,6 +237,77 @@ def log_event(event, message="", **kwargs):
 def log_and_console(event, message="", **kwargs):
     log_event(event, message=message, **kwargs)
     console(f"{event}: {message}" if message else event)
+
+
+def notify_order_tracker(
+    trade_id,
+    side,
+    price,
+    quantity,
+    order_id=None,
+    fee=None,
+    timestamp=None,
+    notes=None
+):
+    if not ORDER_TRACKER_URL:
+        return
+
+    if not trade_id or side not in ("buy", "sell") or price is None or quantity is None:
+        log_event(
+            "ORDER_TRACKER_SKIPPED",
+            reason="missing_required_fields",
+            trade_id=trade_id,
+            side=side,
+            price=price,
+            quantity=quantity,
+            order_id=order_id
+        )
+        return
+
+    payload = {
+        "trade_id": str(trade_id),
+        "side": side,
+        "price": str(price),
+        "quantity": str(quantity)
+    }
+    optional_fields = {
+        "symbol": ORDER_TRACKER_SYMBOL,
+        "order_id": order_id,
+        "fee": fee,
+        "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
+        "notes": notes
+    }
+    payload.update(
+        {
+            key: str(value)
+            for key, value in optional_fields.items()
+            if value is not None and value != ""
+        }
+    )
+
+    try:
+        response = requests.post(
+            ORDER_TRACKER_URL,
+            data=payload,
+            headers={"User-Agent": ORDER_TRACKER_USER_AGENT},
+            timeout=ORDER_TRACKER_TIMEOUT
+        )
+        response.raise_for_status()
+        log_event(
+            "ORDER_TRACKER_UPDATED",
+            trade_id=trade_id,
+            side=side,
+            order_id=order_id,
+            status_code=response.status_code
+        )
+    except Exception as e:
+        log_event(
+            "ORDER_TRACKER_ERROR",
+            message=str(e),
+            trade_id=trade_id,
+            side=side,
+            order_id=order_id
+        )
 
 
 def append_decision_csv(event, **kwargs):
@@ -924,6 +1014,7 @@ def place_limit_buy(price, volume, cycle_id, candidate_exit_price=None):
             "price": buy_price,
             "placed_at": cycle_id,
             "candidate_exit_price": candidate_exit_price,
+            "trade_id": txid,
             "dry_run": True
         }
         save_state(state)
@@ -991,6 +1082,20 @@ def place_limit_buy(price, volume, cycle_id, candidate_exit_price=None):
             **fill,
             result=result.get("result")
         )
+        notify_order_tracker(
+            trade_id=txid,
+            side="buy",
+            price=fill.get("fill_price") or buy_price,
+            quantity=fill.get("fill_volume") or buy_volume,
+            order_id=txid,
+            fee=fill.get("fill_fee"),
+            timestamp=cycle_id,
+            notes=(
+                None
+                if fill.get("order_status") == "closed"
+                else f"order_status={fill.get('order_status') or 'submitted'}"
+            )
+        )
         result["fill"] = fill
 
     return result
@@ -1010,6 +1115,7 @@ def place_limit_sell(price, volume, cycle_id, buy_txid=None, buy_price=None):
             "sell_price": sell_price,
             "buy_txid": buy_txid,
             "placed_at": cycle_id,
+            "trade_id": buy_txid or txid,
             "dry_run": True
         }
         save_state(state)
@@ -1058,7 +1164,8 @@ def place_limit_sell(price, volume, cycle_id, buy_txid=None, buy_price=None):
             "buy_price": buy_price,
             "sell_price": sell_price,
             "buy_txid": buy_txid,
-            "placed_at": cycle_id
+            "placed_at": cycle_id,
+            "trade_id": buy_txid or txid
         }
         save_state(state)
         log_and_console(
@@ -1070,6 +1177,14 @@ def place_limit_sell(price, volume, cycle_id, buy_txid=None, buy_price=None):
             price=sell_price,
             buy_price=buy_price,
             buy_txid=buy_txid
+        )
+        notify_order_tracker(
+            trade_id=buy_txid or txid,
+            side="sell",
+            price=sell_price,
+            quantity=sell_volume,
+            order_id=txid,
+            timestamp=cycle_id
         )
 
     return result
@@ -1290,7 +1405,8 @@ def maybe_handle_submitted_buy(
             "volume": volume,
             "price": price,
             "placed_at": cycle_id,
-            "candidate_exit_price": candidate_exit_price
+            "candidate_exit_price": candidate_exit_price,
+            "trade_id": txid
         }
         save_state(state)
 

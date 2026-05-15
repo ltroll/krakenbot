@@ -37,5 +37,9 @@
   "execution_buffer_pct": 0.0025,
   "prevent_buy_above_last_sell": true,
   "buy_after_sell_discount_pct": 0.001,
-  "high_range_buy_block_pct": 0.001
+  "high_range_buy_block_pct": 0.001,
+  "order_tracker_url": "",
+  "order_tracker_user_agent": "mean-reversion-bot/1.0",
+  "order_tracker_symbol": "BTCUSD",
+  "order_tracker_timeout_seconds": 5
 }

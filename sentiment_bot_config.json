@@ -20,7 +20,11 @@
       "high_price_buy_block_pct": 0.001,
       "dry_run": false,
       "execution_buffer_pct": 0.0025,
-      "price_check_interval_seconds": 60
+      "price_check_interval_seconds": 60,
+      "order_tracker_url": "",
+      "order_tracker_user_agent": "mean-reversion-bot/1.0",
+      "order_tracker_symbol": "BTCUSD",
+      "order_tracker_timeout_seconds": 5
     }
   }
 }

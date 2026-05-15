@@ -45,6 +45,7 @@ KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL")
 PRICE_LOG_URL = os.getenv("PRICE_LOG_URL")
+KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
 
 
 def parse_strategy_modes(raw_value):
@@ -119,7 +120,27 @@ def profile_float(name, default):
     return default if value is None else float(value)
 
 
+def profile_str(name, default=""):
+    value = strategy_config.get(name, default)
+    return default if value is None else str(value)
+
+
 strategy_config = load_strategy_config()
+
+order_tracker_url = (
+    os.getenv("ORDER_TRACKER_URL")
+    or profile_str("order_tracker_url")
+    or profile_str("external_order_tracker_url")
+)
+order_tracker_user_agent = (
+    os.getenv("ORDER_TRACKER_USER_AGENT")
+    or profile_str("order_tracker_user_agent", "mean-reversion-bot/1.0")
+)
+order_tracker_symbol = (
+    os.getenv("ORDER_TRACKER_SYMBOL")
+    or profile_str("order_tracker_symbol", KRAKEN_PAIR)
+)
+order_tracker_timeout_seconds = profile_float("order_tracker_timeout_seconds", 5)
 
 range_window_hours = profile_int("range_window_hours", 24)
 max_grid_size = profile_int("max_grid_size", 4)
@@ -268,6 +289,77 @@ def log_and_console(event, message="", **kwargs):
         console(event)
 
 
+def notify_order_tracker(
+    trade_id,
+    side,
+    price,
+    quantity,
+    order_id=None,
+    fee=None,
+    timestamp=None,
+    notes=None
+):
+    if not order_tracker_url:
+        return
+
+    if not trade_id or side not in ("buy", "sell") or price is None or quantity is None:
+        log_event(
+            "ORDER_TRACKER_SKIPPED",
+            reason="missing_required_fields",
+            trade_id=trade_id,
+            side=side,
+            price=price,
+            quantity=quantity,
+            order_id=order_id
+        )
+        return
+
+    payload = {
+        "trade_id": str(trade_id),
+        "side": side,
+        "price": str(price),
+        "quantity": str(quantity)
+    }
+    optional_fields = {
+        "symbol": order_tracker_symbol,
+        "order_id": order_id,
+        "fee": fee,
+        "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
+        "notes": notes
+    }
+    payload.update(
+        {
+            key: str(value)
+            for key, value in optional_fields.items()
+            if value is not None and value != ""
+        }
+    )
+
+    try:
+        response = requests.post(
+            order_tracker_url,
+            data=payload,
+            headers={"User-Agent": order_tracker_user_agent},
+            timeout=order_tracker_timeout_seconds
+        )
+        response.raise_for_status()
+        log_event(
+            "ORDER_TRACKER_UPDATED",
+            trade_id=trade_id,
+            side=side,
+            order_id=order_id,
+            status_code=response.status_code
+        )
+    except Exception as e:
+        log_event(
+            "ORDER_TRACKER_ERROR",
+            message=str(e),
+            trade_id=trade_id,
+            side=side,
+            order_id=order_id
+        )
+
+
 # ----------------------
 # SAFE KRAKEN WRAPPER
 # ----------------------
@@ -355,7 +447,8 @@ def normalize_state(state):
                 "price": order.get("price", float(level)),
                 "placed_at": order.get("placed_at"),
                 "sell_pct_override": order.get("sell_pct_override"),
-                "buy_source": order.get("buy_source")
+                "buy_source": order.get("buy_source"),
+                "trade_id": order.get("trade_id") or order.get("txid")
             }
         else:
             normalized_buy_orders[level] = {
@@ -364,7 +457,8 @@ def normalize_state(state):
                 "price": float(level),
                 "placed_at": None,
                 "sell_pct_override": None,
-                "buy_source": None
+                "buy_source": None,
+                "trade_id": None
             }
 
     for txid, order in state["open_sell_orders"].items():
@@ -376,7 +470,8 @@ def normalize_state(state):
                 "sell_price": order.get("sell_price"),
                 "placed_at": order.get("placed_at"),
                 "sell_pct_override": order.get("sell_pct_override"),
-                "buy_source": order.get("buy_source")
+                "buy_source": order.get("buy_source"),
+                "trade_id": order.get("trade_id") or order.get("buy_txid") or txid
             }
         else:
             normalized_sell_orders[txid] = {
@@ -386,7 +481,8 @@ def normalize_state(state):
                 "sell_price": None,
                 "placed_at": None,
                 "sell_pct_override": None,
-                "buy_source": None
+                "buy_source": None,
+                "trade_id": txid
             }
 
     state["open_buy_orders"] = normalized_buy_orders
@@ -1108,7 +1204,8 @@ def main():
                         "sell_price": adjusted_sell_price,
                         "placed_at": order.get("placed_at"),
                         "sell_pct_override": sell_pct_override,
-                        "buy_source": order.get("buy_source")
+                        "buy_source": order.get("buy_source"),
+                        "trade_id": order.get("trade_id") or txid
                     }
                     del state["open_sell_orders"][txid]
                     save_state(state)
@@ -1133,6 +1230,15 @@ def main():
                         adjusted_profit_target_pct=adjusted_profit_target,
                         sell_pct_override=sell_pct_override,
                         buy_source=order.get("buy_source")
+                    )
+                    notify_order_tracker(
+                        trade_id=order.get("trade_id") or txid,
+                        side="sell",
+                        price=round(adjusted_sell_price, PRICE_DECIMALS),
+                        quantity=round(order["volume"], VOLUME_DECIMALS),
+                        order_id=new_txid,
+                        timestamp=cycle_id,
+                        notes="sell_reprice"
                     )
                     continue
 
@@ -1256,7 +1362,8 @@ def main():
                     "sell_price": sell_price,
                     "placed_at": cycle_id,
                     "sell_pct_override": sell_pct_override,
-                    "buy_source": buy_source
+                    "buy_source": buy_source,
+                    "trade_id": order.get("trade_id") or order.get("txid")
                 }
                 del state["open_buy_orders"][level]
                 state["stats"]["sell_orders_placed"] += 1
@@ -1273,6 +1380,15 @@ def main():
                     buy_price=round(buy_price, PRICE_DECIMALS),
                     sell_pct_override=sell_pct_override,
                     buy_source=buy_source
+                )
+                notify_order_tracker(
+                    trade_id=order.get("trade_id") or order.get("txid"),
+                    side="sell",
+                    price=round(sell_price, PRICE_DECIMALS),
+                    quantity=round(order["volume"], VOLUME_DECIMALS),
+                    order_id=txid,
+                    timestamp=cycle_id,
+                    notes=buy_source
                 )
 
             llm_buy_allowed = (
@@ -1506,7 +1622,8 @@ def main():
                         "price": level,
                         "placed_at": cycle_id,
                         "sell_pct_override": active_sell_pct_override,
-                        "buy_source": buy_source
+                        "buy_source": buy_source,
+                        "trade_id": txid
                     }
                     if buy_source == "range_high_band":
                         state["last_high_anchor_buy_at"] = cycle_id
@@ -1528,6 +1645,15 @@ def main():
                         price=round(level, PRICE_DECIMALS),
                         buy_source=buy_source,
                         sell_pct_override=active_sell_pct_override
+                    )
+                    notify_order_tracker(
+                        trade_id=txid,
+                        side="buy",
+                        price=round(level, PRICE_DECIMALS),
+                        quantity=round(volume, VOLUME_DECIMALS),
+                        order_id=txid,
+                        timestamp=cycle_id,
+                        notes=buy_source
                     )
             else:
                 log_event(
