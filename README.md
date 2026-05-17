@@ -274,6 +274,8 @@ The buy gate requires the best entry/exit pair to clear minimum entry probabilit
 
 `max_open_buy_orders_per_day` controls how many currently open buy orders may have been placed on the current UTC day. The default is `2`; if one of today's buy orders fills, cancels, or expires, that slot is freed and the bot may place another buy the same day. `max_open_buy_orders: 0` disables the separate all-days open-buy cap, while `max_open_orders` remains the hard resource ceiling across all open buy and sell orders.
 
+Open buy orders are also rechecked while they wait to fill. `max_open_buy_age_minutes` cancels stale buy orders after the configured age, and `revalidate_open_buys` cancels still-open buys when the current order-book model no longer clears the configured expected-value or exit-probability thresholds. Buy orders store their predicted entry/exit probabilities and expected value at placement so later backtests can compare the prediction to the actual result.
+
 Runtime files use their own names by default:
 
 - `stats_trend_state.json`

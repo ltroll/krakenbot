@@ -247,6 +247,16 @@ MAX_OPEN_BUY_ORDERS = profile_int("max_open_buy_orders", 2)
 MAX_OPEN_SELL_ORDERS = profile_int("max_open_sell_orders", 2)
 MAX_OPEN_ORDERS = profile_int("max_open_orders", 4)
 MAX_OPEN_BUY_ORDERS_PER_DAY = profile_int("max_open_buy_orders_per_day", 2)
+MAX_OPEN_BUY_AGE_MINUTES = profile_float("max_open_buy_age_minutes", 180)
+REVALIDATE_OPEN_BUYS = profile_bool("revalidate_open_buys", True)
+OPEN_BUY_REVALIDATION_MIN_EXPECTED_VALUE_PCT = profile_float(
+    "open_buy_revalidation_min_expected_value_pct",
+    ORDERBOOK_MIN_EXPECTED_VALUE_PCT
+)
+OPEN_BUY_REVALIDATION_MIN_EXIT_PROBABILITY = profile_float(
+    "open_buy_revalidation_min_exit_probability",
+    ORDERBOOK_MIN_EXIT_PROBABILITY
+)
 MAX_INVENTORY_USD = profile_float("max_inventory_usd", 400)
 REBALANCE_COOLDOWN_MINUTES = profile_float("rebalance_cooldown_minutes", 15)
 COOLDOWN_OVERRIDE_SCORE = profile_float("cooldown_override_score", 0.85)
@@ -284,6 +294,10 @@ DECISION_CSV_FIELDS = [
     "open_buy_orders_today",
     "open_buy_order_date",
     "max_open_buy_orders_per_day",
+    "predicted_expected_value_pct",
+    "predicted_entry_probability",
+    "predicted_exit_probability",
+    "predicted_joint_probability",
     "volume",
     "trade_value",
     "base_balance",
@@ -1117,8 +1131,33 @@ def candidate_csv_kwargs(candidate):
             "candidate_expected_value_pct": None,
             "candidate_entry_drop_pct": None,
             "candidate_exit_target_pct": None,
-            "candidate_exit_horizon_hours": None
+            "candidate_exit_horizon_hours": None,
+            "predicted_expected_value_pct": None,
+            "predicted_entry_probability": None,
+            "predicted_exit_probability": None,
+            "predicted_joint_probability": None
         }
+
+    return {
+        "candidate_entry_price": candidate.get("entry_price"),
+        "candidate_exit_price": candidate.get("exit_price"),
+        "candidate_entry_probability": candidate.get("entry_probability"),
+        "candidate_exit_probability": candidate.get("exit_probability"),
+        "candidate_joint_probability": candidate.get("joint_probability"),
+        "candidate_expected_value_pct": candidate.get("expected_value_pct"),
+        "candidate_entry_drop_pct": candidate.get("entry_drop_pct"),
+        "candidate_exit_target_pct": candidate.get("exit_target_pct"),
+        "candidate_exit_horizon_hours": candidate.get("exit_horizon_hours"),
+        "predicted_expected_value_pct": candidate.get("expected_value_pct"),
+        "predicted_entry_probability": candidate.get("entry_probability"),
+        "predicted_exit_probability": candidate.get("exit_probability"),
+        "predicted_joint_probability": candidate.get("joint_probability")
+    }
+
+
+def prediction_metadata(candidate):
+    if not candidate:
+        return {}
 
     return {
         "candidate_entry_price": candidate.get("entry_price"),
@@ -1252,9 +1291,16 @@ def sell_target_price_for_order(order, buy_price):
     return sell_target_price(buy_price)
 
 
-def place_limit_buy(price, volume, cycle_id, candidate_exit_price=None):
+def place_limit_buy(
+    price,
+    volume,
+    cycle_id,
+    candidate_exit_price=None,
+    candidate=None
+):
     buy_price = round_price(price)
     buy_volume = round_volume(volume)
+    candidate_meta = prediction_metadata(candidate)
 
     if DRY_RUN:
         state["stats"]["dry_run_trades"] += 1
@@ -1267,6 +1313,7 @@ def place_limit_buy(price, volume, cycle_id, candidate_exit_price=None):
             "price": buy_price,
             "placed_at": cycle_id,
             "candidate_exit_price": candidate_exit_price,
+            **candidate_meta,
             "trade_id": txid,
             "dry_run": True
         }
@@ -1279,7 +1326,8 @@ def place_limit_buy(price, volume, cycle_id, candidate_exit_price=None):
                 "side": "buy",
                 "volume": buy_volume,
                 "price": buy_price,
-                "txid": txid
+                "txid": txid,
+                **candidate_meta
             }
         )
         log_and_console(
@@ -1289,7 +1337,8 @@ def place_limit_buy(price, volume, cycle_id, candidate_exit_price=None):
             side="buy",
             volume=buy_volume,
             price=buy_price,
-            txid=txid
+            txid=txid,
+            **candidate_meta
         )
         return {"dry_run": True, "result": {"txid": [txid]}}
 
@@ -1321,7 +1370,8 @@ def place_limit_buy(price, volume, cycle_id, candidate_exit_price=None):
                 "volume": buy_volume,
                 "price": buy_price,
                 "txid": txid,
-                **fill
+                **fill,
+                **candidate_meta
             }
         )
         log_and_console(
@@ -1333,6 +1383,7 @@ def place_limit_buy(price, volume, cycle_id, candidate_exit_price=None):
             price=buy_price,
             txid=txid,
             **fill,
+            **candidate_meta,
             result=result.get("result")
         )
         notify_order_tracker(
@@ -1443,6 +1494,17 @@ def place_limit_sell(price, volume, cycle_id, buy_txid=None, buy_price=None):
     return result
 
 
+def cancel_order(txid):
+    if DRY_RUN and str(txid).startswith("dry_run_"):
+        return {"dry_run": True, "result": {"count": 1}}
+
+    return safe_kraken_private(
+        "CANCEL_ORDER",
+        "/0/private/CancelOrder",
+        {"txid": txid}
+    )
+
+
 def current_inventory_usd(current_price):
     open_buy_notional = sum(
         (order.get("price") or current_price) * (order.get("volume") or 0)
@@ -1481,10 +1543,142 @@ def place_profit_sell_for_buy(cycle_id, buy_txid, buy_price, volume, order=None)
     )
 
 
-def process_open_buy_orders(cycle_id, current_price=None):
+def order_age_minutes(order, now):
+    placed_at = parse_iso8601(order.get("placed_at"))
+    if placed_at is None:
+        return None
+
+    return (now - placed_at).total_seconds() / 60
+
+
+def revalidation_candidate_for_order(order, current_price, trend_signal):
+    try:
+        result = compute_orderbook_candidates(current_price, trend_signal)
+    except Exception as e:
+        log_event(
+            "OPEN_BUY_REVALIDATION_ERROR",
+            message=str(e),
+            txid=order.get("txid")
+        )
+        return None
+
+    if not result.get("usable"):
+        return None
+
+    order_price = float(order.get("price") or 0)
+    best_match = None
+    best_distance = None
+    for candidate in result.get("candidates", []):
+        distance = abs(float(candidate["entry_price"]) - order_price)
+        if best_distance is None or distance < best_distance:
+            best_match = candidate
+            best_distance = distance
+
+    return best_match
+
+
+def cancel_open_buy_order(txid, order, cycle_id, reason, **kwargs):
+    cancel_result = cancel_order(txid)
+    if not cancel_result:
+        log_event(
+            "OPEN_BUY_CANCEL_FAILED",
+            cycle_id=cycle_id,
+            txid=txid,
+            side="buy",
+            reason=reason,
+            **kwargs
+        )
+        return False
+
+    if txid in state["open_buy_orders"]:
+        del state["open_buy_orders"][txid]
+        save_state(state)
+
+    log_and_console(
+        "OPEN_BUY_CANCELLED",
+        message=f"buy order cancelled: {reason}",
+        cycle_id=cycle_id,
+        txid=txid,
+        side="buy",
+        price=order.get("price"),
+        volume=order.get("volume"),
+        reason=reason,
+        result=cancel_result.get("result") if isinstance(cancel_result, dict) else cancel_result,
+        **kwargs
+    )
+    return True
+
+
+def maybe_cancel_stale_open_buy(txid, order, cycle_id, current_price, trend_signal):
+    now = parse_iso8601(cycle_id) or datetime.now(timezone.utc)
+    age_minutes = order_age_minutes(order, now)
+
+    if (
+        MAX_OPEN_BUY_AGE_MINUTES > 0
+        and age_minutes is not None
+        and age_minutes >= MAX_OPEN_BUY_AGE_MINUTES
+    ):
+        return cancel_open_buy_order(
+            txid,
+            order,
+            cycle_id,
+            "open_buy_age_limit",
+            age_minutes=age_minutes,
+            max_open_buy_age_minutes=MAX_OPEN_BUY_AGE_MINUTES
+        )
+
+    if not REVALIDATE_OPEN_BUYS or current_price is None or trend_signal is None:
+        return False
+
+    candidate = revalidation_candidate_for_order(order, current_price, trend_signal)
+    if candidate is None:
+        return False
+
+    expected_value_pct = candidate.get("expected_value_pct")
+    exit_probability = candidate.get("exit_probability")
+    if (
+        expected_value_pct is not None
+        and expected_value_pct < OPEN_BUY_REVALIDATION_MIN_EXPECTED_VALUE_PCT
+    ):
+        return cancel_open_buy_order(
+            txid,
+            order,
+            cycle_id,
+            "open_buy_ev_below_min",
+            age_minutes=age_minutes,
+            revalidated_expected_value_pct=expected_value_pct,
+            min_expected_value_pct=OPEN_BUY_REVALIDATION_MIN_EXPECTED_VALUE_PCT
+        )
+
+    if (
+        exit_probability is not None
+        and exit_probability < OPEN_BUY_REVALIDATION_MIN_EXIT_PROBABILITY
+    ):
+        return cancel_open_buy_order(
+            txid,
+            order,
+            cycle_id,
+            "open_buy_exit_probability_below_min",
+            age_minutes=age_minutes,
+            revalidated_exit_probability=exit_probability,
+            min_exit_probability=OPEN_BUY_REVALIDATION_MIN_EXIT_PROBABILITY
+        )
+
+    return False
+
+
+def process_open_buy_orders(cycle_id, current_price=None, trend_signal=None):
     for txid, order in list(state["open_buy_orders"].items()):
         if DRY_RUN and order.get("dry_run"):
             if current_price is None or current_price > order.get("price", 0):
+                if maybe_cancel_stale_open_buy(
+                    txid,
+                    order,
+                    cycle_id,
+                    current_price,
+                    trend_signal
+                ):
+                    continue
                 continue
 
             fill = {
@@ -1555,6 +1749,14 @@ def process_open_buy_orders(cycle_id, current_price=None):
                 txid=txid,
                 side="buy"
             )
+        elif order_status == "open":
+            maybe_cancel_stale_open_buy(
+                txid,
+                order,
+                cycle_id,
+                current_price,
+                trend_signal
+            )
 
 
 def process_open_sell_orders(cycle_id, current_price=None):
@@ -1623,7 +1825,8 @@ def maybe_handle_submitted_buy(
     cycle_id,
     volume,
     price,
-    candidate_exit_price=None
+    candidate_exit_price=None,
+    candidate=None
 ):
     if DRY_RUN:
         return
@@ -1648,7 +1851,10 @@ def maybe_handle_submitted_buy(
             txid,
             fill_price,
             fill_volume,
-            order={"candidate_exit_price": candidate_exit_price}
+            order={
+                "candidate_exit_price": candidate_exit_price,
+                **prediction_metadata(candidate)
+            }
         )
         return
 
@@ -1659,7 +1865,8 @@ def maybe_handle_submitted_buy(
             "price": price,
             "placed_at": cycle_id,
             "candidate_exit_price": candidate_exit_price,
-            "trade_id": txid
+            "trade_id": txid,
+            **prediction_metadata(candidate)
         }
         save_state(state)
 
@@ -1752,6 +1959,12 @@ def run_cycle():
 
     state["last_signal"] = trend_signal
     save_state(state)
+
+    process_open_buy_orders(
+        cycle_id,
+        current_price=price,
+        trend_signal=trend_signal
+    )
 
     trend_score = trend_signal["trend_score"]
     orderbook_result = compute_orderbook_candidates(price, trend_signal)
@@ -2011,7 +2224,8 @@ def run_cycle():
         entry_price,
         volume,
         cycle_id,
-        candidate_exit_price=exit_price
+        candidate_exit_price=exit_price,
+        candidate=best_candidate
     )
     result_payload = result.get("result") if isinstance(result, dict) else None
     fill = result.get("fill", {}) if isinstance(result, dict) else {}
@@ -2038,7 +2252,8 @@ def run_cycle():
         cycle_id,
         volume,
         entry_price,
-        candidate_exit_price=exit_price
+        candidate_exit_price=exit_price,
+        candidate=best_candidate
     )
 
     log_event(
@@ -2159,6 +2374,14 @@ def main():
         max_open_buy_orders=MAX_OPEN_BUY_ORDERS,
         max_open_sell_orders=MAX_OPEN_SELL_ORDERS,
         max_open_orders=MAX_OPEN_ORDERS,
+        max_open_buy_age_minutes=MAX_OPEN_BUY_AGE_MINUTES,
+        revalidate_open_buys=REVALIDATE_OPEN_BUYS,
+        open_buy_revalidation_min_expected_value_pct=(
+            OPEN_BUY_REVALIDATION_MIN_EXPECTED_VALUE_PCT
+        ),
+        open_buy_revalidation_min_exit_probability=(
+            OPEN_BUY_REVALIDATION_MIN_EXIT_PROBABILITY
+        ),
         max_inventory_usd=MAX_INVENTORY_USD,
         target_profit_pct=TARGET_PROFIT_PCT,
         round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
