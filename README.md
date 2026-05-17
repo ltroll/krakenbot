@@ -270,7 +270,9 @@ The bot also reads the Kraken order book and scores several possible limit-buy e
 
 The order-book probabilities are heuristic, not a market forecast with statistical guarantees. They are intended as a ranking/gating model over live liquidity, support, resistance, expected target distance, the configured exit horizon, and the trend signal.
 
-The buy gate requires the best entry/exit pair to clear minimum entry probability, exit probability, and expected value thresholds, while also enforcing volatility, cooldown, inventory cap, open-buy cap, open-sell cap, total open-order cap, and minimum order size checks. The bot places a limit buy at the selected entry, and after it fills, places a limit sell at the selected best exit.
+The buy gate requires the best entry/exit pair to clear minimum entry probability, exit probability, and expected value thresholds, while also enforcing volatility, cooldown, inventory cap, daily buy cap, optional open-buy cap, open-sell cap, total open-order cap, and minimum order size checks. The bot places a limit buy at the selected entry, and after it fills, places a limit sell at the selected best exit.
+
+`max_open_buy_orders_per_day` controls how many currently open buy orders may have been placed on the current UTC day. The default is `2`; if one of today's buy orders fills, cancels, or expires, that slot is freed and the bot may place another buy the same day. `max_open_buy_orders: 0` disables the separate all-days open-buy cap, while `max_open_orders` remains the hard resource ceiling across all open buy and sell orders.
 
 Runtime files use their own names by default:
 

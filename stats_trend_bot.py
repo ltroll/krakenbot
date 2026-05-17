@@ -246,6 +246,7 @@ ORDERBOOK_PRESSURE_WINDOW_PCT = profile_float(
 MAX_OPEN_BUY_ORDERS = profile_int("max_open_buy_orders", 2)
 MAX_OPEN_SELL_ORDERS = profile_int("max_open_sell_orders", 2)
 MAX_OPEN_ORDERS = profile_int("max_open_orders", 4)
+MAX_OPEN_BUY_ORDERS_PER_DAY = profile_int("max_open_buy_orders_per_day", 2)
 MAX_INVENTORY_USD = profile_float("max_inventory_usd", 400)
 REBALANCE_COOLDOWN_MINUTES = profile_float("rebalance_cooldown_minutes", 15)
 COOLDOWN_OVERRIDE_SCORE = profile_float("cooldown_override_score", 0.85)
@@ -280,6 +281,9 @@ DECISION_CSV_FIELDS = [
     "candidate_entry_drop_pct",
     "candidate_exit_target_pct",
     "candidate_exit_horizon_hours",
+    "open_buy_orders_today",
+    "open_buy_order_date",
+    "max_open_buy_orders_per_day",
     "volume",
     "trade_value",
     "base_balance",
@@ -504,6 +508,26 @@ def parse_iso8601(value):
         return datetime.fromisoformat(value)
     except Exception:
         return None
+
+
+def trading_day_key(now=None):
+    now = now or datetime.now(timezone.utc)
+    return now.astimezone(timezone.utc).date().isoformat()
+
+
+def open_buy_orders_for_day(now=None):
+    day_key = trading_day_key(now)
+    count = 0
+
+    for order in state.get("open_buy_orders", {}).values():
+        placed_at = parse_iso8601(order.get("placed_at"))
+        if placed_at is None:
+            continue
+
+        if trading_day_key(placed_at) == day_key:
+            count += 1
+
+    return count
 
 
 def record_trade_history(entry):
@@ -1734,7 +1758,10 @@ def run_cycle():
     best_candidate = orderbook_result.get("best")
     signal_fields = {
         **signal_csv_kwargs(trend_signal),
-        **candidate_csv_kwargs(best_candidate)
+        **candidate_csv_kwargs(best_candidate),
+        "open_buy_orders_today": open_buy_orders_for_day(now),
+        "open_buy_order_date": trading_day_key(now),
+        "max_open_buy_orders_per_day": MAX_OPEN_BUY_ORDERS_PER_DAY
     }
     log_event(
         "SIGNAL_UPDATE",
@@ -1851,7 +1878,26 @@ def run_cycle():
         )
         return
 
-    if len(state["open_buy_orders"]) >= MAX_OPEN_BUY_ORDERS:
+    open_buy_orders_today = open_buy_orders_for_day(now)
+    if (
+        MAX_OPEN_BUY_ORDERS_PER_DAY > 0
+        and open_buy_orders_today >= MAX_OPEN_BUY_ORDERS_PER_DAY
+    ):
+        skip_cycle(
+            "max_open_buy_orders_per_day",
+            cycle_id,
+            price=price,
+            open_buy_orders_today=open_buy_orders_today,
+            open_buy_order_date=trading_day_key(now),
+            max_open_buy_orders_per_day=MAX_OPEN_BUY_ORDERS_PER_DAY,
+            **signal_fields
+        )
+        return
+
+    if (
+        MAX_OPEN_BUY_ORDERS > 0
+        and len(state["open_buy_orders"]) >= MAX_OPEN_BUY_ORDERS
+    ):
         skip_cycle(
             "max_open_buy_orders",
             cycle_id,
@@ -1866,7 +1912,7 @@ def run_cycle():
         len(state["open_buy_orders"])
         + len(state["open_sell_orders"])
     )
-    if open_order_count >= MAX_OPEN_ORDERS:
+    if MAX_OPEN_ORDERS > 0 and open_order_count >= MAX_OPEN_ORDERS:
         skip_cycle(
             "max_open_orders",
             cycle_id,
@@ -2109,6 +2155,7 @@ def main():
         min_trade_usd=MIN_TRADE_USD,
         position_size_pct=POSITION_SIZE_PCT,
         max_trade_usd=MAX_TRADE_USD,
+        max_open_buy_orders_per_day=MAX_OPEN_BUY_ORDERS_PER_DAY,
         max_open_buy_orders=MAX_OPEN_BUY_ORDERS,
         max_open_sell_orders=MAX_OPEN_SELL_ORDERS,
         max_open_orders=MAX_OPEN_ORDERS,
