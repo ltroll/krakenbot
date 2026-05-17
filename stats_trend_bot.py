@@ -116,6 +116,20 @@ def profile_float_list(name, default):
     ]
 
 
+def build_float_grid(start, stop, step):
+    if step <= 0:
+        return []
+
+    values = []
+    current = start
+    epsilon = step / 10
+    while current <= stop + epsilon:
+        values.append(round(current, 10))
+        current += step
+
+    return values
+
+
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
 KRAKEN_NONCE_RETRIES = int(os.getenv("KRAKEN_NONCE_RETRIES", "2"))
 BACKTEST_MODE = env_bool(
@@ -188,9 +202,29 @@ DRY_RUN_QUOTE_BALANCE = profile_float("dry_run_quote_balance", 1000)
 ORDERBOOK_DEPTH_COUNT = profile_int("orderbook_depth_count", 50)
 ORDERBOOK_CANDIDATE_COUNT = profile_int("orderbook_candidate_count", 5)
 ORDERBOOK_ENTRY_STEP_PCT = profile_float("orderbook_entry_step_pct", 0.0015)
+ORDERBOOK_EXIT_TARGET_MIN_PCT = profile_float(
+    "orderbook_exit_target_min_pct",
+    0.005
+)
+ORDERBOOK_EXIT_TARGET_MAX_PCT = profile_float(
+    "orderbook_exit_target_max_pct",
+    0.015
+)
+ORDERBOOK_EXIT_TARGET_STEP_PCT = profile_float(
+    "orderbook_exit_target_step_pct",
+    0.001
+)
 ORDERBOOK_EXIT_TARGET_PCTS = profile_float_list(
     "orderbook_exit_target_pcts",
-    [0.004, 0.007, 0.01]
+    build_float_grid(
+        ORDERBOOK_EXIT_TARGET_MIN_PCT,
+        ORDERBOOK_EXIT_TARGET_MAX_PCT,
+        ORDERBOOK_EXIT_TARGET_STEP_PCT
+    )
+)
+ORDERBOOK_EXIT_HORIZON_HOURS = profile_float(
+    "orderbook_exit_horizon_hours",
+    3
 )
 ORDERBOOK_MIN_ENTRY_PROBABILITY = profile_float(
     "orderbook_min_entry_probability",
@@ -244,6 +278,8 @@ DECISION_CSV_FIELDS = [
     "candidate_joint_probability",
     "candidate_expected_value_pct",
     "candidate_entry_drop_pct",
+    "candidate_exit_target_pct",
+    "candidate_exit_horizon_hours",
     "volume",
     "trade_value",
     "base_balance",
@@ -994,6 +1030,15 @@ def estimate_exit_probability(entry_price, exit_price, book, trend_signal):
         1
     )
     distance_pct = pct_change(exit_price, entry_price)
+    horizon_volatility_pct = trend_signal["volatility_pct"] * math.sqrt(
+        max(ORDERBOOK_EXIT_HORIZON_HOURS, 0.01)
+        / max(HISTORY_WINDOW_HOURS, 1)
+    )
+    horizon_reachability = clamp(
+        horizon_volatility_pct / max(distance_pct, 1e-9),
+        0,
+        1
+    )
     distance_penalty = clamp(
         distance_pct / max(max(ORDERBOOK_EXIT_TARGET_PCTS), 1e-9),
         0,
@@ -1003,7 +1048,8 @@ def estimate_exit_probability(entry_price, exit_price, book, trend_signal):
         0.25
         + 0.35 * trend_bias
         + 0.20 * max(0, momentum_bias)
-        + 0.20 * (1 - resistance_ratio)
+        + 0.15 * (1 - resistance_ratio)
+        + 0.10 * horizon_reachability
         - 0.15 * distance_penalty
     )
     return clamp(probability, 0.05, 0.95)
@@ -1045,7 +1091,9 @@ def candidate_csv_kwargs(candidate):
             "candidate_exit_probability": None,
             "candidate_joint_probability": None,
             "candidate_expected_value_pct": None,
-            "candidate_entry_drop_pct": None
+            "candidate_entry_drop_pct": None,
+            "candidate_exit_target_pct": None,
+            "candidate_exit_horizon_hours": None
         }
 
     return {
@@ -1055,7 +1103,9 @@ def candidate_csv_kwargs(candidate):
         "candidate_exit_probability": candidate.get("exit_probability"),
         "candidate_joint_probability": candidate.get("joint_probability"),
         "candidate_expected_value_pct": candidate.get("expected_value_pct"),
-        "candidate_entry_drop_pct": candidate.get("entry_drop_pct")
+        "candidate_entry_drop_pct": candidate.get("entry_drop_pct"),
+        "candidate_exit_target_pct": candidate.get("exit_target_pct"),
+        "candidate_exit_horizon_hours": candidate.get("exit_horizon_hours")
     }
 
 
@@ -1069,6 +1119,7 @@ def compute_orderbook_candidates(price, trend_signal):
         }
 
     candidates = []
+    entry_summaries = []
     for index in range(ORDERBOOK_CANDIDATE_COUNT):
         entry_drop_pct = ORDERBOOK_ENTRY_STEP_PCT * (index + 1)
         if entry_drop_pct > ORDERBOOK_MAX_ENTRY_DROP_PCT:
@@ -1081,6 +1132,7 @@ def compute_orderbook_candidates(price, trend_signal):
             book,
             trend_signal
         )
+        exit_candidates = []
 
         for exit_target_pct in ORDERBOOK_EXIT_TARGET_PCTS:
             exit_price = entry_price * (1 + exit_target_pct + ROUND_TRIP_FEE_PCT)
@@ -1105,11 +1157,18 @@ def compute_orderbook_candidates(price, trend_signal):
                     "exit_price": exit_price,
                     "entry_drop_pct": entry_drop_pct,
                     "exit_target_pct": exit_target_pct,
+                    "exit_horizon_hours": ORDERBOOK_EXIT_HORIZON_HOURS,
                     "entry_probability": entry_probability,
                     "exit_probability": exit_probability,
                     "joint_probability": joint_probability,
                     "expected_value_pct": expected_value_pct
                 }
+            )
+            exit_candidates.append(candidates[-1])
+
+        if exit_candidates:
+            entry_summaries.append(
+                max(exit_candidates, key=lambda item: item["expected_value_pct"])
             )
 
     if not candidates:
@@ -1119,11 +1178,12 @@ def compute_orderbook_candidates(price, trend_signal):
             "candidates": []
         }
 
-    best = max(candidates, key=lambda item: item["expected_value_pct"])
+    best = max(entry_summaries, key=lambda item: item["expected_value_pct"])
     return {
         "usable": True,
         "best": best,
-        "candidates": candidates
+        "candidates": candidates,
+        "entry_summaries": entry_summaries
     }
 
 
@@ -2036,7 +2096,11 @@ def main():
         orderbook_depth_count=ORDERBOOK_DEPTH_COUNT,
         orderbook_candidate_count=ORDERBOOK_CANDIDATE_COUNT,
         orderbook_entry_step_pct=ORDERBOOK_ENTRY_STEP_PCT,
+        orderbook_exit_target_min_pct=ORDERBOOK_EXIT_TARGET_MIN_PCT,
+        orderbook_exit_target_max_pct=ORDERBOOK_EXIT_TARGET_MAX_PCT,
+        orderbook_exit_target_step_pct=ORDERBOOK_EXIT_TARGET_STEP_PCT,
         orderbook_exit_target_pcts=ORDERBOOK_EXIT_TARGET_PCTS,
+        orderbook_exit_horizon_hours=ORDERBOOK_EXIT_HORIZON_HOURS,
         orderbook_min_entry_probability=ORDERBOOK_MIN_ENTRY_PROBABILITY,
         orderbook_min_exit_probability=ORDERBOOK_MIN_EXIT_PROBABILITY,
         orderbook_min_expected_value_pct=ORDERBOOK_MIN_EXPECTED_VALUE_PCT,
