@@ -169,6 +169,18 @@ POSITION_SIZE_PCT = profile_float("position_size_pct", 0.10)
 MAX_TRADE_USD = profile_float("max_trade_usd", 0)
 TARGET_PROFIT_PCT = profile_float("target_profit_pct", 0.006)
 ROUND_TRIP_FEE_PCT = profile_float("round_trip_fee_pct", 0.0032)
+DYNAMIC_PROFIT_TARGETS = profile_bool("dynamic_profit_targets", False)
+MIN_TARGET_PROFIT_PCT = profile_float("min_target_profit_pct", TARGET_PROFIT_PCT)
+BASE_TARGET_PROFIT_PCT = profile_float("base_target_profit_pct", TARGET_PROFIT_PCT)
+MAX_TARGET_PROFIT_PCT = profile_float("max_target_profit_pct", TARGET_PROFIT_PCT)
+DYNAMIC_PROFIT_LOW_VOLATILITY_PCT = profile_float(
+    "dynamic_profit_low_volatility_pct",
+    0.025
+)
+DYNAMIC_PROFIT_HIGH_VOLATILITY_PCT = profile_float(
+    "dynamic_profit_high_volatility_pct",
+    0.06
+)
 MAX_OPEN_SELL_ORDERS = profile_int("max_open_sell_orders", 1)
 MAX_INVENTORY_USD = profile_float("max_inventory_usd", 250)
 PREVENT_BUY_ABOVE_LAST_SELL = profile_bool("prevent_buy_above_last_sell", True)
@@ -243,6 +255,7 @@ DECISION_CSV_FIELDS = [
     "sentiment_buy_threshold",
     "target_profit_pct",
     "round_trip_fee_pct",
+    "gross_target_pct",
     "last_sell_price",
     "max_rebuy_price",
     "open_sell_count",
@@ -836,8 +849,13 @@ def fill_values(order, fallback_volume=None, fallback_price=None):
     }
 
 
-def sell_target_price(buy_price):
-    return buy_price * (1 + TARGET_PROFIT_PCT + ROUND_TRIP_FEE_PCT)
+def sell_target_price(buy_price, target_profit_pct=None):
+    profit_pct = (
+        TARGET_PROFIT_PCT
+        if target_profit_pct is None
+        else target_profit_pct
+    )
+    return buy_price * (1 + profit_pct + ROUND_TRIP_FEE_PCT)
 
 
 def place_market_buy(volume, cycle_id):
@@ -907,9 +925,14 @@ def place_market_buy(volume, cycle_id):
     return result
 
 
-def place_limit_buy(price, volume, cycle_id):
+def place_limit_buy(price, volume, cycle_id, target_profit_pct=None):
     buy_price = round_price(price)
     buy_volume = round_volume(volume)
+    profit_pct = (
+        TARGET_PROFIT_PCT
+        if target_profit_pct is None
+        else target_profit_pct
+    )
 
     if DRY_RUN:
         state["stats"]["dry_run_trades"] += 1
@@ -923,7 +946,9 @@ def place_limit_buy(price, volume, cycle_id):
                 "side": "buy",
                 "ordertype": "limit",
                 "volume": buy_volume,
-                "price": buy_price
+                "price": buy_price,
+                "target_profit_pct": profit_pct,
+                "round_trip_fee_pct": ROUND_TRIP_FEE_PCT
             }
         )
         log_and_console(
@@ -932,7 +957,10 @@ def place_limit_buy(price, volume, cycle_id):
             cycle_id=cycle_id,
             side="buy",
             volume=buy_volume,
-            price=buy_price
+            price=buy_price,
+            target_profit_pct=profit_pct,
+            round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+            gross_target_pct=profit_pct + ROUND_TRIP_FEE_PCT
         )
         return {"dry_run": True}
 
@@ -968,6 +996,8 @@ def place_limit_buy(price, volume, cycle_id):
             "txid": txid,
             "volume": buy_volume,
             "price": buy_price,
+            "target_profit_pct": profit_pct,
+            "round_trip_fee_pct": ROUND_TRIP_FEE_PCT,
             "placed_at": cycle_id,
             "trade_id": txid
         }
@@ -981,6 +1011,8 @@ def place_limit_buy(price, volume, cycle_id):
                 "ordertype": "limit",
                 "volume": buy_volume,
                 "price": buy_price,
+                "target_profit_pct": profit_pct,
+                "round_trip_fee_pct": ROUND_TRIP_FEE_PCT,
                 "txid": txid
             }
         )
@@ -991,6 +1023,9 @@ def place_limit_buy(price, volume, cycle_id):
             side="buy",
             volume=buy_volume,
             price=buy_price,
+            target_profit_pct=profit_pct,
+            round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+            gross_target_pct=profit_pct + ROUND_TRIP_FEE_PCT,
             txid=txid,
             result=result.get("result")
         )
@@ -1007,7 +1042,14 @@ def place_limit_buy(price, volume, cycle_id):
     return result
 
 
-def place_limit_sell(price, volume, cycle_id, buy_txid=None, buy_price=None):
+def place_limit_sell(
+    price,
+    volume,
+    cycle_id,
+    buy_txid=None,
+    buy_price=None,
+    target_profit_pct=None
+):
     sell_price = round_price(price)
     sell_volume = round_volume(volume)
 
@@ -1020,7 +1062,14 @@ def place_limit_sell(price, volume, cycle_id, buy_txid=None, buy_price=None):
             volume=sell_volume,
             price=sell_price,
             buy_txid=buy_txid,
-            buy_price=buy_price
+            buy_price=buy_price,
+            target_profit_pct=target_profit_pct,
+            round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+            gross_target_pct=(
+                target_profit_pct + ROUND_TRIP_FEE_PCT
+                if target_profit_pct is not None
+                else None
+            )
         )
         return {"dry_run": True}
 
@@ -1056,6 +1105,8 @@ def place_limit_sell(price, volume, cycle_id, buy_txid=None, buy_price=None):
             "buy_price": buy_price,
             "sell_price": sell_price,
             "buy_txid": buy_txid,
+            "target_profit_pct": target_profit_pct,
+            "round_trip_fee_pct": ROUND_TRIP_FEE_PCT,
             "placed_at": cycle_id,
             "trade_id": buy_txid or txid
         }
@@ -1068,7 +1119,14 @@ def place_limit_sell(price, volume, cycle_id, buy_txid=None, buy_price=None):
             volume=sell_volume,
             price=sell_price,
             buy_price=buy_price,
-            buy_txid=buy_txid
+            buy_txid=buy_txid,
+            target_profit_pct=target_profit_pct,
+            round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+            gross_target_pct=(
+                target_profit_pct + ROUND_TRIP_FEE_PCT
+                if target_profit_pct is not None
+                else None
+            )
         )
         notify_order_tracker(
             trade_id=buy_txid or txid,
@@ -1239,6 +1297,56 @@ def mean_reversion_setup_allowed(sentiment):
     )
 
 
+def dynamic_target_profit_pct(sentiment, weighted_signal):
+    if not DYNAMIC_PROFIT_TARGETS:
+        return TARGET_PROFIT_PCT
+
+    price_regime = sentiment.get("price_regime", {})
+    kraken_flow = sentiment.get("kraken_flow", {})
+    target = BASE_TARGET_PROFIT_PCT
+
+    range_position = numeric_or_none(price_regime.get("range_position_24h"))
+    if range_position is not None:
+        if range_position <= 0.10:
+            target += 0.002
+        elif range_position <= 0.20:
+            target += 0.001
+        elif range_position >= 0.70:
+            target -= 0.002
+
+    opportunity = numeric_or_none(sentiment.get("mean_reversion_opportunity"))
+    if opportunity is not None:
+        if opportunity >= 0.55:
+            target += 0.002
+        elif opportunity >= MEAN_REVERSION_BUY_THRESHOLD:
+            target += 0.001
+
+    flow_pressure = numeric_or_none(sentiment.get("flow_pressure"))
+    if flow_pressure is None:
+        flow_pressure = numeric_or_none(kraken_flow.get("aggression_score"))
+    if flow_pressure is not None:
+        if flow_pressure >= 0.40:
+            target += 0.0015
+        elif flow_pressure <= 0:
+            target -= 0.0015
+
+    if weighted_signal >= SENTIMENT_BUY_THRESHOLD + 0.04:
+        target += 0.002
+    elif weighted_signal < 0:
+        target -= 0.001
+
+    volatility = numeric_or_none(
+        price_regime.get("realized_volatility_24h_pct")
+    )
+    if volatility is not None:
+        if volatility >= DYNAMIC_PROFIT_HIGH_VOLATILITY_PCT:
+            target += 0.0015
+        elif volatility <= DYNAMIC_PROFIT_LOW_VOLATILITY_PCT:
+            target -= 0.001
+
+    return clamp(target, MIN_TARGET_PROFIT_PCT, MAX_TARGET_PROFIT_PCT)
+
+
 def target_limit_orders(
     sentiment,
     current_price,
@@ -1306,8 +1414,19 @@ def current_inventory_usd(current_price):
     return open_buy_notional + open_sell_notional
 
 
-def place_profit_sell_for_buy(cycle_id, buy_txid, buy_price, volume):
-    target_price = sell_target_price(buy_price)
+def place_profit_sell_for_buy(
+    cycle_id,
+    buy_txid,
+    buy_price,
+    volume,
+    target_profit_pct=None
+):
+    profit_pct = (
+        TARGET_PROFIT_PCT
+        if target_profit_pct is None
+        else target_profit_pct
+    )
+    target_price = sell_target_price(buy_price, profit_pct)
     log_event(
         "TRADE_DECISION",
         cycle_id=cycle_id,
@@ -1317,8 +1436,9 @@ def place_profit_sell_for_buy(cycle_id, buy_txid, buy_price, volume):
         buy_price=buy_price,
         price=round_price(target_price),
         volume=round_volume(volume),
-        target_profit_pct=TARGET_PROFIT_PCT,
-        round_trip_fee_pct=ROUND_TRIP_FEE_PCT
+        target_profit_pct=profit_pct,
+        round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+        gross_target_pct=profit_pct + ROUND_TRIP_FEE_PCT
     )
     append_decision_csv(
         "trade_decision",
@@ -1328,14 +1448,18 @@ def place_profit_sell_for_buy(cycle_id, buy_txid, buy_price, volume):
         price=round_price(target_price),
         volume=round_volume(volume),
         dry_run=DRY_RUN,
-        order_txid=buy_txid
+        order_txid=buy_txid,
+        target_profit_pct=profit_pct,
+        round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+        gross_target_pct=profit_pct + ROUND_TRIP_FEE_PCT
     )
     return place_limit_sell(
         target_price,
         volume,
         cycle_id,
         buy_txid=buy_txid,
-        buy_price=buy_price
+        buy_price=buy_price,
+        target_profit_pct=profit_pct
     )
 
 
@@ -1369,7 +1493,8 @@ def process_open_buy_orders(cycle_id):
                 cycle_id,
                 txid,
                 fill["price"],
-                fill["volume"]
+                fill["volume"],
+                order.get("target_profit_pct")
             )
         elif order_status in ("canceled", "expired"):
             del state["open_buy_orders"][txid]
@@ -1424,7 +1549,19 @@ def process_open_sell_orders(cycle_id):
             )
 
 
-def maybe_handle_submitted_buy(result, cycle_id, volume, price):
+def maybe_handle_submitted_buy(
+    result,
+    cycle_id,
+    volume,
+    price,
+    target_profit_pct=None
+):
+    profit_pct = (
+        TARGET_PROFIT_PCT
+        if target_profit_pct is None
+        else target_profit_pct
+    )
+
     if DRY_RUN:
         state["stats"]["buy_orders_filled"] += 1
         save_state(state)
@@ -1432,7 +1569,8 @@ def maybe_handle_submitted_buy(result, cycle_id, volume, price):
             cycle_id,
             "dry_run_buy",
             price,
-            volume
+            volume,
+            profit_pct
         )
         return
 
@@ -1467,7 +1605,13 @@ def maybe_handle_submitted_buy(result, cycle_id, volume, price):
     if txid and order_status == "closed" and fill_volume > 0 and fill_price > 0:
         state["stats"]["buy_orders_filled"] += 1
         save_state(state)
-        place_profit_sell_for_buy(cycle_id, txid, fill_price, fill_volume)
+        place_profit_sell_for_buy(
+            cycle_id,
+            txid,
+            fill_price,
+            fill_volume,
+            profit_pct
+        )
         return
 
     if txid:
@@ -1475,6 +1619,8 @@ def maybe_handle_submitted_buy(result, cycle_id, volume, price):
             "txid": txid,
             "volume": volume,
             "price": price,
+            "target_profit_pct": profit_pct,
+            "round_trip_fee_pct": ROUND_TRIP_FEE_PCT,
             "placed_at": cycle_id,
             "trade_id": txid
         }
@@ -1519,6 +1665,7 @@ def run_cycle():
         sentiment.get("mean_reversion_opportunity")
     )
     flow_pressure = numeric_or_none(sentiment.get("flow_pressure"))
+    target_profit_pct = dynamic_target_profit_pct(sentiment, weighted_signal)
 
     log_event(
         "SIGNAL_UPDATE",
@@ -1542,6 +1689,9 @@ def run_cycle():
         mean_reversion_opportunity=mean_reversion_opportunity,
         range_position_24h=range_position,
         flow_pressure=flow_pressure,
+        target_profit_pct=target_profit_pct,
+        round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+        gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
         processed_at=sentiment.get("processed_at")
     )
     console(f"Price: {price} | Signal: {raw_signal} | Confidence: {confidence}")
@@ -1593,7 +1743,10 @@ def run_cycle():
             sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD,
             mean_reversion_opportunity=mean_reversion_opportunity,
             range_position_24h=range_position,
-            flow_pressure=flow_pressure
+            flow_pressure=flow_pressure,
+            target_profit_pct=target_profit_pct,
+            round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+            gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT
         )
         return
 
@@ -1766,6 +1919,9 @@ def run_cycle():
                 weighted_signal=weighted_signal,
                 confidence=confidence,
                 sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD,
+                target_profit_pct=target_profit_pct,
+                round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+                gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
                 risk_multiplier=risk_multiplier,
                 effective_risk_multiplier=effective_multiplier,
                 mean_reversion_opportunity=mean_reversion_opportunity,
@@ -1789,6 +1945,9 @@ def run_cycle():
                 weighted_signal=weighted_signal,
                 confidence=confidence,
                 dry_run=DRY_RUN,
+                target_profit_pct=target_profit_pct,
+                round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+                gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
                 risk_multiplier=risk_multiplier,
                 effective_risk_multiplier=effective_multiplier,
                 mean_reversion_opportunity=mean_reversion_opportunity,
@@ -1796,7 +1955,12 @@ def run_cycle():
                 flow_pressure=flow_pressure
             )
 
-            result = place_limit_buy(target_price, volume, cycle_id)
+            result = place_limit_buy(
+                target_price,
+                volume,
+                cycle_id,
+                target_profit_pct
+            )
             result_payload = (
                 result.get("result") if isinstance(result, dict) else None
             )
@@ -1827,6 +1991,9 @@ def run_cycle():
                 confidence=confidence,
                 dry_run=DRY_RUN,
                 order_txid=txids[0] if txids else "",
+                target_profit_pct=target_profit_pct,
+                round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+                gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
                 result=result_payload or result
             )
 
@@ -1862,6 +2029,9 @@ def run_cycle():
             open_sell_count=len(state["open_sell_orders"]),
             deployed_inventory_usd=current_inventory_usd(price),
             last_sell_price=state.get("last_sell_price"),
+            target_profit_pct=target_profit_pct,
+            round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+            gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
             dry_run=DRY_RUN
         )
         return
@@ -1893,6 +2063,9 @@ def run_cycle():
         weighted_signal=weighted_signal,
         confidence=confidence,
         sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD,
+        target_profit_pct=target_profit_pct,
+        round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+        gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
         risk_multiplier=risk_multiplier,
         effective_risk_multiplier=effective_multiplier
     )
@@ -1911,6 +2084,9 @@ def run_cycle():
         weighted_signal=weighted_signal,
         confidence=confidence,
         dry_run=DRY_RUN,
+        target_profit_pct=target_profit_pct,
+        round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+        gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
         risk_multiplier=risk_multiplier,
         effective_risk_multiplier=effective_multiplier
     )
@@ -1935,12 +2111,21 @@ def run_cycle():
         confidence=confidence,
         dry_run=DRY_RUN,
         order_txid=txids[0] if txids else "",
+        target_profit_pct=target_profit_pct,
+        round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+        gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
         risk_multiplier=risk_multiplier,
         effective_risk_multiplier=effective_multiplier,
         **fill,
         result=result_payload or result
     )
-    maybe_handle_submitted_buy(result, cycle_id, volume, price)
+    maybe_handle_submitted_buy(
+        result,
+        cycle_id,
+        volume,
+        price,
+        target_profit_pct
+    )
 
     log_event(
         "CYCLE_SUMMARY",
@@ -1959,6 +2144,9 @@ def run_cycle():
         open_sell_count=len(state["open_sell_orders"]),
         deployed_inventory_usd=current_inventory_usd(price),
         last_sell_price=state.get("last_sell_price"),
+        target_profit_pct=target_profit_pct,
+        round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+        gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
         risk_multiplier=risk_multiplier,
         effective_risk_multiplier=effective_multiplier,
         dry_run=DRY_RUN
@@ -1993,6 +2181,12 @@ def main():
         max_trade_usd=MAX_TRADE_USD,
         target_profit_pct=TARGET_PROFIT_PCT,
         round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+        dynamic_profit_targets=DYNAMIC_PROFIT_TARGETS,
+        min_target_profit_pct=MIN_TARGET_PROFIT_PCT,
+        base_target_profit_pct=BASE_TARGET_PROFIT_PCT,
+        max_target_profit_pct=MAX_TARGET_PROFIT_PCT,
+        dynamic_profit_low_volatility_pct=DYNAMIC_PROFIT_LOW_VOLATILITY_PCT,
+        dynamic_profit_high_volatility_pct=DYNAMIC_PROFIT_HIGH_VOLATILITY_PCT,
         max_open_sell_orders=MAX_OPEN_SELL_ORDERS,
         max_open_buy_orders=MAX_OPEN_BUY_ORDERS,
         max_inventory_usd=MAX_INVENTORY_USD,
