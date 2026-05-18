@@ -173,6 +173,24 @@ high_min_signal = profile_float(
     "high_min_signal",
     max(0.05, execution_signal_threshold)
 )
+min_signal_status = strategy_config.get("min_signal_status", "fresh")
+risk_multiplier_floor = profile_float("risk_multiplier_floor", 0.75)
+risk_multiplier_ceiling = profile_float("risk_multiplier_ceiling", 1.15)
+flow_defensive_threshold = profile_float("flow_defensive_threshold", -0.20)
+flow_block_threshold = profile_float("flow_block_threshold", -0.40)
+flow_defensive_size_multiplier = profile_float(
+    "flow_defensive_size_multiplier",
+    0.75
+)
+flow_block_high_only = bool(
+    strategy_config.get("flow_block_high_only", True)
+)
+flow_block_llm_only_below = profile_float("flow_block_llm_only_below", -0.50)
+mean_reversion_min_opportunity = profile_float(
+    "mean_reversion_min_opportunity",
+    0.0
+)
+require_fresh_signal = bool(strategy_config.get("require_fresh_signal", True))
 price_check_interval_seconds = profile_int("price_check_interval_seconds", 120)
 range_refresh_interval_minutes = profile_int("range_refresh_interval_minutes", 60)
 max_open_sell_orders = profile_int("max_open_sell_orders", 999999)
@@ -541,6 +559,8 @@ def get_sentiment():
             return {
                 "execution_signal": data.get("execution_signal", 0),
                 "target_prices": target_prices,
+                "risk_multiplier": data.get("risk_multiplier"),
+                "smoothed_risk_multiplier": data.get("smoothed_risk_multiplier"),
                 "btc_sentiment": data.get("btc_sentiment"),
                 "regulatory_risk": data.get("regulatory_risk"),
                 "macro_tightening_bias": data.get("macro_tightening_bias"),
@@ -553,10 +573,32 @@ def get_sentiment():
                 "raw_direction_bias": data.get("raw_direction_bias"),
                 "btc_price": data.get("btc_price"),
                 "fear_greed_index": data.get("fear_greed_index"),
+                "flow_pressure": data.get("flow_pressure"),
+                "mean_reversion_opportunity": data.get(
+                    "mean_reversion_opportunity"
+                ),
+                "signal_status": data.get("signal_status"),
+                "source_status": (
+                    data.get("source_status")
+                    if isinstance(data.get("source_status"), dict)
+                    else {}
+                ),
+                "bot_action_allowed": data.get("bot_action_allowed"),
+                "action_reason": data.get("reason"),
                 "processed_at": data.get("processed_at"),
                 "price_regime": (
                     data.get("price_regime")
                     if isinstance(data.get("price_regime"), dict)
+                    else {}
+                ),
+                "trend_snapshot": (
+                    data.get("trend_snapshot")
+                    if isinstance(data.get("trend_snapshot"), dict)
+                    else {}
+                ),
+                "kraken_flow": (
+                    data.get("kraken_flow")
+                    if isinstance(data.get("kraken_flow"), dict)
                     else {}
                 )
             }
@@ -564,7 +606,10 @@ def get_sentiment():
         return {
             "execution_signal": float(data),
             "target_prices": [],
-            "price_regime": {}
+            "price_regime": {},
+            "trend_snapshot": {},
+            "kraken_flow": {},
+            "source_status": {}
         }
     except Exception as e:
         log_event("SENTIMENT_ERROR", message=str(e))
@@ -884,6 +929,73 @@ def min_signal_for_buy_source(buy_source):
     return low_min_signal
 
 
+def clamp(value, minimum, maximum):
+    return max(minimum, min(maximum, value))
+
+
+def source_status_allows_trading(signal_status, source_status):
+    if not require_fresh_signal:
+        return True, None
+
+    if signal_status and signal_status != min_signal_status:
+        return False, f"signal_status_{signal_status}"
+
+    if not isinstance(source_status, dict):
+        return True, None
+
+    for source_name, status_info in source_status.items():
+        if not isinstance(status_info, dict):
+            continue
+        status_value = status_info.get("status")
+        if status_value in ("fresh", "not_configured", None):
+            continue
+        return False, f"source_status_{source_name}_{status_value}"
+
+    return True, None
+
+
+def flow_adjustment(flow_pressure, buy_source):
+    if flow_pressure is None:
+        return {
+            "size_multiplier": 1.0,
+            "block_buy": False,
+            "reason": None
+        }
+
+    if flow_pressure <= flow_block_llm_only_below and buy_source == "llm_target":
+        return {
+            "size_multiplier": flow_defensive_size_multiplier,
+            "block_buy": False,
+            "reason": "flow_llm_only"
+        }
+
+    if flow_pressure <= flow_block_threshold:
+        if flow_block_high_only:
+            return {
+                "size_multiplier": flow_defensive_size_multiplier,
+                "block_buy": buy_source == "range_high_band",
+                "reason": "flow_block_high"
+            }
+        return {
+            "size_multiplier": flow_defensive_size_multiplier,
+            "block_buy": True,
+            "reason": "flow_block_all"
+        }
+
+    if flow_pressure <= flow_defensive_threshold:
+        return {
+            "size_multiplier": flow_defensive_size_multiplier,
+            "block_buy": buy_source == "range_high_band",
+            "reason": "flow_defensive"
+        }
+
+    return {
+        "size_multiplier": 1.0,
+        "block_buy": False,
+        "reason": None
+    }
+
+
 def current_inventory_usd(current_price):
     open_buy_notional = sum(
         (order.get("price") or current_price) * (order.get("volume") or 0)
@@ -923,6 +1035,16 @@ def main():
         mean_min_signal=mean_min_signal,
         median_min_signal=median_min_signal,
         high_min_signal=high_min_signal,
+        min_signal_status=min_signal_status,
+        require_fresh_signal=require_fresh_signal,
+        risk_multiplier_floor=risk_multiplier_floor,
+        risk_multiplier_ceiling=risk_multiplier_ceiling,
+        flow_defensive_threshold=flow_defensive_threshold,
+        flow_block_threshold=flow_block_threshold,
+        flow_defensive_size_multiplier=flow_defensive_size_multiplier,
+        flow_block_high_only=flow_block_high_only,
+        flow_block_llm_only_below=flow_block_llm_only_below,
+        mean_reversion_min_opportunity=mean_reversion_min_opportunity,
         price_check_interval_seconds=price_check_interval_seconds,
         range_refresh_interval_minutes=range_refresh_interval_minutes,
         max_open_sell_orders=max_open_sell_orders,
@@ -985,6 +1107,33 @@ def main():
             target_prices = sentiment_payload.get("target_prices", [])
             llm_target = select_llm_target(target_prices, price)
             price_regime = sentiment_payload.get("price_regime", {})
+            trend_snapshot = sentiment_payload.get("trend_snapshot", {})
+            kraken_flow = sentiment_payload.get("kraken_flow", {})
+            flow_pressure = numeric_or_default(
+                sentiment_payload.get("flow_pressure"),
+                None
+            )
+            mean_reversion_opportunity = numeric_or_default(
+                sentiment_payload.get("mean_reversion_opportunity"),
+                0.0
+            )
+            smoothed_risk_multiplier = clamp(
+                numeric_or_default(
+                    sentiment_payload.get("smoothed_risk_multiplier"),
+                    1.0
+                ),
+                risk_multiplier_floor,
+                risk_multiplier_ceiling
+            )
+            signal_status = sentiment_payload.get("signal_status")
+            source_status = sentiment_payload.get("source_status", {})
+            freshness_allows_trading, freshness_block_reason = (
+                source_status_allows_trading(signal_status, source_status)
+            )
+            signal_allows_trading = sentiment_payload.get("bot_action_allowed")
+            if signal_allows_trading is None:
+                signal_allows_trading = True
+            external_block_reason = sentiment_payload.get("action_reason")
             regime = sentiment_regime(execution_signal)
             effective_position_size_pct = (
                 position_size_pct * regime["position_size_multiplier"]
@@ -996,6 +1145,14 @@ def main():
                 1,
                 int(round(
                     max_open_sell_orders * regime["open_sell_multiplier"]
+                ))
+            )
+            effective_position_size_pct *= smoothed_risk_multiplier
+            effective_max_inventory_usd *= smoothed_risk_multiplier
+            effective_max_open_sell_orders = max(
+                1,
+                int(round(
+                    effective_max_open_sell_orders * smoothed_risk_multiplier
                 ))
             )
 
@@ -1015,9 +1172,20 @@ def main():
                     None if llm_target is None
                     else round(llm_target["buy_price"], PRICE_DECIMALS)
                 ),
+                signal_status=signal_status,
+                signal_allows_trading=signal_allows_trading,
+                freshness_allows_trading=freshness_allows_trading,
+                freshness_block_reason=freshness_block_reason,
+                smoothed_risk_multiplier=smoothed_risk_multiplier,
+                flow_pressure=flow_pressure,
+                mean_reversion_opportunity=mean_reversion_opportunity,
                 price_regime_range_position=price_regime.get("range_position_24h"),
                 price_regime_volatility_pct=price_regime.get(
                     "realized_volatility_24h_pct"
+                ),
+                trend_range_position_change=(
+                    trend_snapshot.get("price_regime_trends", {})
+                    .get("range_position_24h_change")
                 ),
                 sentiment_regime=regime["name"],
                 effective_position_size_pct=effective_position_size_pct,
@@ -1395,15 +1563,22 @@ def main():
                 low and high
                 and llm_target is not None
                 and execution_signal >= llm_target_min_signal
+                and freshness_allows_trading
+                and signal_allows_trading
+                and mean_reversion_opportunity >= mean_reversion_min_opportunity
             )
 
             # BUY CANDIDATES
-            if low and high and (
+            if (
+                freshness_allows_trading
+                and signal_allows_trading
+                and low and high and (
                 llm_buy_allowed or execution_signal >= min(
                     low_min_signal,
                     mean_min_signal,
                     median_min_signal,
                     high_min_signal
+                )
                 )
             ):
                 candidate_levels = []
@@ -1492,6 +1667,7 @@ def main():
                     level = candidate["level"]
                     active_sell_pct_override = candidate["sell_pct_override"]
                     buy_source = candidate["buy_source"]
+                    flow_control = flow_adjustment(flow_pressure, buy_source)
                     key = str(level)
                     skip_reason = None
 
@@ -1499,6 +1675,10 @@ def main():
                         skip_reason = "open_buy_order"
                     elif key in reserved_sell_levels:
                         skip_reason = "open_sell_order"
+                    elif (
+                        mean_reversion_opportunity < mean_reversion_min_opportunity
+                    ):
+                        skip_reason = "mean_reversion_opportunity_below_min"
                     elif buy_source != "llm_target" and price > level:
                         skip_reason = "price_above_level"
                     elif (
@@ -1518,6 +1698,8 @@ def main():
                         and execution_signal < min_signal_for_buy_source(buy_source)
                     ):
                         skip_reason = "strategy_signal_below_min"
+                    elif flow_control["block_buy"]:
+                        skip_reason = flow_control["reason"]
                     elif (
                         buy_source == "range_high_band"
                         and high_anchor_cooldown_remaining > 0
@@ -1529,7 +1711,11 @@ def main():
                     ):
                         skip_reason = "max_open_high_anchor_orders"
 
-                    volume = (usd * effective_position_size_pct) / level
+                    volume = (
+                        usd
+                        * effective_position_size_pct
+                        * flow_control["size_multiplier"]
+                    ) / level
                     projected_inventory_usd = deployed_inventory_usd + (
                         level * volume
                     )
@@ -1567,6 +1753,12 @@ def main():
                             effective_max_open_sell_orders=(
                                 effective_max_open_sell_orders
                             ),
+                            smoothed_risk_multiplier=smoothed_risk_multiplier,
+                            flow_pressure=flow_pressure,
+                            flow_control_reason=flow_control["reason"],
+                            mean_reversion_opportunity=(
+                                mean_reversion_opportunity
+                            ),
                             buy_source=buy_source,
                             reason=skip_reason
                         )
@@ -1585,6 +1777,10 @@ def main():
                         range_median=median,
                         sentiment_regime=regime["name"],
                         effective_position_size_pct=effective_position_size_pct,
+                        smoothed_risk_multiplier=smoothed_risk_multiplier,
+                        flow_pressure=flow_pressure,
+                        flow_control_reason=flow_control["reason"],
+                        mean_reversion_opportunity=mean_reversion_opportunity,
                         buy_source=buy_source,
                         high_anchor_order_count=high_anchor_order_count,
                         sell_pct_override=active_sell_pct_override
@@ -1667,12 +1863,24 @@ def main():
                     mean_min_signal=mean_min_signal,
                     median_min_signal=median_min_signal,
                     high_min_signal=high_min_signal,
+                    signal_status=signal_status,
+                    freshness_allows_trading=freshness_allows_trading,
+                    freshness_block_reason=freshness_block_reason,
+                    signal_allows_trading=signal_allows_trading,
+                    external_block_reason=external_block_reason,
+                    smoothed_risk_multiplier=smoothed_risk_multiplier,
+                    flow_pressure=flow_pressure,
+                    mean_reversion_opportunity=mean_reversion_opportunity,
                     range_low=low,
                     range_high=high,
                     range_mean=mean,
                     range_median=median,
                     sentiment_regime=regime["name"],
-                    reason="signal_below_threshold_or_range_unavailable",
+                    reason=(
+                        freshness_block_reason
+                        or external_block_reason
+                        or "signal_below_threshold_or_range_unavailable"
+                    ),
                     cycle_id=cycle_id,
                     price_regime_range_position=price_regime.get(
                         "range_position_24h"
@@ -1694,6 +1902,14 @@ def main():
                 mean_min_signal=mean_min_signal,
                 median_min_signal=median_min_signal,
                 high_min_signal=high_min_signal,
+                signal_status=signal_status,
+                freshness_allows_trading=freshness_allows_trading,
+                freshness_block_reason=freshness_block_reason,
+                signal_allows_trading=signal_allows_trading,
+                external_block_reason=external_block_reason,
+                smoothed_risk_multiplier=smoothed_risk_multiplier,
+                flow_pressure=flow_pressure,
+                mean_reversion_opportunity=mean_reversion_opportunity,
                 range_low=low,
                 range_high=high,
                 range_mean=mean,
@@ -1710,6 +1926,17 @@ def main():
                 ),
                 price_regime_median_reversion_buy_target=price_regime.get(
                     "median_reversion_buy_target"
+                ),
+                trend_range_position_change=(
+                    trend_snapshot.get("price_regime_trends", {})
+                    .get("range_position_24h_change")
+                ),
+                trend_distance_from_mean_change=(
+                    trend_snapshot.get("price_regime_trends", {})
+                    .get("distance_from_mean_pct_change")
+                ),
+                kraken_flow_trade_imbalance_pct=kraken_flow.get(
+                    "trade_imbalance_pct"
                 ),
                 sentiment_regime=regime["name"],
                 effective_position_size_pct=effective_position_size_pct,
@@ -1728,7 +1955,7 @@ def main():
                         round(candidate["level"], PRICE_DECIMALS)
                         for candidate in deduped_candidates
                     ]
-                    if low and high and (
+                    if freshness_allows_trading and signal_allows_trading and low and high and (
                         llm_buy_allowed or execution_signal >= min(
                             low_min_signal,
                             mean_min_signal,
