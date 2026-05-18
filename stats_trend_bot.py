@@ -44,6 +44,10 @@ KRAKEN_ORDERBOOK_URL = os.getenv("KRAKEN_ORDERBOOK_URL")
 KRAKEN_OHLC_URL = os.getenv("KRAKEN_OHLC_URL")
 PRICE_LOG_URL = os.getenv("PRICE_LOG_URL")
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
+PRICE_INTELLIGENCE_URL = (
+    os.getenv("STATS_TREND_PRICE_INTELLIGENCE_URL")
+    or os.getenv("PRICE_INTELLIGENCE_URL")
+)
 
 
 def load_json_file(path):
@@ -182,6 +186,22 @@ ORDER_TRACKER_SYMBOL = (
 )
 ORDER_TRACKER_TIMEOUT = profile_float("order_tracker_timeout_seconds", 5)
 DRY_RUN = env_bool("STATS_TREND_DRY_RUN", profile_bool("dry_run", True))
+PRICE_INTELLIGENCE_ENABLED = env_bool(
+    "STATS_TREND_PRICE_INTELLIGENCE_ENABLED",
+    profile_bool("price_intelligence_enabled", True)
+)
+PRICE_INTELLIGENCE_MAX_AGE_MINUTES = profile_float(
+    "price_intelligence_max_age_minutes",
+    20
+)
+PRICE_INTELLIGENCE_MAX_PROBABILITY_NUDGE = profile_float(
+    "price_intelligence_max_probability_nudge",
+    0.12
+)
+PRICE_INTELLIGENCE_MAX_EV_NUDGE_PCT = profile_float(
+    "price_intelligence_max_ev_nudge_pct",
+    0.001
+)
 PRICE_CHECK_INTERVAL_SECONDS = profile_int("price_check_interval_seconds", 60)
 HISTORY_WINDOW_HOURS = profile_int("history_window_hours", 48)
 MIN_SAMPLES = profile_int("min_samples", 24)
@@ -282,6 +302,17 @@ DECISION_CSV_FIELDS = [
     "breakout_pct",
     "volatility_pct",
     "range_position",
+    "price_intelligence_status",
+    "price_intelligence_age_minutes",
+    "price_intelligence_regime_score",
+    "price_intelligence_entry_nudge",
+    "price_intelligence_exit_nudge",
+    "price_intelligence_ev_nudge_pct",
+    "price_intelligence_rsi_7d",
+    "price_intelligence_rsi_14d",
+    "price_intelligence_above_200d_sma",
+    "price_intelligence_distance_from_sma_200d_pct",
+    "price_intelligence_volatility_regime",
     "candidate_entry_price",
     "candidate_exit_price",
     "candidate_entry_probability",
@@ -950,6 +981,167 @@ def load_price_history():
     return load_price_history_from_jsonl()
 
 
+def load_price_intelligence():
+    if not PRICE_INTELLIGENCE_ENABLED or not PRICE_INTELLIGENCE_URL:
+        return {
+            "usable": False,
+            "status": "disabled" if not PRICE_INTELLIGENCE_ENABLED else "missing_url"
+        }
+
+    try:
+        if PRICE_INTELLIGENCE_URL.startswith(("http://", "https://")):
+            r = requests.get(PRICE_INTELLIGENCE_URL, timeout=REQUEST_TIMEOUT)
+            r.raise_for_status()
+            data = r.json()
+        else:
+            data = load_json_file(os.path.expanduser(PRICE_INTELLIGENCE_URL))
+
+        ts = parse_iso8601(data.get("timestamp"))
+        age_minutes = None
+        if ts is not None:
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age_minutes = (
+                datetime.now(timezone.utc) - ts.astimezone(timezone.utc)
+            ).total_seconds() / 60
+
+        if age_minutes is not None and age_minutes > PRICE_INTELLIGENCE_MAX_AGE_MINUTES:
+            return {
+                "usable": False,
+                "status": "stale",
+                "age_minutes": age_minutes
+            }
+
+        return {
+            "usable": True,
+            "status": "fresh",
+            "age_minutes": age_minutes,
+            "data": data
+        }
+    except Exception as e:
+        log_event("PRICE_INTELLIGENCE_ERROR", message=str(e))
+        return {
+            "usable": False,
+            "status": "error",
+            "message": str(e)
+        }
+
+
+def score_price_intelligence(intelligence):
+    if not intelligence.get("usable"):
+        return {
+            "status": intelligence.get("status"),
+            "age_minutes": intelligence.get("age_minutes"),
+            "regime_score": 0,
+            "entry_probability_nudge": 0,
+            "exit_probability_nudge": 0,
+            "expected_value_nudge_pct": 0
+        }
+
+    data = intelligence.get("data", {})
+    trend = data.get("trend", {})
+    ranges = data.get("ranges", {})
+    volatility = data.get("volatility", {})
+    mean_reversion = data.get("mean_reversion", {})
+    momentum = data.get("momentum", {})
+    volume = data.get("volume", {})
+
+    score = 0
+    rsi_7d = mean_reversion.get("rsi_7d")
+    rsi_14d = mean_reversion.get("rsi_14d")
+    range_position_7d = ranges.get("range_position_7d")
+    range_position_30d = ranges.get("range_position_30d")
+    distance_from_sma_200d_pct = trend.get("distance_from_sma_200d_pct")
+    volatility_regime = volatility.get("volatility_regime")
+    consecutive_down_days = momentum.get("consecutive_down_days") or 0
+    volume_ratio_30d = volume.get("volume_ratio_30d")
+
+    if rsi_7d is not None:
+        if rsi_7d <= 25:
+            score += 0.18
+        elif rsi_7d <= 35:
+            score += 0.10
+        elif rsi_7d >= 75:
+            score -= 0.16
+        elif rsi_7d >= 65:
+            score -= 0.08
+
+    if rsi_14d is not None:
+        if rsi_14d <= 40:
+            score += 0.06
+        elif rsi_14d >= 65:
+            score -= 0.06
+
+    if range_position_7d is not None:
+        if range_position_7d <= 0.15:
+            score += 0.10
+        elif range_position_7d >= 0.85:
+            score -= 0.10
+
+    if range_position_30d is not None:
+        if range_position_30d <= 0.30:
+            score += 0.05
+        elif range_position_30d >= 0.80:
+            score -= 0.07
+
+    if trend.get("above_200d_sma") is True:
+        score += 0.05
+    elif trend.get("above_200d_sma") is False:
+        score -= 0.04
+
+    if distance_from_sma_200d_pct is not None:
+        if distance_from_sma_200d_pct < -10:
+            score -= 0.08
+        elif -8 <= distance_from_sma_200d_pct <= -2:
+            score += 0.04
+        elif distance_from_sma_200d_pct > 8:
+            score -= 0.06
+
+    if trend.get("sma_20d_slope_7d_pct", 0) > 0:
+        score += 0.04
+    if trend.get("sma_50d_slope_7d_pct", 0) > 0:
+        score += 0.04
+    if trend.get("sma_200d_slope_7d_pct", 0) < -2:
+        score -= 0.05
+
+    if consecutive_down_days >= 3:
+        score += 0.05
+    if momentum.get("return_7d_pct", 0) < -8:
+        score -= 0.05
+
+    if volatility_regime == "low":
+        score += 0.03
+    elif volatility_regime == "high":
+        score -= 0.10
+
+    if volume_ratio_30d is not None and volume_ratio_30d < 0.10:
+        score -= 0.04
+
+    score = clamp(score, -1, 1)
+    max_nudge = PRICE_INTELLIGENCE_MAX_PROBABILITY_NUDGE
+    entry_nudge = clamp(score * 0.35 * max_nudge, -max_nudge, max_nudge)
+    exit_nudge = clamp(score * max_nudge, -max_nudge, max_nudge)
+    ev_nudge = clamp(
+        score * PRICE_INTELLIGENCE_MAX_EV_NUDGE_PCT,
+        -PRICE_INTELLIGENCE_MAX_EV_NUDGE_PCT,
+        PRICE_INTELLIGENCE_MAX_EV_NUDGE_PCT
+    )
+
+    return {
+        "status": intelligence.get("status"),
+        "age_minutes": intelligence.get("age_minutes"),
+        "regime_score": score,
+        "entry_probability_nudge": entry_nudge,
+        "exit_probability_nudge": exit_nudge,
+        "expected_value_nudge_pct": ev_nudge,
+        "rsi_7d": rsi_7d,
+        "rsi_14d": rsi_14d,
+        "above_200d_sma": trend.get("above_200d_sma"),
+        "distance_from_sma_200d_pct": distance_from_sma_200d_pct,
+        "volatility_regime": volatility_regime
+    }
+
+
 def pct_change(current, previous):
     if previous == 0:
         return 0
@@ -1018,13 +1210,19 @@ def compute_trend_signal(price):
     )
     range_component = clamp((range_position - 0.5) * 2, -1, 1)
     volatility_penalty = clamp(volatility_pct / max(MAX_VOLATILITY_PCT, 1e-9), 0, 1)
+    price_intelligence = score_price_intelligence(load_price_intelligence())
     raw_score = (
         0.35 * momentum_component
         + 0.35 * ma_component
         + 0.20 * breakout_component
         + 0.10 * range_component
     )
-    trend_score = raw_score * (1 - 0.35 * volatility_penalty)
+    trend_score = clamp(
+        raw_score * (1 - 0.35 * volatility_penalty)
+        + (0.20 * price_intelligence["regime_score"]),
+        -1,
+        1
+    )
 
     return {
         "usable": True,
@@ -1038,7 +1236,8 @@ def compute_trend_signal(price):
         "range_position": range_position,
         "breakout_pct": breakout_pct,
         "volatility_pct": volatility_pct,
-        "trend_score": trend_score
+        "trend_score": trend_score,
+        "price_intelligence": price_intelligence
     }
 
 
@@ -1089,6 +1288,10 @@ def estimate_exit_probability(entry_price, exit_price, book, trend_signal):
         + 0.15 * (1 - resistance_ratio)
         + 0.10 * horizon_reachability
         - 0.15 * distance_penalty
+        + trend_signal.get("price_intelligence", {}).get(
+            "exit_probability_nudge",
+            0
+        )
     )
     return clamp(probability, 0.05, 0.95)
 
@@ -1116,6 +1319,10 @@ def estimate_entry_probability(price, entry_price, book, trend_signal):
         + 0.45 * sell_pressure
         + 0.25 * trend_down_bias
         + 0.15 * (1 - distance_penalty)
+        + trend_signal.get("price_intelligence", {}).get(
+            "entry_probability_nudge",
+            0
+        )
     )
     return clamp(probability, 0.03, 0.9)
 
@@ -1212,6 +1419,10 @@ def compute_orderbook_candidates(price, trend_signal):
                 * (
                     exit_probability * gross_reward_pct
                     - (1 - exit_probability) * entry_drop_pct
+                )
+                + trend_signal.get("price_intelligence", {}).get(
+                    "expected_value_nudge_pct",
+                    0
                 )
             )
             candidates.append(
@@ -1877,13 +2088,37 @@ def maybe_handle_submitted_buy(
 
 
 def signal_csv_kwargs(signal):
+    price_intelligence = signal.get("price_intelligence") or {}
     return {
         "trend_score": signal.get("trend_score"),
         "momentum_pct": signal.get("momentum_pct"),
         "ma_spread_pct": signal.get("ma_spread_pct"),
         "breakout_pct": signal.get("breakout_pct"),
         "volatility_pct": signal.get("volatility_pct"),
-        "range_position": signal.get("range_position")
+        "range_position": signal.get("range_position"),
+        "price_intelligence_status": price_intelligence.get("status"),
+        "price_intelligence_age_minutes": price_intelligence.get("age_minutes"),
+        "price_intelligence_regime_score": price_intelligence.get("regime_score"),
+        "price_intelligence_entry_nudge": (
+            price_intelligence.get("entry_probability_nudge")
+        ),
+        "price_intelligence_exit_nudge": (
+            price_intelligence.get("exit_probability_nudge")
+        ),
+        "price_intelligence_ev_nudge_pct": (
+            price_intelligence.get("expected_value_nudge_pct")
+        ),
+        "price_intelligence_rsi_7d": price_intelligence.get("rsi_7d"),
+        "price_intelligence_rsi_14d": price_intelligence.get("rsi_14d"),
+        "price_intelligence_above_200d_sma": (
+            price_intelligence.get("above_200d_sma")
+        ),
+        "price_intelligence_distance_from_sma_200d_pct": (
+            price_intelligence.get("distance_from_sma_200d_pct")
+        ),
+        "price_intelligence_volatility_regime": (
+            price_intelligence.get("volatility_regime")
+        )
     }
 
 
@@ -2343,6 +2578,13 @@ def main():
         backtest_use_api_market_data=BACKTEST_USE_API_MARKET_DATA,
         market_history_source=MARKET_HISTORY_SOURCE,
         kraken_ohlc_interval_minutes=KRAKEN_OHLC_INTERVAL_MINUTES,
+        price_intelligence_url=PRICE_INTELLIGENCE_URL,
+        price_intelligence_enabled=PRICE_INTELLIGENCE_ENABLED,
+        price_intelligence_max_age_minutes=PRICE_INTELLIGENCE_MAX_AGE_MINUTES,
+        price_intelligence_max_probability_nudge=(
+            PRICE_INTELLIGENCE_MAX_PROBABILITY_NUDGE
+        ),
+        price_intelligence_max_ev_nudge_pct=PRICE_INTELLIGENCE_MAX_EV_NUDGE_PCT,
         history_window_hours=HISTORY_WINDOW_HOURS,
         min_samples=MIN_SAMPLES,
         fast_ma_samples=FAST_MA_SAMPLES,
