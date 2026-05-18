@@ -174,6 +174,42 @@ MAX_INVENTORY_USD = profile_float("max_inventory_usd", 250)
 PREVENT_BUY_ABOVE_LAST_SELL = profile_bool("prevent_buy_above_last_sell", True)
 BUY_AFTER_SELL_DISCOUNT_PCT = profile_float("buy_after_sell_discount_pct", 0.0)
 HIGH_PRICE_BUY_BLOCK_PCT = profile_float("high_price_buy_block_pct", 0.0005)
+USE_SIGNAL_STATUS_GATES = profile_bool("use_signal_status_gates", True)
+REQUIRE_BOT_ACTION_ALLOWED = profile_bool("require_bot_action_allowed", True)
+MAX_SIGNAL_AGE_MINUTES = profile_float("max_signal_age_minutes", 30)
+CRITICAL_SOURCE_STATUSES = [
+    source.strip()
+    for source in profile_str(
+        "critical_source_statuses",
+        "market_data,price_regime,kraken_flow"
+    ).split(",")
+    if source.strip()
+]
+USE_RISK_MULTIPLIER = profile_bool("use_risk_multiplier", True)
+MIN_RISK_MULTIPLIER = profile_float("min_risk_multiplier", 0.25)
+MAX_RISK_MULTIPLIER = profile_float("max_risk_multiplier", 1.25)
+ENABLE_TARGET_LIMIT_BUYS = profile_bool("enable_target_limit_buys", True)
+MAX_OPEN_BUY_ORDERS = profile_int("max_open_buy_orders", 2)
+MAX_TARGET_LIMIT_ORDERS_PER_CYCLE = profile_int(
+    "max_target_limit_orders_per_cycle",
+    2
+)
+TARGET_LIMIT_MAX_PREMIUM_PCT = profile_float(
+    "target_limit_max_premium_pct",
+    0.0005
+)
+MEAN_REVERSION_BUY_THRESHOLD = profile_float(
+    "mean_reversion_buy_threshold",
+    0.35
+)
+MEAN_REVERSION_RANGE_POSITION_MAX = profile_float(
+    "mean_reversion_range_position_max",
+    0.15
+)
+MEAN_REVERSION_FLOW_PRESSURE_MIN = profile_float(
+    "mean_reversion_flow_pressure_min",
+    0.0
+)
 
 PAIR_INFO_CACHE = None
 
@@ -212,6 +248,19 @@ DECISION_CSV_FIELDS = [
     "open_sell_count",
     "deployed_inventory_usd",
     "max_inventory_usd",
+    "risk_multiplier",
+    "effective_risk_multiplier",
+    "signal_status",
+    "bot_action_allowed",
+    "signal_age_minutes",
+    "source_status_result",
+    "mean_reversion_opportunity",
+    "range_position_24h",
+    "flow_pressure",
+    "target_buy_price",
+    "target_allocation_pct",
+    "open_buy_count",
+    "max_open_buy_orders",
     "price_high",
     "high_price_buy_block_pct",
     "max_high_buy_price"
@@ -398,6 +447,8 @@ def parse_iso8601(value):
         return None
 
     try:
+        if isinstance(value, str) and value.endswith("Z"):
+            value = value[:-1] + "+00:00"
         return datetime.fromisoformat(value)
     except Exception:
         return None
@@ -703,6 +754,18 @@ def normalize_signal(signal):
     if not isinstance(price_regime, dict):
         price_regime = {}
 
+    kraken_flow = signal.get("kraken_flow")
+    if not isinstance(kraken_flow, dict):
+        kraken_flow = {}
+
+    source_status = signal.get("source_status")
+    if not isinstance(source_status, dict):
+        source_status = {}
+
+    target_prices = signal.get("target_prices")
+    if not isinstance(target_prices, list):
+        target_prices = []
+
     return {
         "execution_signal": float(signal.get("execution_signal", 0)),
         "confidence": float(signal.get("confidence", 0)),
@@ -710,12 +773,22 @@ def normalize_signal(signal):
         "regulatory_risk": signal.get("regulatory_risk"),
         "macro_tightening_bias": signal.get("macro_tightening_bias"),
         "direction_bias": signal.get("direction_bias"),
+        "risk_multiplier": signal.get("risk_multiplier"),
+        "smoothed_risk_multiplier": signal.get("smoothed_risk_multiplier"),
+        "mean_reversion_opportunity": signal.get("mean_reversion_opportunity"),
+        "flow_pressure": signal.get("flow_pressure"),
         "raw_btc_sentiment": signal.get("raw_btc_sentiment"),
         "raw_confidence": signal.get("raw_confidence"),
         "raw_direction_bias": signal.get("raw_direction_bias"),
         "fear_greed_index": signal.get("fear_greed_index"),
+        "signal_status": signal.get("signal_status"),
+        "bot_action_allowed": signal.get("bot_action_allowed"),
+        "reason": signal.get("reason"),
         "processed_at": signal.get("processed_at"),
-        "price_regime": price_regime
+        "price_regime": price_regime,
+        "kraken_flow": kraken_flow,
+        "source_status": source_status,
+        "target_prices": target_prices
     }
 
 
@@ -830,6 +903,106 @@ def place_market_buy(volume, cycle_id):
             result=result.get("result")
         )
         result["fill"] = fill
+
+    return result
+
+
+def place_limit_buy(price, volume, cycle_id):
+    buy_price = round_price(price)
+    buy_volume = round_volume(volume)
+
+    if DRY_RUN:
+        state["stats"]["dry_run_trades"] += 1
+        state["stats"]["buy_orders_placed"] += 1
+        state["last_trade_at"] = datetime.now(timezone.utc).isoformat()
+        record_trade_history(
+            {
+                "ts": state["last_trade_at"],
+                "cycle_id": cycle_id,
+                "dry_run": True,
+                "side": "buy",
+                "ordertype": "limit",
+                "volume": buy_volume,
+                "price": buy_price
+            }
+        )
+        log_and_console(
+            "DRY_RUN_LIMIT_BUY",
+            message=f"buy {buy_volume} @ {buy_price}",
+            cycle_id=cycle_id,
+            side="buy",
+            volume=buy_volume,
+            price=buy_price
+        )
+        return {"dry_run": True}
+
+    result = safe_kraken_private(
+        "LIMIT_BUY",
+        "/0/private/AddOrder",
+        {
+            "pair": KRAKEN_PAIR,
+            "type": "buy",
+            "ordertype": "limit",
+            "price": str(buy_price),
+            "volume": str(buy_volume)
+        }
+    )
+
+    if result:
+        txids = result.get("result", {}).get("txid", [])
+        txid = txids[0] if txids else None
+        if not txid:
+            log_event(
+                "ORDER_REJECTED",
+                cycle_id=cycle_id,
+                side="buy",
+                reason="missing_txid",
+                result=result.get("result")
+            )
+            return result
+
+        state["stats"]["trades_executed"] += 1
+        state["stats"]["buy_orders_placed"] += 1
+        state["last_trade_at"] = datetime.now(timezone.utc).isoformat()
+        state["open_buy_orders"][txid] = {
+            "txid": txid,
+            "volume": buy_volume,
+            "price": buy_price,
+            "placed_at": cycle_id,
+            "trade_id": txid
+        }
+        save_state(state)
+        record_trade_history(
+            {
+                "ts": state["last_trade_at"],
+                "cycle_id": cycle_id,
+                "dry_run": False,
+                "side": "buy",
+                "ordertype": "limit",
+                "volume": buy_volume,
+                "price": buy_price,
+                "txid": txid
+            }
+        )
+        log_and_console(
+            "BUY_LIMIT_ORDER_PLACED",
+            message=f"buy {buy_volume} @ {buy_price}",
+            cycle_id=cycle_id,
+            side="buy",
+            volume=buy_volume,
+            price=buy_price,
+            txid=txid,
+            result=result.get("result")
+        )
+        notify_order_tracker(
+            trade_id=txid,
+            side="buy",
+            price=buy_price,
+            quantity=buy_volume,
+            order_id=txid,
+            timestamp=cycle_id,
+            notes="limit_buy_submitted"
+        )
 
     return result
 
@@ -960,6 +1133,165 @@ def numeric_or_none(value):
         return float(value)
     except Exception:
         return None
+
+
+def clamp(value, lower, upper):
+    return max(lower, min(upper, value))
+
+
+def signal_age_minutes(sentiment, now):
+    processed_at = parse_iso8601(sentiment.get("processed_at"))
+    if processed_at is None:
+        return None
+
+    return (now - processed_at).total_seconds() / 60
+
+
+def signal_gate_failure(sentiment, now):
+    if not USE_SIGNAL_STATUS_GATES:
+        return None
+
+    signal_status = sentiment.get("signal_status")
+    if signal_status and signal_status != "fresh":
+        return {
+            "reason": "signal_not_fresh",
+            "signal_status": signal_status,
+            "bot_action_allowed": sentiment.get("bot_action_allowed"),
+            "source_status_result": signal_status
+        }
+
+    if (
+        REQUIRE_BOT_ACTION_ALLOWED
+        and sentiment.get("bot_action_allowed") is False
+    ):
+        return {
+            "reason": "bot_action_not_allowed",
+            "signal_status": signal_status,
+            "bot_action_allowed": sentiment.get("bot_action_allowed"),
+            "source_status_result": sentiment.get("reason")
+        }
+
+    age_minutes = signal_age_minutes(sentiment, now)
+    if (
+        MAX_SIGNAL_AGE_MINUTES > 0
+        and age_minutes is not None
+        and age_minutes > MAX_SIGNAL_AGE_MINUTES
+    ):
+        return {
+            "reason": "signal_too_old",
+            "signal_status": signal_status,
+            "bot_action_allowed": sentiment.get("bot_action_allowed"),
+            "signal_age_minutes": age_minutes
+        }
+
+    source_status = sentiment.get("source_status", {})
+    for source in CRITICAL_SOURCE_STATUSES:
+        status = source_status.get(source, {})
+        if not isinstance(status, dict):
+            continue
+        if status.get("status") not in (None, "fresh", "not_configured"):
+            return {
+                "reason": "critical_source_not_fresh",
+                "signal_status": signal_status,
+                "bot_action_allowed": sentiment.get("bot_action_allowed"),
+                "source_status_result": f"{source}:{status.get('status')}"
+            }
+
+    return None
+
+
+def effective_risk_multiplier(sentiment):
+    if not USE_RISK_MULTIPLIER:
+        return 1.0
+
+    multiplier = numeric_or_none(sentiment.get("smoothed_risk_multiplier"))
+    if multiplier is None:
+        multiplier = numeric_or_none(sentiment.get("risk_multiplier"))
+    if multiplier is None:
+        return 1.0
+
+    return clamp(multiplier, MIN_RISK_MULTIPLIER, MAX_RISK_MULTIPLIER)
+
+
+def mean_reversion_setup_allowed(sentiment):
+    price_regime = sentiment.get("price_regime", {})
+    kraken_flow = sentiment.get("kraken_flow", {})
+
+    opportunity = numeric_or_none(sentiment.get("mean_reversion_opportunity"))
+    if opportunity is None:
+        opportunity = numeric_or_none(
+            price_regime.get("mean_reversion_opportunity")
+        )
+
+    range_position = numeric_or_none(price_regime.get("range_position_24h"))
+
+    flow_pressure = numeric_or_none(sentiment.get("flow_pressure"))
+    if flow_pressure is None:
+        flow_pressure = numeric_or_none(kraken_flow.get("aggression_score"))
+
+    if opportunity is None or range_position is None or flow_pressure is None:
+        return False
+
+    return (
+        opportunity >= MEAN_REVERSION_BUY_THRESHOLD
+        and range_position <= MEAN_REVERSION_RANGE_POSITION_MAX
+        and flow_pressure >= MEAN_REVERSION_FLOW_PRESSURE_MIN
+    )
+
+
+def target_limit_orders(
+    sentiment,
+    current_price,
+    total_trade_value,
+    max_buy_price=None
+):
+    if not ENABLE_TARGET_LIMIT_BUYS:
+        return []
+
+    targets = []
+    for target in sentiment.get("target_prices", []):
+        if not isinstance(target, dict):
+            continue
+
+        buy_price = numeric_or_none(target.get("buy_price"))
+        if buy_price is None or buy_price <= 0:
+            continue
+
+        max_price = current_price * (1 + TARGET_LIMIT_MAX_PREMIUM_PCT)
+        if buy_price > max_price:
+            continue
+        if max_buy_price is not None and buy_price >= max_buy_price:
+            continue
+
+        allocation = numeric_or_none(target.get("sell_pct"))
+        if allocation is None:
+            allocation = numeric_or_none(target.get("allocation_pct"))
+        if allocation is None or allocation <= 0:
+            allocation = 1.0
+
+        targets.append(
+            {
+                "buy_price": buy_price,
+                "allocation": allocation
+            }
+        )
+
+    if not targets:
+        return []
+
+    targets = targets[:MAX_TARGET_LIMIT_ORDERS_PER_CYCLE]
+    allocation_sum = sum(target["allocation"] for target in targets)
+    if allocation_sum <= 0:
+        return []
+
+    return [
+        {
+            "buy_price": target["buy_price"],
+            "trade_value": total_trade_value * target["allocation"] / allocation_sum,
+            "allocation_pct": target["allocation"] / allocation_sum
+        }
+        for target in targets
+    ]
 
 
 def current_inventory_usd(current_price):
@@ -1178,6 +1510,15 @@ def run_cycle():
         if CONFIDENCE_WEIGHTING
         else smoothed_signal
     )
+    age_minutes = signal_age_minutes(sentiment, now)
+    risk_multiplier = numeric_or_none(sentiment.get("risk_multiplier"))
+    effective_multiplier = effective_risk_multiplier(sentiment)
+    price_regime = sentiment.get("price_regime", {})
+    range_position = numeric_or_none(price_regime.get("range_position_24h"))
+    mean_reversion_opportunity = numeric_or_none(
+        sentiment.get("mean_reversion_opportunity")
+    )
+    flow_pressure = numeric_or_none(sentiment.get("flow_pressure"))
 
     log_event(
         "SIGNAL_UPDATE",
@@ -1193,9 +1534,32 @@ def run_cycle():
         direction_bias=sentiment.get("direction_bias"),
         raw_direction_bias=sentiment.get("raw_direction_bias"),
         fear_greed_index=sentiment.get("fear_greed_index"),
+        risk_multiplier=risk_multiplier,
+        effective_risk_multiplier=effective_multiplier,
+        signal_status=sentiment.get("signal_status"),
+        bot_action_allowed=sentiment.get("bot_action_allowed"),
+        signal_age_minutes=age_minutes,
+        mean_reversion_opportunity=mean_reversion_opportunity,
+        range_position_24h=range_position,
+        flow_pressure=flow_pressure,
         processed_at=sentiment.get("processed_at")
     )
     console(f"Price: {price} | Signal: {raw_signal} | Confidence: {confidence}")
+
+    gate_failure = signal_gate_failure(sentiment, now)
+    if gate_failure is not None:
+        reason = gate_failure.pop("reason")
+        skip_cycle(
+            reason,
+            cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            **gate_failure
+        )
+        return
 
     if confidence < CONF_THRESHOLD:
         skip_cycle(
@@ -1210,7 +1574,14 @@ def run_cycle():
         )
         return
 
-    if weighted_signal < SENTIMENT_BUY_THRESHOLD:
+    allow_market_buy = weighted_signal >= SENTIMENT_BUY_THRESHOLD
+    allow_target_limit_buy = (
+        weighted_signal < SENTIMENT_BUY_THRESHOLD
+        and mean_reversion_setup_allowed(sentiment)
+        and bool(target_limit_orders(sentiment, price, 1))
+    )
+
+    if not allow_market_buy and not allow_target_limit_buy:
         skip_cycle(
             "sentiment_below_buy_threshold",
             cycle_id,
@@ -1219,11 +1590,13 @@ def run_cycle():
             smoothed_signal=smoothed_signal,
             weighted_signal=weighted_signal,
             confidence=confidence,
-            sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD
+            sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD,
+            mean_reversion_opportunity=mean_reversion_opportunity,
+            range_position_24h=range_position,
+            flow_pressure=flow_pressure
         )
         return
 
-    price_regime = sentiment.get("price_regime", {})
     price_high = numeric_or_none(price_regime.get("price_high_24h"))
     if price_high is not None and HIGH_PRICE_BUY_BLOCK_PCT >= 0:
         max_high_buy_price = price_high * (1 - HIGH_PRICE_BUY_BLOCK_PCT)
@@ -1257,23 +1630,38 @@ def run_cycle():
         return
 
     last_sell_price = state.get("last_sell_price")
+    max_rebuy_price = None
     if PREVENT_BUY_ABOVE_LAST_SELL and last_sell_price is not None:
         max_rebuy_price = float(last_sell_price) * (
             1 - BUY_AFTER_SELL_DISCOUNT_PCT
         )
         if price >= max_rebuy_price:
-            skip_cycle(
-                "price_above_last_sell",
-                cycle_id,
-                price=price,
-                execution_signal=raw_signal,
-                smoothed_signal=smoothed_signal,
-                weighted_signal=weighted_signal,
-                confidence=confidence,
-                last_sell_price=last_sell_price,
-                max_rebuy_price=max_rebuy_price
-            )
-            return
+            if not (
+                allow_target_limit_buy
+                and target_limit_orders(sentiment, price, 1, max_rebuy_price)
+            ):
+                skip_cycle(
+                    "price_above_last_sell",
+                    cycle_id,
+                    price=price,
+                    execution_signal=raw_signal,
+                    smoothed_signal=smoothed_signal,
+                    weighted_signal=weighted_signal,
+                    confidence=confidence,
+                    last_sell_price=last_sell_price,
+                    max_rebuy_price=max_rebuy_price
+                )
+                return
+
+    if len(state["open_buy_orders"]) >= MAX_OPEN_BUY_ORDERS:
+        skip_cycle(
+            "max_open_buy_orders",
+            cycle_id,
+            price=price,
+            open_buy_count=len(state["open_buy_orders"]),
+            max_open_buy_orders=MAX_OPEN_BUY_ORDERS
+        )
+        return
 
     if len(state["open_sell_orders"]) >= MAX_OPEN_SELL_ORDERS:
         skip_cycle(
@@ -1309,6 +1697,7 @@ def run_cycle():
     trade_value = quote_balance * POSITION_SIZE_PCT
     if MAX_TRADE_USD > 0:
         trade_value = min(trade_value, MAX_TRADE_USD)
+    trade_value *= effective_multiplier
     trade_value *= max(0, 1 - EXECUTION_BUFFER_PCT)
 
     projected_inventory = current_inventory_usd(price) + trade_value
@@ -1323,12 +1712,161 @@ def run_cycle():
             execution_signal=raw_signal,
             confidence=confidence,
             trade_value=trade_value,
-            min_trade_usd=MIN_TRADE_USD
+            min_trade_usd=MIN_TRADE_USD,
+            risk_multiplier=risk_multiplier,
+            effective_risk_multiplier=effective_multiplier
+        )
+        return
+
+    min_volume = get_min_order_volume()
+    if allow_target_limit_buy:
+        orders = target_limit_orders(
+            sentiment,
+            price,
+            trade_value,
+            max_rebuy_price
+        )
+        placed_orders = 0
+
+        for order in orders:
+            if len(state["open_buy_orders"]) >= MAX_OPEN_BUY_ORDERS:
+                break
+
+            target_price = order["buy_price"]
+            target_trade_value = order["trade_value"]
+            volume = round_volume(target_trade_value / target_price)
+            if volume <= 0 or volume < min_volume:
+                log_event(
+                    "TRADE_DECISION",
+                    cycle_id=cycle_id,
+                    side="hold",
+                    reason="target_below_min_volume",
+                    price=price,
+                    target_buy_price=target_price,
+                    trade_value=target_trade_value,
+                    volume=volume,
+                    min_volume=min_volume
+                )
+                continue
+
+            log_event(
+                "TRADE_DECISION",
+                cycle_id=cycle_id,
+                side="buy",
+                reason="mean_reversion_target_limit_buy",
+                volume=volume,
+                price=target_price,
+                target_buy_price=target_price,
+                target_allocation_pct=order["allocation_pct"],
+                trade_value=target_trade_value,
+                base_balance=base_balance,
+                quote_balance=quote_balance,
+                execution_signal=raw_signal,
+                smoothed_signal=smoothed_signal,
+                weighted_signal=weighted_signal,
+                confidence=confidence,
+                sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD,
+                risk_multiplier=risk_multiplier,
+                effective_risk_multiplier=effective_multiplier,
+                mean_reversion_opportunity=mean_reversion_opportunity,
+                range_position_24h=range_position,
+                flow_pressure=flow_pressure
+            )
+            append_decision_csv(
+                "trade_decision",
+                cycle_id=cycle_id,
+                side="buy",
+                reason="mean_reversion_target_limit_buy",
+                volume=volume,
+                price=target_price,
+                target_buy_price=target_price,
+                target_allocation_pct=order["allocation_pct"],
+                trade_value=target_trade_value,
+                base_balance=base_balance,
+                quote_balance=quote_balance,
+                execution_signal=raw_signal,
+                smoothed_signal=smoothed_signal,
+                weighted_signal=weighted_signal,
+                confidence=confidence,
+                dry_run=DRY_RUN,
+                risk_multiplier=risk_multiplier,
+                effective_risk_multiplier=effective_multiplier,
+                mean_reversion_opportunity=mean_reversion_opportunity,
+                range_position_24h=range_position,
+                flow_pressure=flow_pressure
+            )
+
+            result = place_limit_buy(target_price, volume, cycle_id)
+            result_payload = (
+                result.get("result") if isinstance(result, dict) else None
+            )
+            txids = (
+                result_payload.get("txid", [])
+                if isinstance(result_payload, dict)
+                else []
+            )
+            append_decision_csv(
+                "trade_executed" if result else "trade_rejected",
+                cycle_id=cycle_id,
+                side="buy",
+                reason=(
+                    "dry_run"
+                    if DRY_RUN
+                    else ("limit_submitted" if result else "rejected")
+                ),
+                volume=volume,
+                price=target_price,
+                target_buy_price=target_price,
+                target_allocation_pct=order["allocation_pct"],
+                trade_value=target_trade_value,
+                base_balance=base_balance,
+                quote_balance=quote_balance,
+                execution_signal=raw_signal,
+                smoothed_signal=smoothed_signal,
+                weighted_signal=weighted_signal,
+                confidence=confidence,
+                dry_run=DRY_RUN,
+                order_txid=txids[0] if txids else "",
+                result=result_payload or result
+            )
+
+            if result:
+                placed_orders += 1
+
+        if placed_orders <= 0:
+            skip_cycle(
+                "no_target_limit_orders_placed",
+                cycle_id,
+                price=price,
+                execution_signal=raw_signal,
+                smoothed_signal=smoothed_signal,
+                weighted_signal=weighted_signal,
+                confidence=confidence
+            )
+            return
+
+        log_event(
+            "CYCLE_SUMMARY",
+            cycle_id=cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            side="buy",
+            reason="mean_reversion_target_limit_buy",
+            trade_value=trade_value,
+            base_balance=base_balance,
+            quote_balance=quote_balance,
+            open_buy_count=len(state["open_buy_orders"]),
+            open_sell_count=len(state["open_sell_orders"]),
+            deployed_inventory_usd=current_inventory_usd(price),
+            last_sell_price=state.get("last_sell_price"),
+            dry_run=DRY_RUN
         )
         return
 
     volume = round_volume(trade_value / price)
-    min_volume = get_min_order_volume()
     if volume <= 0 or volume < min_volume:
         skip_cycle(
             "below_min_volume",
@@ -1354,7 +1892,9 @@ def run_cycle():
         smoothed_signal=smoothed_signal,
         weighted_signal=weighted_signal,
         confidence=confidence,
-        sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD
+        sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD,
+        risk_multiplier=risk_multiplier,
+        effective_risk_multiplier=effective_multiplier
     )
     append_decision_csv(
         "trade_decision",
@@ -1370,7 +1910,9 @@ def run_cycle():
         smoothed_signal=smoothed_signal,
         weighted_signal=weighted_signal,
         confidence=confidence,
-        dry_run=DRY_RUN
+        dry_run=DRY_RUN,
+        risk_multiplier=risk_multiplier,
+        effective_risk_multiplier=effective_multiplier
     )
 
     result = place_market_buy(volume, cycle_id)
@@ -1393,6 +1935,8 @@ def run_cycle():
         confidence=confidence,
         dry_run=DRY_RUN,
         order_txid=txids[0] if txids else "",
+        risk_multiplier=risk_multiplier,
+        effective_risk_multiplier=effective_multiplier,
         **fill,
         result=result_payload or result
     )
@@ -1415,6 +1959,8 @@ def run_cycle():
         open_sell_count=len(state["open_sell_orders"]),
         deployed_inventory_usd=current_inventory_usd(price),
         last_sell_price=state.get("last_sell_price"),
+        risk_multiplier=risk_multiplier,
+        effective_risk_multiplier=effective_multiplier,
         dry_run=DRY_RUN
     )
 
@@ -1448,10 +1994,22 @@ def main():
         target_profit_pct=TARGET_PROFIT_PCT,
         round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
         max_open_sell_orders=MAX_OPEN_SELL_ORDERS,
+        max_open_buy_orders=MAX_OPEN_BUY_ORDERS,
         max_inventory_usd=MAX_INVENTORY_USD,
         prevent_buy_above_last_sell=PREVENT_BUY_ABOVE_LAST_SELL,
         buy_after_sell_discount_pct=BUY_AFTER_SELL_DISCOUNT_PCT,
         high_price_buy_block_pct=HIGH_PRICE_BUY_BLOCK_PCT,
+        use_signal_status_gates=USE_SIGNAL_STATUS_GATES,
+        require_bot_action_allowed=REQUIRE_BOT_ACTION_ALLOWED,
+        max_signal_age_minutes=MAX_SIGNAL_AGE_MINUTES,
+        use_risk_multiplier=USE_RISK_MULTIPLIER,
+        min_risk_multiplier=MIN_RISK_MULTIPLIER,
+        max_risk_multiplier=MAX_RISK_MULTIPLIER,
+        enable_target_limit_buys=ENABLE_TARGET_LIMIT_BUYS,
+        max_target_limit_orders_per_cycle=MAX_TARGET_LIMIT_ORDERS_PER_CYCLE,
+        mean_reversion_buy_threshold=MEAN_REVERSION_BUY_THRESHOLD,
+        mean_reversion_range_position_max=MEAN_REVERSION_RANGE_POSITION_MAX,
+        mean_reversion_flow_pressure_min=MEAN_REVERSION_FLOW_PRESSURE_MIN,
         decision_csv_file=DECISION_CSV_FILE,
         price_check_interval_seconds=PRICE_CHECK_INTERVAL_SECONDS
     )
