@@ -269,6 +269,14 @@ MAX_OPEN_ORDERS = profile_int("max_open_orders", 4)
 MAX_OPEN_BUY_ORDERS_PER_DAY = profile_int("max_open_buy_orders_per_day", 2)
 MAX_OPEN_BUY_AGE_MINUTES = profile_float("max_open_buy_age_minutes", 180)
 REVALIDATE_OPEN_BUYS = profile_bool("revalidate_open_buys", True)
+OPEN_BUY_REVALIDATION_GRACE_MINUTES = profile_float(
+    "open_buy_revalidation_grace_minutes",
+    5
+)
+OPEN_BUY_REVALIDATION_HOLD_NEAR_ENTRY_PCT = profile_float(
+    "open_buy_revalidation_hold_near_entry_pct",
+    ORDERBOOK_ENTRY_STEP_PCT
+)
 OPEN_BUY_REVALIDATION_MIN_EXPECTED_VALUE_PCT = profile_float(
     "open_buy_revalidation_min_expected_value_pct",
     ORDERBOOK_MIN_EXPECTED_VALUE_PCT
@@ -1841,6 +1849,22 @@ def maybe_cancel_stale_open_buy(txid, order, cycle_id, current_price, trend_sign
     if not REVALIDATE_OPEN_BUYS or current_price is None or trend_signal is None:
         return False
 
+    if (
+        OPEN_BUY_REVALIDATION_GRACE_MINUTES > 0
+        and age_minutes is not None
+        and age_minutes < OPEN_BUY_REVALIDATION_GRACE_MINUTES
+    ):
+        return False
+
+    order_price = float(order.get("price") or 0)
+    if order_price > 0:
+        distance_above_entry_pct = pct_change(current_price, order_price)
+        if (
+            distance_above_entry_pct >= 0
+            and distance_above_entry_pct <= OPEN_BUY_REVALIDATION_HOLD_NEAR_ENTRY_PCT
+        ):
+            return False
+
     candidate = revalidation_candidate_for_order(order, current_price, trend_signal)
     if candidate is None:
         return False
@@ -2618,6 +2642,10 @@ def main():
         max_open_orders=MAX_OPEN_ORDERS,
         max_open_buy_age_minutes=MAX_OPEN_BUY_AGE_MINUTES,
         revalidate_open_buys=REVALIDATE_OPEN_BUYS,
+        open_buy_revalidation_grace_minutes=OPEN_BUY_REVALIDATION_GRACE_MINUTES,
+        open_buy_revalidation_hold_near_entry_pct=(
+            OPEN_BUY_REVALIDATION_HOLD_NEAR_ENTRY_PCT
+        ),
         open_buy_revalidation_min_expected_value_pct=(
             OPEN_BUY_REVALIDATION_MIN_EXPECTED_VALUE_PCT
         ),
