@@ -223,10 +223,26 @@ sudo systemctl enable kraken-status-display.service
 sudo systemctl start kraken-status-display.service
 ```
 
-The hostname stays fixed on the first row. The status row changes to `error` or
-`warning` when recent bot logs contain error/warning events or when a configured
-service is inactive. The bottom row rotates through IP, uptime, load, disk, and
-recent log metrics.
+The display rotates through three simple screens:
+
+```text
+status:
+up
+```
+
+```text
+last event:
+12 minutes
+```
+
+```text
+errors:
+0
+```
+
+`status` is `up` only when every service listed in `BOT_DISPLAY_SERVICES` is
+active. `last event` is the age of the newest JSONL log timestamp. `errors` is
+the number of error events in the last hour.
 
 ## 6. Common Operations
 

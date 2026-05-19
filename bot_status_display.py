@@ -6,8 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-import socket
 import subprocess
 import time
 from collections import deque
@@ -18,13 +16,13 @@ from typing import Iterable
 
 WIDTH = 128
 HEIGHT = 32
-LINE_HEIGHT = 8
+LABEL_Y = 0
+VALUE_Y = 16
 REFRESH_SECONDS = float(os.getenv("BOT_DISPLAY_REFRESH_SECONDS", "5"))
-LOG_WINDOW_SECONDS = int(os.getenv("BOT_DISPLAY_LOG_WINDOW_SECONDS", "3600"))
+ERROR_WINDOW_SECONDS = int(os.getenv("BOT_DISPLAY_ERROR_WINDOW_SECONDS", "3600"))
 LOG_TAIL_LINES = int(os.getenv("BOT_DISPLAY_LOG_TAIL_LINES", "300"))
 
 ERROR_WORDS = ("ERROR", "FATAL", "EXCEPTION", "TRACEBACK")
-WARNING_WORDS = ("WARN", "WARNING", "STALE", "SKIPPED")
 
 
 def split_csv(value: str | None) -> list[str]:
@@ -52,59 +50,6 @@ LOCAL_ENV = load_env_file(Path(".env"))
 
 def getenv(name: str, default: str = "") -> str:
     return os.getenv(name) or LOCAL_ENV.get(name, default)
-
-
-def hostname() -> str:
-    return socket.gethostname().split(".")[0]
-
-
-def local_ip() -> str:
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.connect(("8.8.8.8", 80))
-            return sock.getsockname()[0]
-    except OSError:
-        try:
-            result = subprocess.run(
-                ["hostname", "-I"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            return result.stdout.split()[0] if result.stdout.split() else "ip unknown"
-        except Exception:
-            return "ip unknown"
-
-
-def uptime_text() -> str:
-    try:
-        uptime_seconds = float(Path("/proc/uptime").read_text().split()[0])
-    except Exception:
-        return "uptime unknown"
-
-    days, remainder = divmod(int(uptime_seconds), 86400)
-    hours, remainder = divmod(remainder, 3600)
-    minutes = remainder // 60
-    if days:
-        return f"up {days}d {hours}h"
-    if hours:
-        return f"up {hours}h {minutes}m"
-    return f"up {minutes}m"
-
-
-def load_text() -> str:
-    try:
-        one_minute, _, _ = os.getloadavg()
-        return f"load {one_minute:.2f}"
-    except OSError:
-        return "load unknown"
-
-
-def disk_text() -> str:
-    usage = shutil.disk_usage("/")
-    used_pct = usage.used / usage.total * 100
-    return f"disk {used_pct:.0f}%"
 
 
 def log_file_candidates() -> list[Path]:
@@ -149,9 +94,8 @@ def parse_ts(value: object) -> datetime | None:
         return None
 
 
-def read_recent_log_events(now: datetime) -> list[dict[str, object]]:
+def read_log_events() -> list[dict[str, object]]:
     records = []
-    cutoff = now.timestamp() - LOG_WINDOW_SECONDS
 
     for path in log_file_candidates():
         for line in tail_lines(path, LOG_TAIL_LINES):
@@ -160,7 +104,7 @@ def read_recent_log_events(now: datetime) -> list[dict[str, object]]:
             except json.JSONDecodeError:
                 continue
             ts = parse_ts(record.get("ts"))
-            if ts and ts.timestamp() >= cutoff:
+            if ts:
                 record["_path"] = str(path)
                 records.append(record)
 
@@ -168,16 +112,12 @@ def read_recent_log_events(now: datetime) -> list[dict[str, object]]:
     return records
 
 
-def event_severity(record: dict[str, object]) -> str:
+def is_error_event(record: dict[str, object]) -> bool:
     text = " ".join(
         str(record.get(key, ""))
         for key in ("event", "message", "reason", "status", "error", "notes")
     ).upper()
-    if any(word in text for word in ERROR_WORDS):
-        return "error"
-    if any(word in text for word in WARNING_WORDS):
-        return "warning"
-    return "good"
+    return any(word in text for word in ERROR_WORDS)
 
 
 def service_state(service: str) -> str:
@@ -194,67 +134,34 @@ def service_state(service: str) -> str:
     return result.stdout.strip() or "unknown"
 
 
-def health_status(records: list[dict[str, object]]) -> tuple[str, str]:
+def service_status_text() -> str:
     services = split_csv(getenv("BOT_DISPLAY_SERVICES"))
-    inactive_services = [
-        f"{service}:{state}"
-        for service in services
-        if (state := service_state(service)) not in ("active", "unknown")
-    ]
-    if inactive_services:
-        return "error", inactive_services[0]
-    unknown_services = [
-        service
-        for service in services
-        if service_state(service) == "unknown"
-    ]
-    if unknown_services:
-        return "warning", f"{unknown_services[0]} unknown"
-
-    for record in reversed(records):
-        severity = event_severity(record)
-        if severity == "error":
-            return "error", str(record.get("event") or record.get("message") or "log error")
-
-    for record in reversed(records):
-        severity = event_severity(record)
-        if severity == "warning":
-            return "warning", str(record.get("event") or record.get("message") or "log warning")
-
-    return "good", "no recent issues"
+    if not services:
+        return "down"
+    return "up" if all(service_state(service) == "active" for service in services) else "down"
 
 
-def last_event_text(records: list[dict[str, object]], now: datetime) -> str:
+def last_event_age_text(records: list[dict[str, object]], now: datetime) -> str:
     if not records:
-        return "last log none"
+        return "none"
 
     latest = records[-1]
     ts = parse_ts(latest.get("ts"))
     if not ts:
-        return "last log unknown"
-    age_seconds = max(0, int(now.timestamp() - ts.timestamp()))
-    if age_seconds < 60:
-        age = f"{age_seconds}s"
-    elif age_seconds < 3600:
-        age = f"{age_seconds // 60}m"
-    else:
-        age = f"{age_seconds // 3600}h"
-    return f"last {age} {latest.get('event', '')}".strip()
+        return "unknown"
+    age_minutes = max(0, int((now.timestamp() - ts.timestamp()) // 60))
+    return f"{age_minutes} minutes"
 
 
-def bottom_metrics(records: list[dict[str, object]], now: datetime, reason: str) -> list[str]:
-    errors = sum(1 for record in records if event_severity(record) == "error")
-    warnings = sum(1 for record in records if event_severity(record) == "warning")
-    metrics = [
-        reason,
-        local_ip(),
-        uptime_text(),
-        load_text(),
-        disk_text(),
-        f"err {errors} warn {warnings}",
-        last_event_text(records, now),
-    ]
-    return [metric for metric in metrics if metric]
+def recent_error_count(records: list[dict[str, object]], now: datetime) -> int:
+    cutoff = now.timestamp() - ERROR_WINDOW_SECONDS
+    return sum(
+        1
+        for record in records
+        if (ts := parse_ts(record.get("ts")))
+        and ts.timestamp() >= cutoff
+        and is_error_event(record)
+    )
 
 
 def text_width(font, text: str) -> float:
@@ -281,28 +188,41 @@ def fit_text(text: str, font, max_width: int) -> str:
     return clipped + ellipsis
 
 
-def screen_lines(metric_index: int) -> list[str]:
-    now = datetime.now(timezone.utc)
-    records = read_recent_log_events(now)
-    status, reason = health_status(records)
-    metrics = bottom_metrics(records, now, reason)
-    metric = metrics[metric_index % len(metrics)] if metrics else reason
-
-    return [
-        hostname(),
-        "",
-        f"status: {status}",
-        metric,
+def load_font(image_font):
+    font_size = int(getenv("BOT_DISPLAY_FONT_SIZE", "14"))
+    font_paths = [
+        getenv("BOT_DISPLAY_FONT"),
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
     ]
+    for font_path in font_paths:
+        if not font_path:
+            continue
+        try:
+            return image_font.truetype(font_path, font_size)
+        except OSError:
+            continue
+    return image_font.load_default()
 
 
-def render_stdout(once: bool) -> None:
-    metric_index = 0
+def screen_lines(page_index: int) -> list[str]:
+    now = datetime.now(timezone.utc)
+    records = read_log_events()
+    pages = [
+        ("status:", service_status_text()),
+        ("last event:", last_event_age_text(records, now)),
+        ("errors:", str(recent_error_count(records, now))),
+    ]
+    label, value = pages[page_index % len(pages)]
+    return [label, value]
+
+
+def render_stdout(once: bool, page_index: int = 0) -> None:
     while True:
-        print("\n".join(screen_lines(metric_index)))
+        print("\n".join(screen_lines(page_index)))
         if once:
             return
-        metric_index += 1
+        page_index += 1
         time.sleep(REFRESH_SECONDS)
 
 
@@ -319,18 +239,19 @@ def render_oled() -> None:
 
     image = Image.new("1", (display.width, display.height))
     draw = ImageDraw.Draw(image)
-    font = ImageFont.load_default()
-    metric_index = 0
+    font = load_font(ImageFont)
+    page_index = 0
 
     try:
         while True:
             draw.rectangle((0, 0, display.width, display.height), outline=0, fill=0)
-            for row, text in enumerate(screen_lines(metric_index)):
-                draw.text((0, row * LINE_HEIGHT), fit_text(text, font, display.width), font=font, fill=255)
+            label, value = screen_lines(page_index)
+            draw.text((0, LABEL_Y), fit_text(label, font, display.width), font=font, fill=255)
+            draw.text((0, VALUE_Y), fit_text(value, font, display.width), font=font, fill=255)
 
             display.image(image)
             display.display()
-            metric_index += 1
+            page_index += 1
             time.sleep(REFRESH_SECONDS)
     finally:
         display.clear()
@@ -341,13 +262,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Display Kraken bot status on an SSD1306 OLED.")
     parser.add_argument("--stdout", action="store_true", help="print the screen text instead of using the OLED")
     parser.add_argument("--once", action="store_true", help="render one screen and exit")
+    parser.add_argument("--page", type=int, default=0, help="starting page for stdout preview")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     if args.stdout:
-        render_stdout(args.once)
+        render_stdout(args.once, args.page)
         return
     render_oled()
 
