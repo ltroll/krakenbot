@@ -318,6 +318,19 @@ def log_and_console(event, message="", **kwargs):
         console(event)
 
 
+def positive_float(value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    return parsed if parsed > 0 else None
+
+
+def tracker_value(value, fallback=None):
+    return positive_float(value) or positive_float(fallback)
+
+
 def notify_order_tracker(
     trade_id,
     side,
@@ -326,10 +339,14 @@ def notify_order_tracker(
     order_id=None,
     fee=None,
     timestamp=None,
-    notes=None
+    notes=None,
+    status=None
 ):
     if not ORDER_TRACKER_URL:
         return
+
+    price = positive_float(price)
+    quantity = positive_float(quantity)
 
     if not trade_id or side not in ("buy", "sell") or price is None or quantity is None:
         log_event(
@@ -352,9 +369,10 @@ def notify_order_tracker(
     optional_fields = {
         "symbol": ORDER_TRACKER_SYMBOL,
         "order_id": order_id,
-        "fee": fee,
+        "fee": positive_float(fee),
         "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
-        "notes": notes
+        "notes": notes,
+        "status": status
     }
     payload.update(
         {
@@ -1507,6 +1525,16 @@ def process_open_buy_orders(cycle_id):
                 txid=txid,
                 side="buy"
             )
+            notify_order_tracker(
+                trade_id=order.get("trade_id") or txid,
+                side="buy",
+                price=order.get("price"),
+                quantity=order.get("volume"),
+                order_id=txid,
+                timestamp=cycle_id,
+                notes=f"order_status={order_status}",
+                status=order_status
+            )
 
 
 def process_open_sell_orders(cycle_id):
@@ -1547,6 +1575,16 @@ def process_open_sell_orders(cycle_id):
                 cycle_id=cycle_id,
                 txid=txid,
                 side="sell"
+            )
+            notify_order_tracker(
+                trade_id=order.get("trade_id") or order.get("buy_txid") or txid,
+                side="sell",
+                price=order.get("sell_price"),
+                quantity=order.get("volume"),
+                order_id=txid,
+                timestamp=cycle_id,
+                notes=f"order_status={order_status}",
+                status=order_status
             )
 
 
@@ -1591,8 +1629,8 @@ def maybe_handle_submitted_buy(
         notify_order_tracker(
             trade_id=txid,
             side="buy",
-            price=fill_price or price,
-            quantity=fill_volume or volume,
+            price=tracker_value(fill_price, price),
+            quantity=tracker_value(fill_volume, volume),
             order_id=txid,
             fee=fill.get("fill_fee"),
             timestamp=cycle_id,

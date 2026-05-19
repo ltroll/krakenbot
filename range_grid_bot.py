@@ -307,6 +307,19 @@ def log_and_console(event, message="", **kwargs):
         console(event)
 
 
+def positive_float(value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    return parsed if parsed > 0 else None
+
+
+def tracker_value(value, fallback=None):
+    return positive_float(value) or positive_float(fallback)
+
+
 def notify_order_tracker(
     trade_id,
     side,
@@ -315,10 +328,14 @@ def notify_order_tracker(
     order_id=None,
     fee=None,
     timestamp=None,
-    notes=None
+    notes=None,
+    status=None
 ):
     if not order_tracker_url:
         return
+
+    price = positive_float(price)
+    quantity = positive_float(quantity)
 
     if not trade_id or side not in ("buy", "sell") or price is None or quantity is None:
         log_event(
@@ -341,9 +358,10 @@ def notify_order_tracker(
     optional_fields = {
         "symbol": order_tracker_symbol,
         "order_id": order_id,
-        "fee": fee,
+        "fee": positive_float(fee),
         "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
-        "notes": notes
+        "notes": notes,
+        "status": status
     }
     payload.update(
         {
@@ -1427,6 +1445,16 @@ def main():
                         buy_price=order.get("buy_price"),
                         sell_price=order.get("sell_price")
                     )
+                    notify_order_tracker(
+                        trade_id=order.get("trade_id") or txid,
+                        side="sell",
+                        price=order.get("sell_price"),
+                        quantity=order.get("volume"),
+                        order_id=txid,
+                        timestamp=cycle_id,
+                        notes=f"order_status={status}",
+                        status=status
+                    )
 
             # SELL CHECK
             for level, order in list(state["open_buy_orders"].items()):
@@ -1450,6 +1478,16 @@ def main():
                         level=level,
                         volume=order.get("volume"),
                         price=order.get("price", float(level))
+                    )
+                    notify_order_tracker(
+                        trade_id=order.get("trade_id") or txid,
+                        side="buy",
+                        price=order.get("price", float(level)),
+                        quantity=order.get("volume"),
+                        order_id=txid,
+                        timestamp=cycle_id,
+                        notes=f"order_status={status}",
+                        status=status
                     )
                     continue
 

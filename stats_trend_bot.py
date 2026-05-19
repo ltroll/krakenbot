@@ -385,6 +385,19 @@ def log_and_console(event, message="", **kwargs):
     console(f"{event}: {message}" if message else event)
 
 
+def positive_float(value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    return parsed if parsed > 0 else None
+
+
+def tracker_value(value, fallback=None):
+    return positive_float(value) or positive_float(fallback)
+
+
 def notify_order_tracker(
     trade_id,
     side,
@@ -393,10 +406,14 @@ def notify_order_tracker(
     order_id=None,
     fee=None,
     timestamp=None,
-    notes=None
+    notes=None,
+    status=None
 ):
     if not ORDER_TRACKER_URL:
         return
+
+    price = positive_float(price)
+    quantity = positive_float(quantity)
 
     if not trade_id or side not in ("buy", "sell") or price is None or quantity is None:
         log_event(
@@ -419,9 +436,10 @@ def notify_order_tracker(
     optional_fields = {
         "symbol": ORDER_TRACKER_SYMBOL,
         "order_id": order_id,
-        "fee": fee,
+        "fee": positive_float(fee),
         "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
-        "notes": notes
+        "notes": notes,
+        "status": status
     }
     payload.update(
         {
@@ -1608,8 +1626,8 @@ def place_limit_buy(
         notify_order_tracker(
             trade_id=txid,
             side="buy",
-            price=fill.get("fill_price") or buy_price,
-            quantity=fill.get("fill_volume") or buy_volume,
+            price=tracker_value(fill.get("fill_price"), buy_price),
+            quantity=tracker_value(fill.get("fill_volume"), buy_volume),
             order_id=txid,
             fee=fill.get("fill_fee"),
             timestamp=cycle_id,
@@ -1825,6 +1843,16 @@ def cancel_open_buy_order(txid, order, cycle_id, reason, **kwargs):
         result=cancel_result.get("result") if isinstance(cancel_result, dict) else cancel_result,
         **kwargs
     )
+    notify_order_tracker(
+        trade_id=order.get("trade_id") or txid,
+        side="buy",
+        price=order.get("price"),
+        quantity=order.get("volume"),
+        order_id=txid,
+        timestamp=cycle_id,
+        notes=f"order_status=canceled; reason={reason}",
+        status="canceled"
+    )
     return True
 
 
@@ -1984,6 +2012,16 @@ def process_open_buy_orders(cycle_id, current_price=None, trend_signal=None):
                 txid=txid,
                 side="buy"
             )
+            notify_order_tracker(
+                trade_id=order.get("trade_id") or txid,
+                side="buy",
+                price=order.get("price"),
+                quantity=order.get("volume"),
+                order_id=txid,
+                timestamp=cycle_id,
+                notes=f"order_status={order_status}",
+                status=order_status
+            )
         elif order_status == "open":
             maybe_cancel_stale_open_buy(
                 txid,
@@ -2052,6 +2090,16 @@ def process_open_sell_orders(cycle_id, current_price=None):
                 cycle_id=cycle_id,
                 txid=txid,
                 side="sell"
+            )
+            notify_order_tracker(
+                trade_id=order.get("trade_id") or order.get("buy_txid") or txid,
+                side="sell",
+                price=order.get("sell_price"),
+                quantity=order.get("volume"),
+                order_id=txid,
+                timestamp=cycle_id,
+                notes=f"order_status={order_status}",
+                status=order_status
             )
 
 
