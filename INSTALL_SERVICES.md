@@ -187,13 +187,55 @@ journalctl -u kraken-sentiment.service -f
 tail -f /home/<user>/tradingbot/krakenbot/sentiment_trade_log.jsonl
 ```
 
-## 5. Common Operations
+## 5. Install The OLED Status Display
+
+Create `/etc/systemd/system/kraken-status-display.service`:
+
+```ini
+[Unit]
+Description=Kraken Bot OLED Status Display
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<user>
+Group=<user>
+WorkingDirectory=/home/<user>/tradingbot/krakenbot
+EnvironmentFile=/home/<user>/tradingbot/krakenbot/.env
+Environment=BOT_DISPLAY_SERVICES=kraken-range-grid.service,kraken-sentiment.service
+Environment=BOT_DISPLAY_LOG_FILES=trade_log.jsonl,sentiment_trade_log.jsonl,stats_trend_trade_log.jsonl
+ExecStart=/home/<user>/tradingbot/krakenbot/.venv/bin/python /home/<user>/tradingbot/krakenbot/bot_status_display.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable kraken-status-display.service
+sudo systemctl start kraken-status-display.service
+```
+
+The hostname stays fixed on the first row. The status row changes to `error` or
+`warning` when recent bot logs contain error/warning events or when a configured
+service is inactive. The bottom row rotates through IP, uptime, load, disk, and
+recent log metrics.
+
+## 6. Common Operations
 
 Stop a bot:
 
 ```bash
 sudo systemctl stop kraken-range-grid.service
 sudo systemctl stop kraken-sentiment.service
+sudo systemctl stop kraken-status-display.service
 ```
 
 Restart after changing `.env` or config:
@@ -201,6 +243,7 @@ Restart after changing `.env` or config:
 ```bash
 sudo systemctl restart kraken-range-grid.service
 sudo systemctl restart kraken-sentiment.service
+sudo systemctl restart kraken-status-display.service
 ```
 
 Disable a bot from starting on boot:
@@ -208,6 +251,7 @@ Disable a bot from starting on boot:
 ```bash
 sudo systemctl disable kraken-range-grid.service
 sudo systemctl disable kraken-sentiment.service
+sudo systemctl disable kraken-status-display.service
 ```
 
 View recent service logs:
@@ -215,9 +259,10 @@ View recent service logs:
 ```bash
 journalctl -u kraken-range-grid.service -n 100 --no-pager
 journalctl -u kraken-sentiment.service -n 100 --no-pager
+journalctl -u kraken-status-display.service -n 100 --no-pager
 ```
 
-## 6. Safety Checklist
+## 7. Safety Checklist
 
 Before enabling live trading:
 
