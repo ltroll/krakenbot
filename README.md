@@ -6,7 +6,7 @@ The project is built around a simple pattern:
 1. Environment variables in `.env` provide secrets, URLs, and runtime file locations.
 2. JSON config files tune each bot's trading behavior.
 3. Bot scripts fetch price and sentiment inputs, make trade decisions, and write state and logs locally.
-4. Optional support tools inspect logs, summarize trades, or render dashboards.
+4. Optional support tools inspect logs or summarize trades.
 
 The active bot you have been working on is [`range_grid_bot.py`](/C:/Users/bgert/krakenbot/range_grid_bot.py).
 
@@ -33,7 +33,6 @@ Logs and observability:
 
 - `trade_log.jsonl` or the file pointed to by `TRADE_LOG_FILE`: structured bot event log.
 - [`log_viewer.py`](/C:/Users/bgert/krakenbot/log_viewer.py): CLI log viewer for JSONL logs.
-- [`dashboard.py`](/C:/Users/bgert/krakenbot/dashboard.py): Streamlit dashboard over `trading.db`.
 
 LLM and notifications:
 
@@ -45,7 +44,6 @@ LLM and notifications:
 Operations:
 
 - [`requirements.txt`](/C:/Users/bgert/krakenbot/requirements.txt): Python dependencies.
-- [`dashboard.sh`](/C:/Users/bgert/krakenbot/dashboard.sh): dashboard launcher helper.
 - [`update_all_bots.sh`](/C:/Users/bgert/krakenbot/update_all_bots.sh): multi-bot update helper.
 - [`SupportFilesSummarization.txt`](/C:/Users/bgert/krakenbot/SupportFilesSummarization.txt): notes describing support-file conventions and expected logging format.
 
@@ -383,16 +381,6 @@ It can:
 - filter by event name
 - print a quick event summary
 
-## Dashboard
-
-[`dashboard.py`](/C:/Users/bgert/krakenbot/dashboard.py) is a Streamlit view over `trading.db` and displays:
-
-- portfolio value
-- BTC balance
-- USD balance
-- realized profit
-- charts for PnL and portfolio value
-
 ## LLM and Discord helpers
 
 The repo includes helpers for summarizing trade actions with an LLM and sending those summaries to Discord.
@@ -417,12 +405,6 @@ Run the active range-grid bot:
 
 ```powershell
 python .\range_grid_bot.py
-```
-
-Run the dashboard:
-
-```powershell
-streamlit run .\dashboard.py
 ```
 
 ## Development notes
