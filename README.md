@@ -6,7 +6,7 @@ The project is built around a simple pattern:
 1. Environment variables in `.env` provide secrets, URLs, and runtime file locations.
 2. JSON config files tune each bot's trading behavior.
 3. Bot scripts fetch price and sentiment inputs, make trade decisions, and write state and logs locally.
-4. Optional support tools inspect logs, summarize trades, track PnL, or render dashboards.
+4. Optional support tools inspect logs, summarize trades, or render dashboards.
 
 The active bot you have been working on is [`range_grid_bot.py`](/C:/Users/bgert/krakenbot/range_grid_bot.py).
 
@@ -33,7 +33,6 @@ Logs and observability:
 
 - `trade_log.jsonl` or the file pointed to by `TRADE_LOG_FILE`: structured bot event log.
 - [`log_viewer.py`](/C:/Users/bgert/krakenbot/log_viewer.py): CLI log viewer for JSONL logs.
-- [`pnl_tracker.py`](/C:/Users/bgert/krakenbot/pnl_tracker.py): SQLite trade recorder.
 - [`dashboard.py`](/C:/Users/bgert/krakenbot/dashboard.py): Streamlit dashboard over `trading.db`.
 
 LLM and notifications:
@@ -384,22 +383,9 @@ It can:
 - filter by event name
 - print a quick event summary
 
-## PnL tracking and dashboard
+## Dashboard
 
-[`pnl_tracker.py`](/C:/Users/bgert/krakenbot/pnl_tracker.py) stores trades in a SQLite database named `trading.db`.
-It tracks:
-
-- side
-- price
-- volume
-- fee
-- realized PnL
-- unrealized PnL
-- BTC balance
-- USD balance
-- average entry price
-
-[`dashboard.py`](/C:/Users/bgert/krakenbot/dashboard.py) is a Streamlit view over that database and displays:
+[`dashboard.py`](/C:/Users/bgert/krakenbot/dashboard.py) is a Streamlit view over `trading.db` and displays:
 
 - portfolio value
 - BTC balance

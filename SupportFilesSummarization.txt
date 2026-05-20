@@ -90,24 +90,6 @@ This is optional and may not be required.  I will mention it if I want it, other
 
 It can be invoked with this function: def send_discord_message(message_type="general", message="Insert Test Here"):
 
-pnl_tracker.py
-
-Used for tracking pnl of course.  All transactions are logged to a database.
-
-It is invoked with:
-
-def record_trade(
-        self,
-        side,
-        price,
-        volume,
-        fee,
-        btc_balance,
-        usd_balance,
-        avg_entry_price,
-        current_price
-    ):
-
 Logging:
 
 The bot needs to log trade actions to trade_log.jsonl.  Here is an example snippet.
@@ -123,4 +105,3 @@ The bot needs to log trade actions to trade_log.jsonl.  Here is an example snipp
 {"ts": "2026-04-09T04:30:01.639166+00:00", "event": "BOT_START", "message": "Kraken Sentiment Trader Starting"}
 {"ts": "2026-04-09T04:30:02.475055+00:00", "event": "SIGNAL_UPDATE", "message": "", "execution_signal": -0.0945, "allocation_target": 0.41263635, "confidence": 0.5}
 {"ts": "2026-04-09T04:30:02.497302+00:00", "event": "TRADE_DECISION", "message": "", "side": "buy", "volume": 0.001033, "price": 70856.4}
-
