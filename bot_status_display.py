@@ -4,15 +4,13 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import time
-from collections import deque
-from datetime import datetime, timezone
+from datetime import timedelta
 from pathlib import Path
-from typing import Iterable
 
+import log_viewer
 
 WIDTH = 128
 HEIGHT = 32
@@ -20,9 +18,6 @@ LABEL_Y = 0
 VALUE_Y = 16
 REFRESH_SECONDS = float(os.getenv("BOT_DISPLAY_REFRESH_SECONDS", "5"))
 ERROR_WINDOW_SECONDS = int(os.getenv("BOT_DISPLAY_ERROR_WINDOW_SECONDS", "3600"))
-LOG_TAIL_LINES = int(os.getenv("BOT_DISPLAY_LOG_TAIL_LINES", "300"))
-
-ERROR_WORDS = ("ERROR", "FATAL", "EXCEPTION", "TRACEBACK")
 
 
 def split_csv(value: str | None) -> list[str]:
@@ -77,47 +72,14 @@ def log_file_candidates() -> list[Path]:
     return unique_paths
 
 
-def tail_lines(path: Path, limit: int) -> Iterable[str]:
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            yield from deque(handle, maxlen=limit)
-    except OSError:
-        return
-
-
-def parse_ts(value: object) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def read_log_events() -> list[dict[str, object]]:
-    records = []
-
+def load_logs_for_display() -> list[dict[str, object]]:
+    logs = []
     for path in log_file_candidates():
-        for line in tail_lines(path, LOG_TAIL_LINES):
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            ts = parse_ts(record.get("ts"))
-            if ts:
-                record["_path"] = str(path)
-                records.append(record)
-
-    records.sort(key=lambda item: parse_ts(item.get("ts")) or datetime.min.replace(tzinfo=timezone.utc))
-    return records
-
-
-def is_error_event(record: dict[str, object]) -> bool:
-    text = " ".join(
-        str(record.get(key, ""))
-        for key in ("event", "message", "reason", "status", "error", "notes")
-    ).upper()
-    return any(word in text for word in ERROR_WORDS)
+        try:
+            logs.extend(log_viewer.load_logs(log_file=str(path)))
+        except FileNotFoundError:
+            continue
+    return logs
 
 
 def service_state(service: str) -> str:
@@ -141,27 +103,22 @@ def service_status_text() -> str:
     return "up" if all(service_state(service) == "active" for service in services) else "down"
 
 
-def last_event_age_text(records: list[dict[str, object]], now: datetime) -> str:
-    if not records:
-        return "none"
+def health_summary() -> dict[str, object]:
+    return log_viewer.summarize_health(
+        load_logs_for_display(),
+        error_window=timedelta(seconds=ERROR_WINDOW_SECONDS),
+    )
 
-    latest = records[-1]
-    ts = parse_ts(latest.get("ts"))
-    if not ts:
-        return "unknown"
-    age_minutes = max(0, int((now.timestamp() - ts.timestamp()) // 60))
+
+def last_event_age_text(summary: dict[str, object]) -> str:
+    age_minutes = summary.get("last_event_minutes")
+    if age_minutes is None:
+        return "none"
     return f"{age_minutes} minutes"
 
 
-def recent_error_count(records: list[dict[str, object]], now: datetime) -> int:
-    cutoff = now.timestamp() - ERROR_WINDOW_SECONDS
-    return sum(
-        1
-        for record in records
-        if (ts := parse_ts(record.get("ts")))
-        and ts.timestamp() >= cutoff
-        and is_error_event(record)
-    )
+def recent_error_count_text(summary: dict[str, object]) -> str:
+    return str(summary.get("errors", 0))
 
 
 def text_width(font, text: str) -> float:
@@ -206,12 +163,11 @@ def load_font(image_font):
 
 
 def screen_lines(page_index: int) -> list[str]:
-    now = datetime.now(timezone.utc)
-    records = read_log_events()
+    summary = health_summary()
     pages = [
         ("status:", service_status_text()),
-        ("last event:", last_event_age_text(records, now)),
-        ("errors:", str(recent_error_count(records, now))),
+        ("last event:", last_event_age_text(summary)),
+        ("errors:", recent_error_count_text(summary)),
     ]
     label, value = pages[page_index % len(pages)]
     return [label, value]

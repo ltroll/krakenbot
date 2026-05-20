@@ -4,10 +4,20 @@ import json
 import time
 from datetime import datetime, timedelta, timezone
 import os
-import sys
 from collections import Counter
 
-LOG_FILE = "trade_log.jsonl"
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+
+ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if load_dotenv:
+    load_dotenv(dotenv_path=ENV_FILE)
+
+LOG_FILE = os.getenv("TRADE_LOG_FILE", "trade_log.jsonl")
+ERROR_WORDS = ("ERROR", "FATAL", "EXCEPTION", "TRACEBACK")
 
 
 # ---------------- COLORS ----------------
@@ -33,11 +43,18 @@ def colorize(event, text):
 
 # ---------------- UTIL ----------------
 
+def get_log_file(log_file=None):
+    return log_file or os.getenv("TRADE_LOG_FILE") or LOG_FILE
+
+
 def parse_ts(ts):
     try:
-        return datetime.fromisoformat(ts)
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def format_log(entry):
@@ -56,14 +73,15 @@ def format_log(entry):
     return colorize(event, base)
 
 
-def load_logs():
-    if not os.path.exists(LOG_FILE):
-        print("Log file not found.")
-        sys.exit(1)
+def load_logs(log_file=None):
+    active_log_file = get_log_file(log_file)
+
+    if not os.path.exists(active_log_file):
+        raise FileNotFoundError(f"Log file not found: {active_log_file}")
 
     logs = []
 
-    with open(LOG_FILE, "r") as f:
+    with open(active_log_file, "r") as f:
         for line in f:
             try:
                 logs.append(json.loads(line.strip()))
@@ -87,6 +105,48 @@ def filter_by_event(logs, event_name):
         entry for entry in logs
         if entry.get("event", "").lower() == event_name.lower()
     ]
+
+
+def is_error_event(entry):
+    text = " ".join(
+        str(entry.get(key, ""))
+        for key in ("event", "message", "reason", "status", "error", "notes")
+    ).upper()
+    return any(word in text for word in ERROR_WORDS)
+
+
+def latest_log_timestamp(logs):
+    timestamps = [
+        parsed
+        for entry in logs
+        if (parsed := parse_ts(entry.get("ts")))
+    ]
+    return max(timestamps) if timestamps else None
+
+
+def summarize_health(logs, now=None, error_window=timedelta(hours=1)):
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - error_window
+    latest_ts = latest_log_timestamp(logs)
+    error_count = sum(
+        1
+        for entry in logs
+        if (ts := parse_ts(entry.get("ts")))
+        and ts >= cutoff
+        and is_error_event(entry)
+    )
+
+    return {
+        "total_logs": len(logs),
+        "latest_ts": latest_ts,
+        "last_event_minutes": (
+            max(0, int((now - latest_ts).total_seconds() // 60))
+            if latest_ts
+            else None
+        ),
+        "errors": error_count,
+        "error_window_seconds": int(error_window.total_seconds()),
+    }
 
 
 # ---------------- SUMMARY ----------------
@@ -113,10 +173,11 @@ def show_summary(logs):
 
 # ---------------- MODES ----------------
 
-def run_tail(event_filter=None):
-    print("🔴 Live tailing logs...\n")
+def run_tail(event_filter=None, log_file=None):
+    active_log_file = get_log_file(log_file)
+    print(f"🔴 Live tailing logs from {active_log_file}...\n")
 
-    with open(LOG_FILE, "r") as f:
+    with open(active_log_file, "r") as f:
         f.seek(0, os.SEEK_END)
 
         while True:
@@ -138,8 +199,8 @@ def run_tail(event_filter=None):
                 continue
 
 
-def run_time_filter(hours=None, days=None, event_filter=None, summary=False):
-    logs = load_logs()
+def run_time_filter(hours=None, days=None, event_filter=None, summary=False, log_file=None):
+    logs = load_logs(log_file=log_file)
 
     now = datetime.now(timezone.utc)
 
@@ -157,12 +218,14 @@ def run_time_filter(hours=None, days=None, event_filter=None, summary=False):
 
     if summary:
         show_summary(logs)
-        return
+        return logs
 
     print(f"Showing {len(logs)} log entries\n")
 
     for entry in logs:
         print(format_log(entry))
+
+    return logs
 
 
 # ---------------- MAIN ----------------
@@ -178,15 +241,18 @@ def main():
 
     args = parser.parse_args()
 
-    if args.tail:
-        run_tail(event_filter=args.event)
-    else:
-        run_time_filter(
-            hours=args.hours,
-            days=args.days,
-            event_filter=args.event,
-            summary=args.summary
-        )
+    try:
+        if args.tail:
+            run_tail(event_filter=args.event)
+        else:
+            run_time_filter(
+                hours=args.hours,
+                days=args.days,
+                event_filter=args.event,
+                summary=args.summary
+            )
+    except FileNotFoundError as exc:
+        parser.exit(1, f"{exc}\n")
 
 
 if __name__ == "__main__":
