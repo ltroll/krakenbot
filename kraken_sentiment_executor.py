@@ -145,18 +145,18 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
 KRAKEN_NONCE_RETRIES = int(os.getenv("KRAKEN_NONCE_RETRIES", "2"))
 ORDER_TRACKER_URL = (
     os.getenv("ORDER_TRACKER_URL")
-    or profile_str("order_tracker_url")
-    or profile_str("external_order_tracker_url")
+    or os.getenv("EXTERNAL_ORDER_TRACKER_URL")
 )
-ORDER_TRACKER_USER_AGENT = (
-    os.getenv("ORDER_TRACKER_USER_AGENT")
-    or profile_str("order_tracker_user_agent", "mean-reversion-bot/1.0")
-)
+ORDER_TRACKER_USER_AGENT = os.getenv("ORDER_TRACKER_USER_AGENT")
 ORDER_TRACKER_SYMBOL = (
     os.getenv("ORDER_TRACKER_SYMBOL")
     or profile_str("order_tracker_symbol", KRAKEN_PAIR)
 )
 ORDER_TRACKER_TIMEOUT = profile_float("order_tracker_timeout_seconds", 5)
+ORDER_TRACKER_CHECKIN_TIMEOUT = profile_float(
+    "order_tracker_checkin_timeout_seconds",
+    min(ORDER_TRACKER_TIMEOUT, 5)
+)
 PRICE_CHECK_INTERVAL_SECONDS = profile_int("price_check_interval_seconds", 60)
 MIN_TRADE_USD = profile_float("min_trade_usd", 30)
 CONF_THRESHOLD = profile_float("confidence_threshold", 0.45)
@@ -342,7 +342,7 @@ def notify_order_tracker(
     notes=None,
     status=None
 ):
-    if not ORDER_TRACKER_URL:
+    if not ORDER_TRACKER_URL or not ORDER_TRACKER_USER_AGENT:
         return
 
     price = positive_float(price)
@@ -405,6 +405,34 @@ def notify_order_tracker(
             side=side,
             order_id=order_id
         )
+
+
+def short_error_summary(error):
+    return str(error).replace("\n", " ")[:200]
+
+
+def send_checkin(status="ok", loop_count=None, message="loop_complete"):
+    if not ORDER_TRACKER_URL or not ORDER_TRACKER_USER_AGENT:
+        return
+
+    payload = {
+        "action": "checkin",
+        "status": status,
+        "message": message
+    }
+    if loop_count is not None:
+        payload["loop_count"] = str(loop_count)
+
+    try:
+        response = requests.post(
+            ORDER_TRACKER_URL,
+            data=payload,
+            headers={"User-Agent": ORDER_TRACKER_USER_AGENT},
+            timeout=ORDER_TRACKER_CHECKIN_TIMEOUT
+        )
+        response.raise_for_status()
+    except Exception as e:
+        log_event("ORDER_TRACKER_CHECKIN_ERROR", message=str(e), status=status)
 
 
 # ----------------------
@@ -2250,6 +2278,10 @@ def main():
     while True:
         try:
             run_cycle()
+            send_checkin(
+                loop_count=state.get("stats", {}).get("cycles"),
+                message="loop_complete"
+            )
             time.sleep(PRICE_CHECK_INTERVAL_SECONDS)
         except KeyboardInterrupt:
             log_and_console("BOT_STOP", message="Sentiment executor stopped")
@@ -2259,6 +2291,11 @@ def main():
             save_state(state)
             log_event("LOOP_ERROR", message=str(e))
             console(f"Loop error: {e}")
+            send_checkin(
+                status="error",
+                loop_count=state.get("stats", {}).get("cycles"),
+                message=short_error_summary(e)
+            )
             time.sleep(PRICE_CHECK_INTERVAL_SECONDS)
 
 

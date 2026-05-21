@@ -129,18 +129,18 @@ strategy_config = load_strategy_config()
 
 order_tracker_url = (
     os.getenv("ORDER_TRACKER_URL")
-    or profile_str("order_tracker_url")
-    or profile_str("external_order_tracker_url")
+    or os.getenv("EXTERNAL_ORDER_TRACKER_URL")
 )
-order_tracker_user_agent = (
-    os.getenv("ORDER_TRACKER_USER_AGENT")
-    or profile_str("order_tracker_user_agent", "mean-reversion-bot/1.0")
-)
+order_tracker_user_agent = os.getenv("ORDER_TRACKER_USER_AGENT")
 order_tracker_symbol = (
     os.getenv("ORDER_TRACKER_SYMBOL")
     or profile_str("order_tracker_symbol", KRAKEN_PAIR)
 )
 order_tracker_timeout_seconds = profile_float("order_tracker_timeout_seconds", 5)
+order_tracker_checkin_timeout_seconds = profile_float(
+    "order_tracker_checkin_timeout_seconds",
+    min(order_tracker_timeout_seconds, 5)
+)
 
 range_window_hours = profile_int("range_window_hours", 24)
 max_grid_size = profile_int("max_grid_size", 4)
@@ -331,7 +331,7 @@ def notify_order_tracker(
     notes=None,
     status=None
 ):
-    if not order_tracker_url:
+    if not order_tracker_url or not order_tracker_user_agent:
         return
 
     price = positive_float(price)
@@ -394,6 +394,34 @@ def notify_order_tracker(
             side=side,
             order_id=order_id
         )
+
+
+def short_error_summary(error):
+    return str(error).replace("\n", " ")[:200]
+
+
+def send_checkin(status="ok", loop_count=None, message="loop_complete"):
+    if not order_tracker_url or not order_tracker_user_agent:
+        return
+
+    payload = {
+        "action": "checkin",
+        "status": status,
+        "message": message
+    }
+    if loop_count is not None:
+        payload["loop_count"] = str(loop_count)
+
+    try:
+        response = requests.post(
+            order_tracker_url,
+            data=payload,
+            headers={"User-Agent": order_tracker_user_agent},
+            timeout=order_tracker_checkin_timeout_seconds
+        )
+        response.raise_for_status()
+    except Exception as e:
+        log_event("ORDER_TRACKER_CHECKIN_ERROR", message=str(e), status=status)
 
 
 # ----------------------
@@ -1100,8 +1128,10 @@ def main():
         )
     )
 
+    loop_count = 0
     while True:
         try:
+            loop_count += 1
             now = datetime.now(timezone.utc)
             cycle_id = now.isoformat()
             actions = []
@@ -1118,6 +1148,7 @@ def main():
                     reason="missing_price_or_signal",
                     cycle_id=cycle_id
                 )
+                send_checkin(loop_count=loop_count, message="loop_complete")
                 time.sleep(price_check_interval_seconds)
                 continue
 
@@ -1687,6 +1718,7 @@ def main():
                         reason="balance_fetch_failed"
                     )
                     actions.append("hold_balance_fetch_failed")
+                    send_checkin(loop_count=loop_count, message="loop_complete")
                     time.sleep(price_check_interval_seconds)
                     continue
 
@@ -2034,10 +2066,16 @@ def main():
                 actions=actions or ["no_action"]
             )
 
+            send_checkin(loop_count=loop_count, message="loop_complete")
             time.sleep(price_check_interval_seconds)
         except Exception as e:
             log_event("LOOP_ERROR", message=str(e))
             console(f"Loop error: {e}")
+            send_checkin(
+                status="error",
+                loop_count=loop_count,
+                message=short_error_summary(e)
+            )
             time.sleep(price_check_interval_seconds)
 
 
