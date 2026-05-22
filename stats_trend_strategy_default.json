@@ -8,6 +8,7 @@
   "backtest_use_api_market_data": true,
   "market_history_source": "price_log",
   "kraken_ohlc_interval_minutes": 60,
+  "price_intelligence_url": "http://screenpi.local/bot/btc_price_intelligence.json",
   "price_intelligence_enabled": true,
   "price_intelligence_max_age_minutes": 20,
   "price_intelligence_max_probability_nudge": 0.12,

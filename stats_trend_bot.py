@@ -134,8 +134,16 @@ def build_float_grid(start, stop, step):
     return values
 
 
+if not PRICE_INTELLIGENCE_URL:
+    PRICE_INTELLIGENCE_URL = profile_str("price_intelligence_url") or None
+
+
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
 KRAKEN_NONCE_RETRIES = int(os.getenv("KRAKEN_NONCE_RETRIES", "2"))
+KRAKEN_LOCKOUT_COOLDOWN_SECONDS = env_int(
+    "KRAKEN_LOCKOUT_COOLDOWN_SECONDS",
+    300
+)
 BACKTEST_MODE = env_bool(
     "STATS_TREND_BACKTEST_MODE",
     profile_bool("backtest_mode", False)
@@ -548,6 +556,7 @@ def load_state():
         "open_sell_orders": {},
         "trade_history": [],
         "backtest_price_history": [],
+        "kraken_private_paused_until": None,
         "last_signal": None,
         "stats": {
             "cycles": 0,
@@ -700,6 +709,38 @@ def next_nonce():
     return str(nonce)
 
 
+def kraken_private_pause_seconds():
+    paused_until = parse_iso8601(state.get("kraken_private_paused_until"))
+    if paused_until is None:
+        return 0
+
+    if paused_until.tzinfo is None:
+        paused_until = paused_until.replace(tzinfo=timezone.utc)
+
+    remaining = (paused_until - datetime.now(timezone.utc)).total_seconds()
+    if remaining <= 0:
+        state["kraken_private_paused_until"] = None
+        save_state(state)
+        return 0
+
+    return remaining
+
+
+def pause_kraken_private_api(reason):
+    paused_until = datetime.fromtimestamp(
+        time.time() + KRAKEN_LOCKOUT_COOLDOWN_SECONDS,
+        timezone.utc
+    )
+    state["kraken_private_paused_until"] = paused_until.isoformat()
+    save_state(state)
+    log_event(
+        "KRAKEN_PRIVATE_PAUSED",
+        message=reason,
+        paused_until=state["kraken_private_paused_until"],
+        cooldown_seconds=KRAKEN_LOCKOUT_COOLDOWN_SECONDS
+    )
+
+
 def kraken_signature(endpoint, data):
     postdata = "&".join([f"{k}={v}" for k, v in data.items()])
     encoded = (str(data["nonce"]) + postdata).encode()
@@ -737,6 +778,16 @@ def kraken_private(endpoint, data):
 
 
 def safe_kraken_private(label, endpoint, data=None):
+    pause_seconds = kraken_private_pause_seconds()
+    if pause_seconds > 0:
+        log_event(
+            "KRAKEN_PRIVATE_SKIPPED",
+            operation=label,
+            reason="private_api_paused",
+            pause_seconds=round(pause_seconds, 2)
+        )
+        return None
+
     attempts = max(1, KRAKEN_NONCE_RETRIES + 1)
 
     for attempt in range(1, attempts + 1):
@@ -750,6 +801,10 @@ def safe_kraken_private(label, endpoint, data=None):
                 message=message,
                 attempt=attempt
             )
+
+            if "Temporary lockout" in message:
+                pause_kraken_private_api(message)
+                return None
 
             if "Invalid nonce" not in message or attempt >= attempts:
                 return None
@@ -2485,6 +2540,18 @@ def run_cycle():
         )
         return
 
+    private_pause_seconds = kraken_private_pause_seconds()
+    if private_pause_seconds > 0:
+        skip_cycle(
+            "kraken_private_paused",
+            cycle_id,
+            price=price,
+            kraken_private_pause_seconds=round(private_pause_seconds, 2),
+            kraken_private_paused_until=state.get("kraken_private_paused_until"),
+            **signal_fields
+        )
+        return
+
     balances = get_balances()
     if balances is None:
         skip_cycle("balance_fetch_failed", cycle_id, price=price, **signal_fields)
@@ -2670,6 +2737,7 @@ def main():
         decision_csv_file=DECISION_CSV_FILE,
         pair=KRAKEN_PAIR,
         dry_run=DRY_RUN,
+        kraken_lockout_cooldown_seconds=KRAKEN_LOCKOUT_COOLDOWN_SECONDS,
         backtest_mode=BACKTEST_MODE,
         backtest_step_path=BACKTEST_STEP_PATH,
         backtest_steps_per_cycle=BACKTEST_STEPS_PER_CYCLE,

@@ -113,6 +113,7 @@ KRAKEN_PAIR=XXBTZUSD
 SIGNAL_FILE=
 REQUEST_TIMEOUT_SECONDS=10
 KRAKEN_NONCE_RETRIES=2
+KRAKEN_LOCKOUT_COOLDOWN_SECONDS=300
 DISCORD_WEB_HOOK=
 ```
 
@@ -274,6 +275,8 @@ The buy gate requires the best entry/exit pair to clear minimum entry probabilit
 `max_open_buy_orders_per_day` controls how many currently open buy orders may have been placed on the current UTC day. The default is `2`; if one of today's buy orders fills, cancels, or expires, that slot is freed and the bot may place another buy the same day. `max_open_buy_orders: 0` disables the separate all-days open-buy cap, while `max_open_orders` remains the hard resource ceiling across all open buy and sell orders.
 
 Open buy orders are also rechecked while they wait to fill. `max_open_buy_age_minutes` cancels stale buy orders after the configured age, and `revalidate_open_buys` can cancel still-open buys when the current order-book model no longer clears the configured expected-value or exit-probability thresholds. Revalidation now waits for `open_buy_revalidation_grace_minutes` and will not cancel while market price remains within `open_buy_revalidation_hold_near_entry_pct` above the entry, so near-fills get room to complete. Buy orders store their predicted entry/exit probabilities and expected value at placement so later backtests can compare the prediction to the actual result.
+
+If Kraken returns `EGeneral:Temporary lockout` on a private API call, the bot pauses private Kraken requests for `KRAKEN_LOCKOUT_COOLDOWN_SECONDS` and records `kraken_private_paused_until` in state. Public market-data checks can continue, but buy placement and balance/order private calls are skipped until the pause expires.
 
 Runtime files use their own names by default:
 
