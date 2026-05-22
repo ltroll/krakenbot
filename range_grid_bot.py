@@ -4,6 +4,9 @@
 # RANGE GRID SENTIMENT BOT (RESTORED STABLE VERSION)
 # =====================================================
 
+import base64
+import hashlib
+import hmac
 import json
 import os
 import statistics
@@ -46,6 +49,10 @@ LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL")
 PRICE_LOG_URL = os.getenv("PRICE_LOG_URL")
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
+KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY")
+KRAKEN_API_SECRET = os.getenv("KRAKEN_API_SECRET")
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
+KRAKEN_NONCE_RETRIES = int(os.getenv("KRAKEN_NONCE_RETRIES", "2"))
 
 
 def parse_strategy_modes(raw_value):
@@ -446,6 +453,79 @@ def kraken_call(label, fn, *args, **kwargs):
     return resp
 
 
+def next_nonce():
+    wall_nonce = int(time.time() * 1000)
+    last_nonce = int(state.get("last_nonce", 0))
+    nonce = max(wall_nonce, last_nonce + 1)
+    state["last_nonce"] = nonce
+    save_state(state)
+    return str(nonce)
+
+
+def kraken_signature(endpoint, data):
+    postdata = "&".join([f"{k}={v}" for k, v in data.items()])
+    encoded = (str(data["nonce"]) + postdata).encode()
+    message = endpoint.encode() + hashlib.sha256(encoded).digest()
+    mac = hmac.new(
+        base64.b64decode(KRAKEN_API_SECRET),
+        message,
+        hashlib.sha512
+    )
+    return base64.b64encode(mac.digest()).decode()
+
+
+def kraken_private(endpoint, data=None):
+    payload = dict(data or {})
+    payload["nonce"] = next_nonce()
+    url = KRAKEN_API_URL.rstrip("/") + endpoint
+    headers = {
+        "API-Key": KRAKEN_API_KEY,
+        "API-Sign": kraken_signature(endpoint, payload)
+    }
+
+    response = requests.post(
+        url,
+        headers=headers,
+        data=payload,
+        timeout=REQUEST_TIMEOUT
+    )
+    response.raise_for_status()
+    result = response.json()
+
+    if result.get("error"):
+        raise RuntimeError(result["error"])
+
+    return result
+
+
+def safe_kraken_private(label, endpoint, data=None):
+    attempts = max(1, KRAKEN_NONCE_RETRIES + 1)
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return kraken_private(endpoint, data)
+        except Exception as e:
+            message = str(e)
+            log_event(
+                "KRAKEN_EXCEPTION",
+                operation=label,
+                message=message,
+                attempt=attempt
+            )
+
+            if "Invalid nonce" not in message or attempt >= attempts:
+                return None
+
+            state["last_nonce"] = max(
+                int(state.get("last_nonce", 0)),
+                int(time.time() * 1000)
+            ) + 1000
+            save_state(state)
+            time.sleep(1)
+
+    return None
+
+
 # ----------------------
 # STATE
 # ----------------------
@@ -454,6 +534,7 @@ def load_state():
     default = {
         "open_buy_orders": {},
         "open_sell_orders": {},
+        "last_nonce": 0,
         "range_low": None,
         "range_high": None,
         "range_mean": None,
@@ -779,7 +860,7 @@ def high_anchor_cooldown_remaining_minutes(now):
 # ----------------------
 
 def place_buy(price, volume):
-    return api.query_private("AddOrder", {
+    return safe_kraken_private("BUY", "/0/private/AddOrder", {
         "pair": "XXBTZUSD",
         "type": "buy",
         "ordertype": "limit",
@@ -789,7 +870,7 @@ def place_buy(price, volume):
 
 
 def place_sell(price, volume):
-    return api.query_private("AddOrder", {
+    return safe_kraken_private("SELL", "/0/private/AddOrder", {
         "pair": "XXBTZUSD",
         "type": "sell",
         "ordertype": "limit",
@@ -799,14 +880,13 @@ def place_sell(price, volume):
 
 
 def cancel_order(txid):
-    return api.query_private("CancelOrder", {"txid": txid})
+    return safe_kraken_private("CANCEL_ORDER", "/0/private/CancelOrder", {"txid": txid})
 
 
 def order_filled(txid):
     try:
-        r = api.query_private("QueryOrders", {"txid": txid})
-
-        if r.get("error"):
+        r = safe_kraken_private("ORDER_FILLED", "/0/private/QueryOrders", {"txid": txid})
+        if not r:
             return False
 
         return r["result"][txid]["status"] == "closed"
@@ -816,14 +896,14 @@ def order_filled(txid):
 
 def get_order_status(txid):
     try:
-        r = api.query_private("QueryOrders", {"txid": txid})
+        r = safe_kraken_private(
+            "ORDER_STATUS",
+            "/0/private/QueryOrders",
+            {"txid": txid}
+        )
 
-        if r.get("error"):
-            log_event(
-                "ORDER_STATUS_ERROR",
-                txid=txid,
-                error=r["error"]
-            )
+        if not r or "result" not in r or txid not in r["result"]:
+            log_event("ORDER_STATUS_ERROR", txid=txid, message="missing_result")
             return None
 
         return r["result"][txid]["status"]
@@ -1081,6 +1161,8 @@ def main():
         mean_min_signal=mean_min_signal,
         median_min_signal=median_min_signal,
         high_min_signal=high_min_signal,
+        request_timeout=REQUEST_TIMEOUT,
+        kraken_nonce_retries=KRAKEN_NONCE_RETRIES,
         min_signal_status=min_signal_status,
         require_fresh_signal=require_fresh_signal,
         risk_multiplier_floor=risk_multiplier_floor,
@@ -1706,9 +1788,9 @@ def main():
                     seen_levels.add(rounded_level)
                     deduped_candidates.append(candidate)
 
-                bal = kraken_call("BALANCE", api.query_private, "Balance")
+                bal = safe_kraken_private("BALANCE", "/0/private/Balance")
 
-                if not bal:
+                if not bal or "result" not in bal:
                     log_event(
                         "TRADE_DECISION",
                         cycle_id=cycle_id,
