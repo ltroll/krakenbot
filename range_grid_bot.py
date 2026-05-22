@@ -53,6 +53,9 @@ KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY")
 KRAKEN_API_SECRET = os.getenv("KRAKEN_API_SECRET")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
 KRAKEN_NONCE_RETRIES = int(os.getenv("KRAKEN_NONCE_RETRIES", "2"))
+KRAKEN_LOCKOUT_COOLDOWN_SECONDS = int(
+    os.getenv("KRAKEN_LOCKOUT_COOLDOWN_SECONDS", "300")
+)
 
 
 def parse_strategy_modes(raw_value):
@@ -524,7 +527,9 @@ def safe_kraken_private(label, endpoint, data=None):
             )
 
             if "Temporary lockout" in message:
-                state["private_api_backoff_until"] = time.time() + 15
+                state["private_api_backoff_until"] = (
+                    time.time() + KRAKEN_LOCKOUT_COOLDOWN_SECONDS
+                )
                 save_state(state)
                 return None
 
@@ -1203,6 +1208,7 @@ def main():
         high_min_signal=high_min_signal,
         request_timeout=REQUEST_TIMEOUT,
         kraken_nonce_retries=KRAKEN_NONCE_RETRIES,
+        kraken_lockout_cooldown_seconds=KRAKEN_LOCKOUT_COOLDOWN_SECONDS,
         min_signal_status=min_signal_status,
         require_fresh_signal=require_fresh_signal,
         risk_multiplier_floor=risk_multiplier_floor,
