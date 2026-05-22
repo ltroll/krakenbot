@@ -499,6 +499,16 @@ def kraken_private(endpoint, data=None):
 
 
 def safe_kraken_private(label, endpoint, data=None):
+    backoff_until = float(state.get("private_api_backoff_until", 0) or 0)
+    now_ts = time.time()
+    if backoff_until > now_ts:
+        log_event(
+            "KRAKEN_BACKOFF_ACTIVE",
+            operation=label,
+            wait_seconds=round(backoff_until - now_ts, 2)
+        )
+        return None
+
     attempts = max(1, KRAKEN_NONCE_RETRIES + 1)
 
     for attempt in range(1, attempts + 1):
@@ -512,6 +522,11 @@ def safe_kraken_private(label, endpoint, data=None):
                 message=message,
                 attempt=attempt
             )
+
+            if "Temporary lockout" in message:
+                state["private_api_backoff_until"] = time.time() + 15
+                save_state(state)
+                return None
 
             if "Invalid nonce" not in message or attempt >= attempts:
                 return None
@@ -535,6 +550,7 @@ def load_state():
         "open_buy_orders": {},
         "open_sell_orders": {},
         "last_nonce": 0,
+        "private_api_backoff_until": 0,
         "range_low": None,
         "range_high": None,
         "range_mean": None,
@@ -910,6 +926,30 @@ def get_order_status(txid):
     except Exception as e:
         log_event("ORDER_STATUS_ERROR", txid=txid, message=str(e))
         return None
+
+
+def get_order_statuses(txids):
+    unique_txids = [txid for txid in dict.fromkeys(txids) if txid]
+    if not unique_txids:
+        return {}
+
+    response = safe_kraken_private(
+        "ORDER_STATUS_BATCH",
+        "/0/private/QueryOrders",
+        {"txid": ",".join(unique_txids)}
+    )
+    if not response or "result" not in response:
+        return {}
+
+    status_map = {}
+    for txid in unique_txids:
+        order = response["result"].get(txid)
+        if not isinstance(order, dict):
+            log_event("ORDER_STATUS_ERROR", txid=txid, message="missing_result")
+            continue
+        status_map[txid] = order.get("status")
+
+    return status_map
 
 
 def compute_sell_target_price(buy_price, profit_target_override=None):
@@ -1356,9 +1396,17 @@ def main():
                 median
             )
 
+            order_status_map = get_order_statuses(
+                list(state["open_sell_orders"].keys())
+                + [
+                    order.get("txid")
+                    for order in state["open_buy_orders"].values()
+                ]
+            )
+
             # SELL EXIT CHECK
             for txid, order in list(state["open_sell_orders"].items()):
-                status = get_order_status(txid)
+                status = order_status_map.get(txid)
 
                 if status is None:
                     continue
@@ -1572,7 +1620,7 @@ def main():
             # SELL CHECK
             for level, order in list(state["open_buy_orders"].items()):
                 txid = order["txid"]
-                status = get_order_status(txid)
+                status = order_status_map.get(txid)
 
                 if status is None:
                     continue
@@ -1723,6 +1771,7 @@ def main():
             if (
                 freshness_allows_trading
                 and signal_allows_trading
+                and effective_position_size_pct > 0
                 and low and high and (
                 llm_buy_allowed or execution_signal >= min(
                     low_min_signal,
@@ -2023,6 +2072,7 @@ def main():
                     smoothed_risk_multiplier=smoothed_risk_multiplier,
                     flow_pressure=flow_pressure,
                     mean_reversion_opportunity=mean_reversion_opportunity,
+                    effective_position_size_pct=effective_position_size_pct,
                     range_low=low,
                     range_high=high,
                     range_mean=mean,
