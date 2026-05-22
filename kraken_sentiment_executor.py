@@ -143,6 +143,9 @@ def profile_str(name, default=""):
 
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
 KRAKEN_NONCE_RETRIES = int(os.getenv("KRAKEN_NONCE_RETRIES", "2"))
+KRAKEN_LOCKOUT_COOLDOWN_SECONDS = int(
+    os.getenv("KRAKEN_LOCKOUT_COOLDOWN_SECONDS", "300")
+)
 ORDER_TRACKER_URL = (
     os.getenv("ORDER_TRACKER_URL")
     or os.getenv("EXTERNAL_ORDER_TRACKER_URL")
@@ -461,7 +464,8 @@ def load_state():
         "open_buy_orders": {},
         "open_sell_orders": {},
         "last_sell_price": None,
-        "last_sell_at": None
+        "last_sell_at": None,
+        "kraken_private_paused_until": None
     }
 
     if not os.path.exists(STATE_FILE):
@@ -585,6 +589,35 @@ def next_nonce():
     return str(nonce)
 
 
+def kraken_private_pause_seconds():
+    paused_until = parse_iso8601(state.get("kraken_private_paused_until"))
+    if paused_until is None:
+        return 0
+
+    remaining = (paused_until - datetime.now(timezone.utc)).total_seconds()
+    if remaining <= 0:
+        state["kraken_private_paused_until"] = None
+        save_state(state)
+        return 0
+
+    return remaining
+
+
+def pause_kraken_private_api(reason):
+    paused_until = datetime.fromtimestamp(
+        time.time() + KRAKEN_LOCKOUT_COOLDOWN_SECONDS,
+        timezone.utc
+    )
+    state["kraken_private_paused_until"] = paused_until.isoformat()
+    save_state(state)
+    log_event(
+        "KRAKEN_PRIVATE_PAUSED",
+        message=reason,
+        paused_until=state["kraken_private_paused_until"],
+        cooldown_seconds=KRAKEN_LOCKOUT_COOLDOWN_SECONDS
+    )
+
+
 def kraken_signature(endpoint, data):
     postdata = "&".join([f"{k}={v}" for k, v in data.items()])
     encoded = (str(data["nonce"]) + postdata).encode()
@@ -623,6 +656,16 @@ def kraken_private(endpoint, data):
 
 
 def safe_kraken_private(label, endpoint, data=None):
+    pause_seconds = kraken_private_pause_seconds()
+    if pause_seconds > 0:
+        log_event(
+            "KRAKEN_PRIVATE_SKIPPED",
+            operation=label,
+            reason="private_api_paused",
+            pause_seconds=round(pause_seconds, 2)
+        )
+        return None
+
     attempts = max(1, KRAKEN_NONCE_RETRIES + 1)
 
     for attempt in range(1, attempts + 1):
@@ -636,6 +679,10 @@ def safe_kraken_private(label, endpoint, data=None):
                 message=message,
                 attempt=attempt
             )
+
+            if "Temporary lockout" in message:
+                pause_kraken_private_api(message)
+                return None
 
             if "Invalid nonce" not in message or attempt >= attempts:
                 return None
@@ -766,6 +813,23 @@ def query_order(txid):
         return None
 
     return result.get("result", {}).get(txid)
+
+
+def query_orders(txids):
+    txids = [txid for txid in txids if txid]
+    if not txids:
+        return {}
+
+    result = safe_kraken_private(
+        "QUERY_ORDERS",
+        "/0/private/QueryOrders",
+        {"txid": ",".join(txids)}
+    )
+
+    if not result:
+        return {}
+
+    return result.get("result", {})
 
 
 def order_fill_summary(order):
@@ -1511,8 +1575,10 @@ def place_profit_sell_for_buy(
 
 
 def process_open_buy_orders(cycle_id):
+    statuses = query_orders(state["open_buy_orders"].keys())
+
     for txid, order in list(state["open_buy_orders"].items()):
-        status = query_order(txid)
+        status = statuses.get(txid)
         if status is None:
             continue
 
@@ -1566,8 +1632,10 @@ def process_open_buy_orders(cycle_id):
 
 
 def process_open_sell_orders(cycle_id):
+    statuses = query_orders(state["open_sell_orders"].keys())
+
     for txid, order in list(state["open_sell_orders"].items()):
-        status = query_order(txid)
+        status = statuses.get(txid)
         if status is None:
             continue
 

@@ -90,6 +90,7 @@ KRAKEN_PAIR=XXBTZUSD
 SIGNAL_FILE=
 REQUEST_TIMEOUT_SECONDS=10
 KRAKEN_NONCE_RETRIES=2
+KRAKEN_LOCKOUT_COOLDOWN_SECONDS=300
 ```
 
 Bot tuning values such as grid anchor, entry spacing, position sizing,
