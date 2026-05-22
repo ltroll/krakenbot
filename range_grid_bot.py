@@ -1263,6 +1263,7 @@ def main():
             now = datetime.now(timezone.utc)
             cycle_id = now.isoformat()
             actions = []
+            deduped_candidates = []
 
             price = get_price()
             sentiment_payload = get_sentiment()
