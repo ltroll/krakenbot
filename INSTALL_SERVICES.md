@@ -223,7 +223,7 @@ sudo systemctl enable kraken-status-display.service
 sudo systemctl start kraken-status-display.service
 ```
 
-The display rotates through three simple screens:
+The display rotates through simple screens:
 
 ```text
 status:
@@ -240,9 +240,25 @@ errors:
 0
 ```
 
+```text
+IP Address:
+192.168.50.211
+```
+
+```text
+Bot Name:
+range-grid-bot
+```
+
+```text
+Uptime:
+3d 4h
+```
+
 `status` is `up` only when every service listed in `BOT_DISPLAY_SERVICES` is
 active. `last event` is the age of the newest JSONL log timestamp. `errors` is
-the number of error events in the last hour.
+the number of error events in the last hour. `Bot Name` is read from the
+`ORDER_TRACKER_USER_AGENT` environment variable.
 
 ## 6. Common Operations
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import socket
 import subprocess
 import time
 from datetime import timedelta
@@ -103,6 +104,49 @@ def service_status_text() -> str:
     return "up" if all(service_state(service) == "active" for service in services) else "down"
 
 
+def ip_address_text() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+    except OSError:
+        try:
+            result = subprocess.run(
+                ["hostname", "-I"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except Exception:
+            return "unknown"
+        parts = result.stdout.split()
+        return parts[0] if parts else "unknown"
+
+
+def bot_name_text() -> str:
+    user_agent = getenv("ORDER_TRACKER_USER_AGENT")
+    if not user_agent:
+        return "unknown"
+    return user_agent.split("/", 1)[0]
+
+
+def uptime_text() -> str:
+    try:
+        uptime_seconds = float(Path("/proc/uptime").read_text(encoding="utf-8").split()[0])
+    except Exception:
+        return "unknown"
+
+    days, remainder = divmod(int(uptime_seconds), 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes = remainder // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes} minutes"
+
+
 def health_summary() -> dict[str, object]:
     return log_viewer.summarize_health(
         load_logs_for_display(),
@@ -168,6 +212,9 @@ def screen_lines(page_index: int) -> list[str]:
         ("status:", service_status_text()),
         ("last event:", last_event_age_text(summary)),
         ("errors:", recent_error_count_text(summary)),
+        ("IP Address:", ip_address_text()),
+        ("Bot Name:", bot_name_text()),
+        ("Uptime:", uptime_text()),
     ]
     label, value = pages[page_index % len(pages)]
     return [label, value]
