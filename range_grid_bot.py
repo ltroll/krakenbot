@@ -1258,6 +1258,117 @@ def current_inventory_usd(current_price):
     return open_buy_notional + open_sell_notional
 
 
+def kraken_btc_balance(balance_result):
+    if not isinstance(balance_result, dict):
+        return None
+
+    for key in ("XXBT", "XBT", "BTC"):
+        value = positive_float(balance_result.get(key))
+        if value is not None:
+            return value
+
+    return None
+
+
+def reconcile_btc_inventory(cycle_id):
+    if not state["open_buy_orders"]:
+        return []
+
+    balance_resp = safe_kraken_private("BALANCE_RECONCILE", "/0/private/Balance")
+    if not balance_resp or "result" not in balance_resp:
+        log_event(
+            "BTC_RECONCILE_SKIPPED",
+            cycle_id=cycle_id,
+            reason="balance_fetch_failed"
+        )
+        return []
+
+    actual_btc = kraken_btc_balance(balance_resp["result"])
+    if actual_btc is None:
+        log_event(
+            "BTC_RECONCILE_SKIPPED",
+            cycle_id=cycle_id,
+            reason="btc_balance_missing"
+        )
+        return []
+
+    open_sell_volume = sum(
+        positive_float(order.get("volume")) or 0.0
+        for order in state["open_sell_orders"].values()
+    )
+    open_buy_volume = sum(
+        positive_float(order.get("volume")) or 0.0
+        for order in state["open_buy_orders"].values()
+    )
+    tracked_total_volume = open_sell_volume + open_buy_volume
+    tolerance = max(10 ** (-VOLUME_DECIMALS), 0.00000002)
+    excess_volume = tracked_total_volume - actual_btc
+
+    log_event(
+        "BTC_RECONCILE_CHECK",
+        cycle_id=cycle_id,
+        actual_btc=round(actual_btc, 8),
+        tracked_open_buy_volume=round(open_buy_volume, 8),
+        tracked_open_sell_volume=round(open_sell_volume, 8),
+        tracked_total_volume=round(tracked_total_volume, 8),
+        excess_volume=round(excess_volume, 8)
+    )
+
+    if excess_volume <= tolerance:
+        return []
+
+    removable_orders = []
+    for level, order in state["open_buy_orders"].items():
+        order_volume = positive_float(order.get("volume")) or 0.0
+        placed_at = parse_iso8601(order.get("placed_at")) or datetime.min.replace(
+            tzinfo=timezone.utc
+        )
+        removable_orders.append((placed_at, level, order, order_volume))
+
+    removable_orders.sort(key=lambda item: item[0])
+    reconciled_levels = []
+    removed_volume = 0.0
+
+    for _, level, order, order_volume in removable_orders:
+        if excess_volume - removed_volume <= tolerance:
+            break
+        removed_volume += order_volume
+        reconciled_levels.append(level)
+        log_event(
+            "BTC_RECONCILE_DROP_BUY",
+            cycle_id=cycle_id,
+            level=level,
+            txid=order.get("txid"),
+            volume=round(order_volume, VOLUME_DECIMALS),
+            buy_price=round(
+                positive_float(order.get("price", level)) or float(level),
+                PRICE_DECIMALS
+            ),
+            buy_source=order.get("buy_source"),
+            reason="tracked_volume_exceeds_actual_btc"
+        )
+
+    for level in reconciled_levels:
+        state["open_buy_orders"].pop(level, None)
+
+    if reconciled_levels:
+        save_state(state)
+        log_and_console(
+            "BTC_RECONCILED",
+            message=(
+                f"Removed {len(reconciled_levels)} stale filled buys after "
+                f"BTC inventory mismatch"
+            ),
+            cycle_id=cycle_id,
+            removed_levels=reconciled_levels,
+            removed_volume=round(removed_volume, 8),
+            actual_btc=round(actual_btc, 8),
+            tracked_total_volume=round(tracked_total_volume, 8)
+        )
+
+    return reconciled_levels
+
+
 # ----------------------
 # MAIN LOOP
 # ----------------------
@@ -1488,6 +1599,10 @@ def main():
                 price_regime.get("price_median_24h"),
                 median
             )
+
+            reconciled_levels = reconcile_btc_inventory(cycle_id)
+            if reconciled_levels:
+                actions.append("btc_reconciled")
 
             order_status_map = get_order_statuses(
                 list(state["open_sell_orders"].keys())
