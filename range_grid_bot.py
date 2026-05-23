@@ -1486,11 +1486,15 @@ def main():
                         age_minutes,
                         sell_pct_override
                     )
-                    adjusted_profit_target = max(
-                        min_profit_target_pct,
-                        adjusted_profit_target
-                        - regime["extra_aging_reduction_pct"]
-                    )
+                    if (
+                        age_minutes is not None
+                        and age_minutes >= aging_start_minutes
+                    ):
+                        adjusted_profit_target = max(
+                            min_profit_target_pct,
+                            adjusted_profit_target
+                            - regime["extra_aging_reduction_pct"]
+                        )
 
                     if buy_price is None or current_sell_price is None:
                         continue
