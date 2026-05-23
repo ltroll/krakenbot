@@ -12,6 +12,7 @@ import os
 import statistics
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 
 import krakenex
 import requests
@@ -466,7 +467,7 @@ def next_nonce():
 
 
 def kraken_signature(endpoint, data):
-    postdata = "&".join([f"{k}={v}" for k, v in data.items()])
+    postdata = urlencode(data)
     encoded = (str(data["nonce"]) + postdata).encode()
     message = endpoint.encode() + hashlib.sha256(encoded).digest()
     mac = hmac.new(
