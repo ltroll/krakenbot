@@ -1291,7 +1291,17 @@ def kraken_reserved_sell_volume(open_orders_result):
             continue
 
         pair = descr.get("pair")
-        if pair not in (KRAKEN_PAIR, "XBT/USD", "XXBTZUSD"):
+        normalized_pair = (
+            str(pair or "")
+            .upper()
+            .replace("/", "")
+            .replace("-", "")
+        )
+        if not (
+            normalized_pair == KRAKEN_PAIR.upper()
+            or ("XBT" in normalized_pair and "USD" in normalized_pair)
+            or ("XXBT" in normalized_pair and "ZUSD" in normalized_pair)
+        ):
             continue
 
         remaining = positive_float(order.get("vol")) or 0.0
