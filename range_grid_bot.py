@@ -57,6 +57,12 @@ KRAKEN_NONCE_RETRIES = int(os.getenv("KRAKEN_NONCE_RETRIES", "2"))
 KRAKEN_LOCKOUT_COOLDOWN_SECONDS = int(
     os.getenv("KRAKEN_LOCKOUT_COOLDOWN_SECONDS", "300")
 )
+SELL_INSUFFICIENT_FUNDS_COOLDOWN_SECONDS = int(
+    os.getenv(
+        "SELL_INSUFFICIENT_FUNDS_COOLDOWN_SECONDS",
+        str(KRAKEN_LOCKOUT_COOLDOWN_SECONDS)
+    )
+)
 
 
 def parse_strategy_modes(raw_value):
@@ -570,6 +576,7 @@ def load_state():
         "open_sell_orders": {},
         "last_nonce": 0,
         "private_api_backoff_until": 0,
+        "sell_insufficient_funds_backoff_until": 0,
         "range_low": None,
         "range_high": None,
         "range_mean": None,
@@ -631,7 +638,9 @@ def normalize_state(state):
                 "placed_at": order.get("placed_at"),
                 "sell_pct_override": order.get("sell_pct_override"),
                 "buy_source": order.get("buy_source"),
-                "trade_id": order.get("trade_id") or order.get("txid")
+                "trade_id": order.get("trade_id") or order.get("txid"),
+                "sell_retry_after": order.get("sell_retry_after"),
+                "sell_failure_reason": order.get("sell_failure_reason")
             }
         else:
             normalized_buy_orders[level] = {
@@ -641,7 +650,9 @@ def normalize_state(state):
                 "placed_at": None,
                 "sell_pct_override": None,
                 "buy_source": None,
-                "trade_id": None
+                "trade_id": None,
+                "sell_retry_after": None,
+                "sell_failure_reason": None
             }
 
     for txid, order in state["open_sell_orders"].items():
@@ -991,6 +1002,13 @@ def compute_sell_target_price(buy_price, profit_target_override=None):
         else profit_target_override
     )
     return buy_price * (1 + profit_target + round_trip_fee_pct)
+
+
+def sell_backoff_remaining_seconds():
+    backoff_until = float(
+        state.get("sell_insufficient_funds_backoff_until", 0) or 0
+    )
+    return max(0.0, backoff_until - time.time())
 
 
 def find_existing_sell_for_buy(level, order):
@@ -1738,6 +1756,37 @@ def main():
                 if status != "closed":
                     continue
 
+                sell_backoff_remaining = sell_backoff_remaining_seconds()
+                order_sell_retry_after = parse_iso8601(
+                    order.get("sell_retry_after")
+                )
+                if sell_backoff_remaining > 0:
+                    actions.append("sell_backoff_active")
+                    log_event(
+                        "SELL_BACKOFF_ACTIVE",
+                        cycle_id=cycle_id,
+                        level=level,
+                        txid=txid,
+                        wait_seconds=round(sell_backoff_remaining, 2),
+                        reason=order.get("sell_failure_reason")
+                        or "insufficient_funds"
+                    )
+                    continue
+                if (
+                    order_sell_retry_after is not None
+                    and now < order_sell_retry_after
+                ):
+                    actions.append("sell_retry_deferred")
+                    log_event(
+                        "SELL_RETRY_DEFERRED",
+                        cycle_id=cycle_id,
+                        level=level,
+                        txid=txid,
+                        retry_after=order.get("sell_retry_after"),
+                        reason=order.get("sell_failure_reason")
+                    )
+                    continue
+
                 buy_price = float(level)
                 sell_pct_override = order.get("sell_pct_override")
                 buy_source = order.get("buy_source")
@@ -1766,6 +1815,8 @@ def main():
                     hold_minutes=hold_minutes,
                     sell_pct_override=sell_pct_override
                 )
+                order.pop("sell_retry_after", None)
+                order.pop("sell_failure_reason", None)
 
                 log_event(
                     "TRADE_DECISION",
@@ -1830,6 +1881,40 @@ def main():
                             None if not sell_resp
                             else sell_resp.get("error")
                         )
+                    )
+                    cooldown_seconds = (
+                        SELL_INSUFFICIENT_FUNDS_COOLDOWN_SECONDS
+                    )
+                    failure_reason = "sell_rejected"
+                    if (
+                        not sell_resp
+                        and "insufficient funds"
+                        in (order.get("sell_failure_reason") or "").lower()
+                    ):
+                        failure_reason = "insufficient_funds"
+                    if not sell_resp:
+                        failure_reason = "insufficient_funds"
+                    retry_after = (
+                        now + timedelta(seconds=cooldown_seconds)
+                    ).isoformat()
+                    order["sell_retry_after"] = retry_after
+                    order["sell_failure_reason"] = failure_reason
+                    if failure_reason == "insufficient_funds":
+                        state["sell_insufficient_funds_backoff_until"] = max(
+                            float(state.get(
+                                "sell_insufficient_funds_backoff_until",
+                                0
+                            ) or 0),
+                            time.time() + cooldown_seconds
+                        )
+                    save_state(state)
+                    log_event(
+                        "SELL_RETRY_SCHEDULED",
+                        cycle_id=cycle_id,
+                        level=level,
+                        txid=order.get("txid"),
+                        retry_after=retry_after,
+                        reason=failure_reason
                     )
                     existing_sell_txid, existing_sell_order, match_reason = (
                         find_existing_sell_for_buy(level, order)
