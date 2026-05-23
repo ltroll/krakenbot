@@ -993,6 +993,40 @@ def compute_sell_target_price(buy_price, profit_target_override=None):
     return buy_price * (1 + profit_target + round_trip_fee_pct)
 
 
+def find_existing_sell_for_buy(level, order):
+    buy_trade_id = order.get("trade_id") or order.get("txid")
+    buy_source = order.get("buy_source")
+    buy_volume = positive_float(order.get("volume"))
+    buy_price = positive_float(order.get("price", level))
+    level_str = str(level)
+
+    for sell_txid, sell_order in state["open_sell_orders"].items():
+        sell_trade_id = sell_order.get("trade_id")
+        if buy_trade_id and sell_trade_id == buy_trade_id:
+            return sell_txid, sell_order, "trade_id"
+
+        sell_level = str(sell_order.get("level"))
+        sell_source = sell_order.get("buy_source")
+        sell_volume = positive_float(sell_order.get("volume"))
+        sell_buy_price = positive_float(sell_order.get("buy_price"))
+
+        if (
+            sell_level == level_str
+            and sell_source == buy_source
+            and buy_volume is not None
+            and sell_volume is not None
+            and round(sell_volume, VOLUME_DECIMALS)
+            == round(buy_volume, VOLUME_DECIMALS)
+            and buy_price is not None
+            and sell_buy_price is not None
+            and round(sell_buy_price, PRICE_DECIMALS)
+            == round(buy_price, PRICE_DECIMALS)
+        ):
+            return sell_txid, sell_order, "level_volume_price"
+
+    return None, None, None
+
+
 def normalize_llm_sell_pct(raw_sell_pct):
     if raw_sell_pct is None:
         return None
@@ -1744,6 +1778,35 @@ def main():
                     buy_source=buy_source
                 )
 
+                existing_sell_txid, existing_sell_order, match_reason = (
+                    find_existing_sell_for_buy(level, order)
+                )
+                if existing_sell_txid:
+                    del state["open_buy_orders"][level]
+                    save_state(state)
+                    actions.append("buy_reconciled_to_existing_sell")
+
+                    log_and_console(
+                        "BUY_RECONCILED_TO_OPEN_SELL",
+                        message=(
+                            f"BUY level {level} already tracked by open sell "
+                            f"{existing_sell_txid}"
+                        ),
+                        cycle_id=cycle_id,
+                        buy_txid=order.get("txid"),
+                        sell_txid=existing_sell_txid,
+                        level=level,
+                        volume=round(order["volume"], VOLUME_DECIMALS),
+                        buy_price=round(buy_price, PRICE_DECIMALS),
+                        sell_price=round(
+                            existing_sell_order.get("sell_price", sell_price),
+                            PRICE_DECIMALS
+                        ),
+                        buy_source=buy_source,
+                        match_reason=match_reason
+                    )
+                    continue
+
                 sell_resp = kraken_call(
                     "SELL",
                     place_sell,
@@ -1768,6 +1831,32 @@ def main():
                             else sell_resp.get("error")
                         )
                     )
+                    existing_sell_txid, existing_sell_order, match_reason = (
+                        find_existing_sell_for_buy(level, order)
+                    )
+                    if existing_sell_txid:
+                        del state["open_buy_orders"][level]
+                        save_state(state)
+                        actions.append("buy_reconciled_after_sell_reject")
+                        log_and_console(
+                            "BUY_RECONCILED_AFTER_SELL_REJECT",
+                            message=(
+                                f"BUY level {level} already tracked by open sell "
+                                f"{existing_sell_txid} after rejected sell attempt"
+                            ),
+                            cycle_id=cycle_id,
+                            buy_txid=order.get("txid"),
+                            sell_txid=existing_sell_txid,
+                            level=level,
+                            volume=round(order["volume"], VOLUME_DECIMALS),
+                            buy_price=round(buy_price, PRICE_DECIMALS),
+                            sell_price=round(
+                                existing_sell_order.get("sell_price", sell_price),
+                                PRICE_DECIMALS
+                            ),
+                            buy_source=buy_source,
+                            match_reason=match_reason
+                        )
                     continue
 
                 txid = sell_resp["result"]["txid"][0]
