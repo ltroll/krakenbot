@@ -159,6 +159,8 @@ profit_target_pct = profile_float("profit_target_pct", 0.01)
 entry_step_pct = profile_float("entry_step_pct", profit_target_pct / 2)
 round_trip_fee_pct = profile_float("round_trip_fee_pct", 0.0032)
 position_size_pct = profile_float("position_size_pct", 0.10)
+min_buy_notional_usd = profile_float("min_buy_notional_usd", 8.0)
+min_buy_volume_btc = profile_float("min_buy_volume_btc", 0.00010)
 execution_signal_threshold = profile_float("execution_signal_threshold", 0.0)
 llm_target_proximity_pct = profile_float(
     "llm_target_proximity_pct",
@@ -1224,6 +1226,8 @@ def main():
         entry_step_pct=entry_step_pct,
         round_trip_fee_pct=round_trip_fee_pct,
         position_size_pct=position_size_pct,
+        min_buy_notional_usd=min_buy_notional_usd,
+        min_buy_volume_btc=min_buy_volume_btc,
         execution_signal_threshold=execution_signal_threshold,
         llm_target_proximity_pct=llm_target_proximity_pct,
         llm_target_min_signal=llm_target_min_signal,
@@ -1979,9 +1983,16 @@ def main():
                         * effective_position_size_pct
                         * flow_control["size_multiplier"]
                     ) / level
+                    trade_notional_usd = level * volume
                     projected_inventory_usd = deployed_inventory_usd + (
                         level * volume
                     )
+
+                    if (
+                        skip_reason is None
+                        and trade_notional_usd < min_buy_notional_usd
+                    ):
+                        skip_reason = "below_min_notional"
 
                     if (
                         skip_reason is None
@@ -1989,7 +2000,7 @@ def main():
                     ):
                         skip_reason = "max_inventory_usd"
 
-                    if skip_reason is None and volume < 0.00005:
+                    if skip_reason is None and volume < min_buy_volume_btc:
                         skip_reason = "below_min_volume"
 
                     if skip_reason is not None:
@@ -2000,6 +2011,7 @@ def main():
                             market_price=price,
                             execution_signal=execution_signal,
                             usd_balance=usd,
+                            trade_notional_usd=round(trade_notional_usd, 8),
                             deployed_inventory_usd=deployed_inventory_usd,
                             high_anchor_order_count=high_anchor_order_count,
                             high_anchor_cooldown_remaining_minutes=round(
@@ -2037,6 +2049,7 @@ def main():
                         cycle_id=cycle_id,
                         side="buy",
                         volume=round(volume, VOLUME_DECIMALS),
+                        trade_notional_usd=round(trade_notional_usd, 8),
                         price=round(level, PRICE_DECIMALS),
                         execution_signal=execution_signal,
                         range_low=low,
