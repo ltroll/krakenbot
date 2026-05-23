@@ -1270,6 +1270,37 @@ def kraken_btc_balance(balance_result):
     return None
 
 
+def kraken_reserved_sell_volume(open_orders_result):
+    if not isinstance(open_orders_result, dict):
+        return None
+
+    open_orders = open_orders_result.get("open")
+    if not isinstance(open_orders, dict):
+        return None
+
+    reserved_volume = 0.0
+    for order in open_orders.values():
+        if not isinstance(order, dict):
+            continue
+
+        descr = order.get("descr", {})
+        if not isinstance(descr, dict):
+            continue
+
+        if descr.get("type") != "sell":
+            continue
+
+        pair = descr.get("pair")
+        if pair not in (KRAKEN_PAIR, "XBT/USD", "XXBTZUSD"):
+            continue
+
+        remaining = positive_float(order.get("vol")) or 0.0
+        executed = positive_float(order.get("vol_exec")) or 0.0
+        reserved_volume += max(0.0, remaining - executed)
+
+    return reserved_volume
+
+
 def reconcile_btc_inventory(cycle_id):
     if not state["open_buy_orders"]:
         return []
@@ -1292,6 +1323,27 @@ def reconcile_btc_inventory(cycle_id):
         )
         return []
 
+    open_orders_resp = safe_kraken_private(
+        "OPEN_ORDERS_RECONCILE",
+        "/0/private/OpenOrders"
+    )
+    if not open_orders_resp or "result" not in open_orders_resp:
+        log_event(
+            "BTC_RECONCILE_SKIPPED",
+            cycle_id=cycle_id,
+            reason="open_orders_fetch_failed"
+        )
+        return []
+
+    kraken_reserved_sell = kraken_reserved_sell_volume(open_orders_resp["result"])
+    if kraken_reserved_sell is None:
+        log_event(
+            "BTC_RECONCILE_SKIPPED",
+            cycle_id=cycle_id,
+            reason="reserved_sell_volume_missing"
+        )
+        return []
+
     open_sell_volume = sum(
         positive_float(order.get("volume")) or 0.0
         for order in state["open_sell_orders"].values()
@@ -1301,13 +1353,16 @@ def reconcile_btc_inventory(cycle_id):
         for order in state["open_buy_orders"].values()
     )
     tracked_total_volume = open_sell_volume + open_buy_volume
+    available_btc_for_new_sells = max(0.0, actual_btc - kraken_reserved_sell)
     tolerance = max(10 ** (-VOLUME_DECIMALS), 0.00000002)
-    excess_volume = tracked_total_volume - actual_btc
+    excess_volume = open_buy_volume - available_btc_for_new_sells
 
     log_event(
         "BTC_RECONCILE_CHECK",
         cycle_id=cycle_id,
         actual_btc=round(actual_btc, 8),
+        kraken_reserved_sell_volume=round(kraken_reserved_sell, 8),
+        available_btc_for_new_sells=round(available_btc_for_new_sells, 8),
         tracked_open_buy_volume=round(open_buy_volume, 8),
         tracked_open_sell_volume=round(open_sell_volume, 8),
         tracked_total_volume=round(tracked_total_volume, 8),
@@ -1363,6 +1418,8 @@ def reconcile_btc_inventory(cycle_id):
             removed_levels=reconciled_levels,
             removed_volume=round(removed_volume, 8),
             actual_btc=round(actual_btc, 8),
+            kraken_reserved_sell_volume=round(kraken_reserved_sell, 8),
+            available_btc_for_new_sells=round(available_btc_for_new_sells, 8),
             tracked_total_volume=round(tracked_total_volume, 8)
         )
 
