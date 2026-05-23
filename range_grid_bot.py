@@ -222,6 +222,17 @@ high_anchor_profit_target_pct = profile_float(
     "high_anchor_profit_target_pct",
     profit_target_pct
 )
+prevent_buy_above_last_sell = bool(
+    strategy_config.get("prevent_buy_above_last_sell", True)
+)
+buy_after_sell_discount_pct = profile_float(
+    "buy_after_sell_discount_pct",
+    0.001
+)
+llm_buy_cooldown_minutes_after_sell = profile_int(
+    "llm_buy_cooldown_minutes_after_sell",
+    30
+)
 sentiment_defensive_threshold = profile_float(
     "sentiment_defensive_threshold",
     max(0.03, execution_signal_threshold)
@@ -563,6 +574,9 @@ def load_state():
         "range_median": None,
         "last_range_refresh": None,
         "last_high_anchor_buy_at": None,
+        "last_sell_price": None,
+        "last_sell_at": None,
+        "last_llm_sell_at": None,
         "stats": {
             "buy_orders_placed": 0,
             "buy_orders_filled": 0,
@@ -875,6 +889,16 @@ def high_anchor_cooldown_remaining_minutes(now):
 
     elapsed_minutes = (now - last_buy_at).total_seconds() / 60
     return max(0, high_anchor_buy_cooldown_minutes - elapsed_minutes)
+
+
+def llm_sell_cooldown_remaining_minutes(now):
+    last_sell_at = parse_iso8601(state.get("last_llm_sell_at"))
+
+    if last_sell_at is None:
+        return 0
+
+    elapsed_minutes = (now - last_sell_at).total_seconds() / 60
+    return max(0, llm_buy_cooldown_minutes_after_sell - elapsed_minutes)
 
 
 # ----------------------
@@ -1231,6 +1255,11 @@ def main():
         high_anchor_buy_cooldown_minutes=high_anchor_buy_cooldown_minutes,
         max_open_high_anchor_orders=max_open_high_anchor_orders,
         high_anchor_profit_target_pct=high_anchor_profit_target_pct,
+        prevent_buy_above_last_sell=prevent_buy_above_last_sell,
+        buy_after_sell_discount_pct=buy_after_sell_discount_pct,
+        llm_buy_cooldown_minutes_after_sell=(
+            llm_buy_cooldown_minutes_after_sell
+        ),
         sentiment_defensive_threshold=sentiment_defensive_threshold,
         sentiment_risk_on_threshold=sentiment_risk_on_threshold,
         sentiment_defensive_size_multiplier=(
@@ -1445,6 +1474,10 @@ def main():
 
                     sell_level = order.get("level")
                     del state["open_sell_orders"][txid]
+                    state["last_sell_price"] = sell_price
+                    state["last_sell_at"] = cycle_id
+                    if order.get("buy_source") == "llm_target":
+                        state["last_llm_sell_at"] = cycle_id
                     state["stats"]["sell_orders_filled"] += 1
                     if gross_pnl is not None:
                         state["stats"]["realized_gross_pnl"] += gross_pnl
@@ -1870,6 +1903,10 @@ def main():
                     sell_order.get("level")
                     for sell_order in state["open_sell_orders"].values()
                 }
+                last_sell_price = positive_float(state.get("last_sell_price"))
+                llm_sell_cooldown_remaining = (
+                    llm_sell_cooldown_remaining_minutes(now)
+                )
                 deployed_inventory_usd = current_inventory_usd(price)
                 high_anchor_order_count = high_anchor_open_order_count()
                 high_anchor_cooldown_remaining = (
@@ -1888,6 +1925,14 @@ def main():
                         skip_reason = "open_buy_order"
                     elif key in reserved_sell_levels:
                         skip_reason = "open_sell_order"
+                    elif (
+                        prevent_buy_above_last_sell
+                        and last_sell_price is not None
+                        and level > (
+                            last_sell_price * (1 - buy_after_sell_discount_pct)
+                        )
+                    ):
+                        skip_reason = "above_last_sell_discount"
                     elif (
                         mean_reversion_opportunity < mean_reversion_min_opportunity
                     ):
@@ -1913,6 +1958,11 @@ def main():
                         skip_reason = "strategy_signal_below_min"
                     elif flow_control["block_buy"]:
                         skip_reason = flow_control["reason"]
+                    elif (
+                        buy_source == "llm_target"
+                        and llm_sell_cooldown_remaining > 0
+                    ):
+                        skip_reason = "llm_sell_cooldown"
                     elif (
                         buy_source == "range_high_band"
                         and high_anchor_cooldown_remaining > 0
@@ -1956,6 +2006,11 @@ def main():
                                 high_anchor_cooldown_remaining,
                                 2
                             ),
+                            llm_sell_cooldown_remaining_minutes=round(
+                                llm_sell_cooldown_remaining,
+                                2
+                            ),
+                            last_sell_price=last_sell_price,
                             sentiment_regime=regime["name"],
                             effective_position_size_pct=(
                                 effective_position_size_pct
@@ -1996,6 +2051,7 @@ def main():
                         mean_reversion_opportunity=mean_reversion_opportunity,
                         buy_source=buy_source,
                         high_anchor_order_count=high_anchor_order_count,
+                        last_sell_price=last_sell_price,
                         sell_pct_override=active_sell_pct_override
                     )
 
