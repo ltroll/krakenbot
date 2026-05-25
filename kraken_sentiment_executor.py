@@ -269,6 +269,9 @@ DECISION_CSV_FIELDS = [
     "effective_risk_multiplier",
     "signal_status",
     "bot_action_allowed",
+    "action_recommendation",
+    "action_policy_reason",
+    "contributor_count",
     "signal_age_minutes",
     "source_status_result",
     "mean_reversion_opportunity",
@@ -886,6 +889,10 @@ def normalize_signal(signal):
     if not isinstance(source_status, dict):
         source_status = {}
 
+    action_policy = signal.get("action_policy")
+    if not isinstance(action_policy, dict):
+        action_policy = {}
+
     target_prices = signal.get("target_prices")
     if not isinstance(target_prices, list):
         target_prices = []
@@ -907,6 +914,9 @@ def normalize_signal(signal):
         "fear_greed_index": signal.get("fear_greed_index"),
         "signal_status": signal.get("signal_status"),
         "bot_action_allowed": signal.get("bot_action_allowed"),
+        "action_recommendation": signal.get("action_recommendation"),
+        "action_policy": action_policy,
+        "contributor_count": signal.get("contributor_count"),
         "reason": signal.get("reason"),
         "processed_at": signal.get("processed_at"),
         "price_regime": price_regime,
@@ -1801,6 +1811,9 @@ def run_cycle():
     )
     flow_pressure = numeric_or_none(sentiment.get("flow_pressure"))
     target_profit_pct = dynamic_target_profit_pct(sentiment, weighted_signal)
+    action_policy = sentiment.get("action_policy", {})
+    action_policy_reason = action_policy.get("reason") or sentiment.get("reason")
+    action_recommendation = sentiment.get("action_recommendation")
 
     log_event(
         "SIGNAL_UPDATE",
@@ -1820,6 +1833,9 @@ def run_cycle():
         effective_risk_multiplier=effective_multiplier,
         signal_status=sentiment.get("signal_status"),
         bot_action_allowed=sentiment.get("bot_action_allowed"),
+        action_recommendation=action_recommendation,
+        action_policy_reason=action_policy_reason,
+        contributor_count=sentiment.get("contributor_count"),
         signal_age_minutes=age_minutes,
         mean_reversion_opportunity=mean_reversion_opportunity,
         range_position_24h=range_position,
@@ -1846,44 +1862,28 @@ def run_cycle():
         )
         return
 
-    if confidence < CONF_THRESHOLD:
+    if action_recommendation != "bullish_allowed":
         skip_cycle(
-            "low_confidence",
+            "action_policy_" + (action_recommendation or "missing"),
             cycle_id,
             price=price,
             execution_signal=raw_signal,
             smoothed_signal=smoothed_signal,
             weighted_signal=weighted_signal,
             confidence=confidence,
-            confidence_threshold=CONF_THRESHOLD
+            action_recommendation=action_recommendation,
+            action_policy_reason=action_policy_reason,
+            contributor_count=sentiment.get("contributor_count"),
+            bot_action_allowed=sentiment.get("bot_action_allowed")
         )
         return
 
-    allow_market_buy = weighted_signal >= SENTIMENT_BUY_THRESHOLD
+    target_limit_candidates = target_limit_orders(sentiment, price, 1)
     allow_target_limit_buy = (
-        weighted_signal < SENTIMENT_BUY_THRESHOLD
-        and mean_reversion_setup_allowed(sentiment)
-        and bool(target_limit_orders(sentiment, price, 1))
+        mean_reversion_setup_allowed(sentiment)
+        and bool(target_limit_candidates)
     )
-
-    if not allow_market_buy and not allow_target_limit_buy:
-        skip_cycle(
-            "sentiment_below_buy_threshold",
-            cycle_id,
-            price=price,
-            execution_signal=raw_signal,
-            smoothed_signal=smoothed_signal,
-            weighted_signal=weighted_signal,
-            confidence=confidence,
-            sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD,
-            mean_reversion_opportunity=mean_reversion_opportunity,
-            range_position_24h=range_position,
-            flow_pressure=flow_pressure,
-            target_profit_pct=target_profit_pct,
-            round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
-            gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT
-        )
-        return
+    allow_market_buy = not allow_target_limit_buy
 
     price_high = numeric_or_none(price_regime.get("price_high_24h"))
     if price_high is not None and HIGH_PRICE_BUY_BLOCK_PCT >= 0:
@@ -2053,7 +2053,9 @@ def run_cycle():
                 smoothed_signal=smoothed_signal,
                 weighted_signal=weighted_signal,
                 confidence=confidence,
-                sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD,
+                action_recommendation=action_recommendation,
+                action_policy_reason=action_policy_reason,
+                contributor_count=sentiment.get("contributor_count"),
                 target_profit_pct=target_profit_pct,
                 round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
                 gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
@@ -2079,6 +2081,9 @@ def run_cycle():
                 smoothed_signal=smoothed_signal,
                 weighted_signal=weighted_signal,
                 confidence=confidence,
+                action_recommendation=action_recommendation,
+                action_policy_reason=action_policy_reason,
+                contributor_count=sentiment.get("contributor_count"),
                 dry_run=DRY_RUN,
                 target_profit_pct=target_profit_pct,
                 round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
@@ -2124,6 +2129,9 @@ def run_cycle():
                 smoothed_signal=smoothed_signal,
                 weighted_signal=weighted_signal,
                 confidence=confidence,
+                action_recommendation=action_recommendation,
+                action_policy_reason=action_policy_reason,
+                contributor_count=sentiment.get("contributor_count"),
                 dry_run=DRY_RUN,
                 order_txid=txids[0] if txids else "",
                 target_profit_pct=target_profit_pct,
@@ -2155,6 +2163,7 @@ def run_cycle():
             smoothed_signal=smoothed_signal,
             weighted_signal=weighted_signal,
             confidence=confidence,
+            action_recommendation=action_recommendation,
             side="buy",
             reason="mean_reversion_target_limit_buy",
             trade_value=trade_value,
@@ -2197,7 +2206,9 @@ def run_cycle():
         smoothed_signal=smoothed_signal,
         weighted_signal=weighted_signal,
         confidence=confidence,
-        sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD,
+        action_recommendation=action_recommendation,
+        action_policy_reason=action_policy_reason,
+        contributor_count=sentiment.get("contributor_count"),
         target_profit_pct=target_profit_pct,
         round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
         gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
@@ -2218,6 +2229,9 @@ def run_cycle():
         smoothed_signal=smoothed_signal,
         weighted_signal=weighted_signal,
         confidence=confidence,
+        action_recommendation=action_recommendation,
+        action_policy_reason=action_policy_reason,
+        contributor_count=sentiment.get("contributor_count"),
         dry_run=DRY_RUN,
         target_profit_pct=target_profit_pct,
         round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
@@ -2244,6 +2258,9 @@ def run_cycle():
         smoothed_signal=smoothed_signal,
         weighted_signal=weighted_signal,
         confidence=confidence,
+        action_recommendation=action_recommendation,
+        action_policy_reason=action_policy_reason,
+        contributor_count=sentiment.get("contributor_count"),
         dry_run=DRY_RUN,
         order_txid=txids[0] if txids else "",
         target_profit_pct=target_profit_pct,
@@ -2270,6 +2287,7 @@ def run_cycle():
         smoothed_signal=smoothed_signal,
         weighted_signal=weighted_signal,
         confidence=confidence,
+        action_recommendation=action_recommendation,
         side="buy",
         volume=volume,
         trade_value=trade_value,

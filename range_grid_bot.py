@@ -759,8 +759,22 @@ def get_sentiment():
                     if isinstance(data.get("source_status"), dict)
                     else {}
                 ),
+                "action_recommendation": data.get("action_recommendation"),
+                "action_policy": (
+                    data.get("action_policy")
+                    if isinstance(data.get("action_policy"), dict)
+                    else {}
+                ),
+                "contributor_count": data.get("contributor_count"),
                 "bot_action_allowed": data.get("bot_action_allowed"),
-                "action_reason": data.get("reason"),
+                "action_reason": (
+                    (
+                        data.get("action_policy", {}).get("reason")
+                        if isinstance(data.get("action_policy"), dict)
+                        else None
+                    )
+                    or data.get("reason")
+                ),
                 "processed_at": data.get("processed_at"),
                 "price_regime": (
                     data.get("price_regime")
@@ -785,7 +799,8 @@ def get_sentiment():
             "price_regime": {},
             "trend_snapshot": {},
             "kraken_flow": {},
-            "source_status": {}
+            "source_status": {},
+            "action_policy": {}
         }
     except Exception as e:
         log_event("SENTIMENT_ERROR", message=str(e))
@@ -1572,9 +1587,18 @@ def main():
             freshness_allows_trading, freshness_block_reason = (
                 source_status_allows_trading(signal_status, source_status)
             )
-            signal_allows_trading = sentiment_payload.get("bot_action_allowed")
-            if signal_allows_trading is None:
-                signal_allows_trading = True
+            source_guard_allows_trading = sentiment_payload.get(
+                "bot_action_allowed"
+            )
+            if source_guard_allows_trading is None:
+                source_guard_allows_trading = True
+            action_recommendation = (
+                sentiment_payload.get("action_recommendation") or "neutral"
+            )
+            action_policy = sentiment_payload.get("action_policy", {})
+            sentiment_allows_long = (
+                action_recommendation == "bullish_allowed"
+            )
             external_block_reason = sentiment_payload.get("action_reason")
             regime = sentiment_regime(execution_signal)
             effective_position_size_pct = (
@@ -1609,13 +1633,17 @@ def main():
                 direction_bias=sentiment_payload.get("direction_bias"),
                 raw_direction_bias=sentiment_payload.get("raw_direction_bias"),
                 fear_greed_index=sentiment_payload.get("fear_greed_index"),
+                contributor_count=sentiment_payload.get("contributor_count"),
                 llm_target_count=len(target_prices),
                 active_llm_target=(
                     None if llm_target is None
                     else round(llm_target["buy_price"], PRICE_DECIMALS)
                 ),
+                action_recommendation=action_recommendation,
+                action_policy_reason=action_policy.get("reason"),
                 signal_status=signal_status,
-                signal_allows_trading=signal_allows_trading,
+                signal_allows_trading=sentiment_allows_long,
+                source_guard_allows_trading=source_guard_allows_trading,
                 freshness_allows_trading=freshness_allows_trading,
                 freshness_block_reason=freshness_block_reason,
                 smoothed_risk_multiplier=smoothed_risk_multiplier,
@@ -2166,25 +2194,19 @@ def main():
             llm_buy_allowed = (
                 low and high
                 and llm_target is not None
-                and execution_signal >= llm_target_min_signal
                 and freshness_allows_trading
-                and signal_allows_trading
+                and source_guard_allows_trading
+                and sentiment_allows_long
                 and mean_reversion_opportunity >= mean_reversion_min_opportunity
             )
 
             # BUY CANDIDATES
             if (
                 freshness_allows_trading
-                and signal_allows_trading
+                and source_guard_allows_trading
+                and sentiment_allows_long
                 and effective_position_size_pct > 0
-                and low and high and (
-                llm_buy_allowed or execution_signal >= min(
-                    low_min_signal,
-                    mean_min_signal,
-                    median_min_signal,
-                    high_min_signal
-                )
-                )
+                and low and high
             ):
                 candidate_levels = []
                 if llm_buy_allowed:
@@ -2198,28 +2220,20 @@ def main():
                 else:
                     for strategy_mode in strategy_modes:
                         if strategy_mode == "mean":
-                            if execution_signal < mean_min_signal:
-                                continue
                             grid = compute_grid(low, high, mean)
                             sell_pct_override = None
                             buy_source = "range_mean"
                         elif strategy_mode == "median" and median is not None:
-                            if execution_signal < median_min_signal:
-                                continue
                             grid = compute_grid(low, high, median)
                             sell_pct_override = None
                             buy_source = "range_median"
                         elif strategy_mode == "high":
-                            if execution_signal < high_min_signal:
-                                continue
                             if not regime["allow_high_anchor"]:
                                 continue
                             grid = compute_high_anchor_grid(high, price)
                             sell_pct_override = high_anchor_profit_target_pct
                             buy_source = "range_high_band"
                         else:
-                            if execution_signal < low_min_signal:
-                                continue
                             grid = compute_grid(low, high, low)
                             sell_pct_override = None
                             buy_source = "range_low"
@@ -2308,14 +2322,14 @@ def main():
                         skip_reason = "max_inventory_usd"
                     elif (
                         buy_source == "llm_target"
-                        and execution_signal < llm_target_min_signal
+                        and not sentiment_allows_long
                     ):
-                        skip_reason = "llm_signal_below_min"
+                        skip_reason = "sentiment_action_not_bullish_allowed"
                     elif (
                         buy_source != "llm_target"
-                        and execution_signal < min_signal_for_buy_source(buy_source)
+                        and not sentiment_allows_long
                     ):
-                        skip_reason = "strategy_signal_below_min"
+                        skip_reason = "sentiment_action_not_bullish_allowed"
                     elif flow_control["block_buy"]:
                         skip_reason = flow_control["reason"]
                     elif (
@@ -2379,6 +2393,8 @@ def main():
                                 2
                             ),
                             last_sell_price=last_sell_price,
+                            action_recommendation=action_recommendation,
+                            action_policy_reason=action_policy.get("reason"),
                             sentiment_regime=regime["name"],
                             effective_position_size_pct=(
                                 effective_position_size_pct
@@ -2408,6 +2424,8 @@ def main():
                         trade_notional_usd=round(trade_notional_usd, 8),
                         price=round(level, PRICE_DECIMALS),
                         execution_signal=execution_signal,
+                        action_recommendation=action_recommendation,
+                        action_policy_reason=action_policy.get("reason"),
                         range_low=low,
                         range_high=high,
                         range_mean=mean,
@@ -2504,7 +2522,10 @@ def main():
                     signal_status=signal_status,
                     freshness_allows_trading=freshness_allows_trading,
                     freshness_block_reason=freshness_block_reason,
-                    signal_allows_trading=signal_allows_trading,
+                    signal_allows_trading=sentiment_allows_long,
+                    source_guard_allows_trading=source_guard_allows_trading,
+                    action_recommendation=action_recommendation,
+                    action_policy_reason=action_policy.get("reason"),
                     external_block_reason=external_block_reason,
                     smoothed_risk_multiplier=smoothed_risk_multiplier,
                     flow_pressure=flow_pressure,
@@ -2517,6 +2538,11 @@ def main():
                     sentiment_regime=regime["name"],
                     reason=(
                         freshness_block_reason
+                        or (
+                            None
+                            if sentiment_allows_long
+                            else f"action_recommendation_{action_recommendation}"
+                        )
                         or external_block_reason
                         or "signal_below_threshold_or_range_unavailable"
                     ),
@@ -2544,7 +2570,10 @@ def main():
                 signal_status=signal_status,
                 freshness_allows_trading=freshness_allows_trading,
                 freshness_block_reason=freshness_block_reason,
-                signal_allows_trading=signal_allows_trading,
+                signal_allows_trading=sentiment_allows_long,
+                source_guard_allows_trading=source_guard_allows_trading,
+                action_recommendation=action_recommendation,
+                action_policy_reason=action_policy.get("reason"),
                 external_block_reason=external_block_reason,
                 smoothed_risk_multiplier=smoothed_risk_multiplier,
                 flow_pressure=flow_pressure,
@@ -2594,13 +2623,12 @@ def main():
                         round(candidate["level"], PRICE_DECIMALS)
                         for candidate in deduped_candidates
                     ]
-                    if freshness_allows_trading and signal_allows_trading and low and high and (
-                        llm_buy_allowed or execution_signal >= min(
-                            low_min_signal,
-                            mean_min_signal,
-                            median_min_signal,
-                            high_min_signal
-                        )
+                    if (
+                        freshness_allows_trading
+                        and source_guard_allows_trading
+                        and sentiment_allows_long
+                        and low
+                        and high
                     )
                     else []
                 ),
