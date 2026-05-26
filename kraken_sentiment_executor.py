@@ -176,6 +176,14 @@ if BACKTEST_USD is None and os.getenv("BACKTEST_USD"):
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
 
 
+def key_fingerprint(value):
+    if not value:
+        return "missing"
+
+    digest = hashlib.sha256(value.encode()).hexdigest()[:12]
+    return f"sha256:{digest}"
+
+
 def load_json_file(path):
     with open(path, encoding="utf-8") as f:
         return json.load(f)
@@ -856,10 +864,12 @@ def safe_kraken_private(label, endpoint, data=None):
                 "KRAKEN_EXCEPTION",
                 operation=label,
                 message=message,
-                attempt=attempt
+                attempt=attempt,
+                kraken_api_url=KRAKEN_API_URL,
+                kraken_key_fingerprint=key_fingerprint(KRAKEN_API_KEY)
             )
 
-            if "Temporary lockout" in message:
+            if "Temporary lockout" in message or "Invalid key" in message:
                 pause_kraken_private_api(message)
                 return None
 
@@ -2914,6 +2924,8 @@ def main():
         state_file=STATE_FILE,
         log_file=LOG_FILE,
         pair=KRAKEN_PAIR,
+        kraken_api_url=KRAKEN_API_URL,
+        kraken_key_fingerprint=key_fingerprint(KRAKEN_API_KEY),
         dry_run=DRY_RUN,
         min_trade_usd=MIN_TRADE_USD,
         confidence_threshold=CONF_THRESHOLD,
