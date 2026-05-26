@@ -58,6 +58,16 @@ def parse_cli_args():
         )
     )
     parser.add_argument(
+        "--usd",
+        "--USD",
+        "--backtest-usd",
+        dest="backtest_usd",
+        type=float,
+        help=(
+            "Fixed USD allocation to emulate for each filled backtest trade."
+        )
+    )
+    parser.add_argument(
         "--backtest-min-trades",
         type=int,
         help="Minimum policy trades required by the backtest health gate."
@@ -160,6 +170,9 @@ RUN_BACKTEST = (
     or os.getenv("RUN_BACKTEST", "").strip().lower()
     in ("1", "true", "yes", "on")
 )
+BACKTEST_USD = CLI_ARGS.backtest_usd
+if BACKTEST_USD is None and os.getenv("BACKTEST_USD"):
+    BACKTEST_USD = float(os.getenv("BACKTEST_USD"))
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
 
 
@@ -1191,6 +1204,42 @@ def number_text(value):
     return f"{parsed:.2f}"
 
 
+def money_text(value):
+    if value is None:
+        return "n/a"
+
+    try:
+        return f"${float(value):,.2f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def metric_total_return_pct(metrics):
+    total_return = metrics.get("total_net_return_pct")
+    if total_return is not None:
+        return total_return
+
+    avg_return = metrics.get("avg_net_return_pct")
+    trades = metrics.get("trades")
+    if avg_return is None or trades is None:
+        return None
+
+    try:
+        return float(avg_return) * float(trades)
+    except (TypeError, ValueError):
+        return None
+
+
+def pct_to_money(pct_value, usd_amount):
+    if pct_value is None or usd_amount is None:
+        return None
+
+    try:
+        return float(usd_amount) * float(pct_value) / 100
+    except (TypeError, ValueError):
+        return None
+
+
 def backtest_strategy_names(backtest_kind):
     if backtest_kind == "replay":
         return "with_sentiment_policy", "price_target_only"
@@ -1211,7 +1260,37 @@ def strategy_recent_trades(backtest, strategy_name):
     return trades if isinstance(trades, list) else []
 
 
-def print_backtest_metric_block(label, metrics):
+def print_emulated_trade(trade, usd_amount):
+    net_return = trade.get("net_return_pct")
+    pnl = pct_to_money(net_return, usd_amount)
+    entry_price = trade.get("entry_price")
+    exit_price = trade.get("exit_price")
+    volume = None
+
+    try:
+        if entry_price:
+            volume = float(usd_amount) / float(entry_price)
+    except (TypeError, ValueError, ZeroDivisionError):
+        volume = None
+
+    proceeds = None if pnl is None else float(usd_amount) + pnl
+    parts = [
+        trade.get("decision_time", "n/a"),
+        f"buy={money_text(usd_amount)}",
+        f"entry={entry_price if entry_price is not None else 'n/a'}",
+        f"exit={exit_price if exit_price is not None else 'n/a'}",
+        f"reason={trade.get('exit_reason', 'n/a')}",
+        f"net={pct_text(net_return)}",
+        f"pnl={money_text(pnl)}",
+        f"proceeds={money_text(proceeds)}",
+    ]
+    if volume is not None:
+        parts.insert(3, f"btc={volume:.8f}")
+
+    print("  " + " | ".join(parts))
+
+
+def print_backtest_metric_block(label, metrics, usd_amount=None):
     print(f"{label}:")
     print(f"  trades: {number_text(metrics.get('trades'))}")
     print(f"  win rate: {win_rate_text(metrics.get('win_rate'))}")
@@ -1224,6 +1303,18 @@ def print_backtest_metric_block(label, metrics):
           f"{number_text(metrics.get('take_profit_count'))} / "
           f"{number_text(metrics.get('stop_loss_count'))} / "
           f"{number_text(metrics.get('timeout_count'))}")
+
+    if usd_amount is not None:
+        total_return = metric_total_return_pct(metrics)
+        avg_return = metrics.get("avg_net_return_pct")
+        max_drawdown = metrics.get("max_drawdown_pct")
+        print(f"  emulated allocation: {money_text(usd_amount)} per trade")
+        print(f"  estimated avg PnL/trade: "
+              f"{money_text(pct_to_money(avg_return, usd_amount))}")
+        print(f"  estimated total PnL: "
+              f"{money_text(pct_to_money(total_return, usd_amount))}")
+        print(f"  estimated max drawdown: "
+              f"{money_text(pct_to_money(max_drawdown, usd_amount))}")
 
     optional_counts = [
         ("candidate signals", "candidate_signals"),
@@ -1247,6 +1338,8 @@ def run_backtest_report():
     print(f"URL: {backtest_url or 'unset'}")
     print(f"strategy_profile: {STRATEGY_PROFILE}")
     print(f"min_trades: {BACKTEST_MIN_TRADES}")
+    if BACKTEST_USD is not None:
+        print(f"usd_per_trade: {money_text(BACKTEST_USD)}")
     print(
         "require_policy_beats_baseline: "
         f"{BACKTEST_REQUIRE_POLICY_BEATS_BASELINE}"
@@ -1282,9 +1375,9 @@ def run_backtest_report():
     print("")
 
     policy_name, baseline_name = backtest_strategy_names(backtest_kind)
-    print_backtest_metric_block(policy_name, policy)
+    print_backtest_metric_block(policy_name, policy, BACKTEST_USD)
     print("")
-    print_backtest_metric_block(baseline_name, baseline)
+    print_backtest_metric_block(baseline_name, baseline, BACKTEST_USD)
     print("")
 
     failure = evaluate_backtest_health(backtest)
@@ -1310,6 +1403,11 @@ def run_backtest_report():
             - float(baseline.get("avg_net_return_pct"))
         )
         print(f"Avg return delta vs baseline: {pct_text(return_delta)}")
+        if BACKTEST_USD is not None:
+            print(
+                "Avg PnL delta/trade vs baseline: "
+                f"{money_text(pct_to_money(return_delta, BACKTEST_USD))}"
+            )
 
     if (
         policy.get("max_drawdown_pct") is not None
@@ -1326,14 +1424,17 @@ def run_backtest_report():
         print("")
         print("Recent sentiment-policy trades:")
         for trade in recent_trades[-3:]:
-            print(
-                "  "
-                f"{trade.get('decision_time', 'n/a')} | "
-                f"entry={trade.get('entry_price', 'n/a')} | "
-                f"exit={trade.get('exit_price', 'n/a')} | "
-                f"reason={trade.get('exit_reason', 'n/a')} | "
-                f"net={pct_text(trade.get('net_return_pct'))}"
-            )
+            if BACKTEST_USD is not None:
+                print_emulated_trade(trade, BACKTEST_USD)
+            else:
+                print(
+                    "  "
+                    f"{trade.get('decision_time', 'n/a')} | "
+                    f"entry={trade.get('entry_price', 'n/a')} | "
+                    f"exit={trade.get('exit_price', 'n/a')} | "
+                    f"reason={trade.get('exit_reason', 'n/a')} | "
+                    f"net={pct_text(trade.get('net_return_pct'))}"
+                )
 
     return 0 if failure is None else 2
 
