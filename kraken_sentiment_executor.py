@@ -8,6 +8,7 @@ import base64
 import csv
 import hashlib
 import hmac
+import argparse
 import json
 import math
 import os
@@ -24,13 +25,86 @@ load_dotenv(dotenv_path=ENV_FILE, override=True)
 # CONFIG
 # ----------------------
 
+
+def parse_cli_args():
+    parser = argparse.ArgumentParser(
+        description="Run the Kraken sentiment executor service."
+    )
+    parser.add_argument(
+        "--strategy-profile",
+        help=(
+            "Strategy profile name or JSON file path. Overrides "
+            "SENTIMENT_STRATEGY_PROFILE/STRATEGY_PROFILE."
+        )
+    )
+    parser.add_argument(
+        "--bot-policy-backtest-url",
+        help="Backtest policy JSON URL. Overrides BOT_POLICY_BACKTEST_URL."
+    )
+    parser.add_argument(
+        "--backtest-min-trades",
+        type=int,
+        help="Minimum policy trades required by the backtest health gate."
+    )
+
+    backtest_gate = parser.add_mutually_exclusive_group()
+    backtest_gate.add_argument(
+        "--backtest-health-gate",
+        dest="backtest_health_gate",
+        action="store_true",
+        help="Enable the backtest health gate for this run."
+    )
+    backtest_gate.add_argument(
+        "--no-backtest-health-gate",
+        dest="backtest_health_gate",
+        action="store_false",
+        help="Disable the backtest health gate for this run."
+    )
+    parser.set_defaults(backtest_health_gate=None)
+
+    fail_mode = parser.add_mutually_exclusive_group()
+    fail_mode.add_argument(
+        "--backtest-fail-closed",
+        dest="backtest_fail_closed",
+        action="store_true",
+        help="Block buys if backtest data is missing or invalid."
+    )
+    fail_mode.add_argument(
+        "--backtest-fail-open",
+        dest="backtest_fail_closed",
+        action="store_false",
+        help="Allow buys if backtest data is missing or invalid."
+    )
+    parser.set_defaults(backtest_fail_closed=None)
+
+    baseline = parser.add_mutually_exclusive_group()
+    baseline.add_argument(
+        "--backtest-require-policy-beats-baseline",
+        dest="backtest_require_policy_beats_baseline",
+        action="store_true",
+        help="Require policy metrics to be at least as good as baseline."
+    )
+    baseline.add_argument(
+        "--no-backtest-require-policy-beats-baseline",
+        dest="backtest_require_policy_beats_baseline",
+        action="store_false",
+        help="Do not compare policy metrics to baseline for this run."
+    )
+    parser.set_defaults(backtest_require_policy_beats_baseline=None)
+
+    return parser.parse_args()
+
+
+CLI_ARGS = parse_cli_args()
+
 CONFIG_FILE = (
     os.getenv("SENTIMENT_CONFIG_FILE")
     or os.getenv("BOT_CONFIG_FILE")
     or "sentiment_bot_config.json"
 )
 STRATEGY_PROFILE = (
-    os.getenv("SENTIMENT_STRATEGY_PROFILE")
+    CLI_ARGS.strategy_profile
+    or os.getenv("SENTIMENT_STRATEGY_PROFILE")
     or os.getenv("STRATEGY_PROFILE")
     or "sentiment_strategy_default.json"
 )
@@ -55,6 +129,10 @@ KRAKEN_API_URL = os.getenv("KRAKEN_API_URL", "https://api.kraken.com")
 KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
 SIGNAL_FILE = os.getenv("SIGNAL_FILE")
+BOT_POLICY_BACKTEST_URL = (
+    CLI_ARGS.bot_policy_backtest_url
+    or os.getenv("BOT_POLICY_BACKTEST_URL")
+)
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
 
 
@@ -120,10 +198,36 @@ def profile_bool(name, default):
     if value is None:
         return default
 
+    return parse_bool(value)
+
+
+def parse_bool(value):
     if isinstance(value, bool):
         return value
 
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def env_profile_bool(env_name, profile_name, default, cli_value=None):
+    if cli_value is not None:
+        return cli_value
+
+    value = os.getenv(env_name)
+    if value is not None:
+        return parse_bool(value)
+
+    return profile_bool(profile_name, default)
+
+
+def env_profile_int(env_name, profile_name, default, cli_value=None):
+    if cli_value is not None:
+        return cli_value
+
+    value = os.getenv(env_name)
+    if value is not None:
+        return int(value)
+
+    return profile_int(profile_name, default)
 
 
 def profile_float(name, default):
@@ -226,6 +330,30 @@ MEAN_REVERSION_FLOW_PRESSURE_MIN = profile_float(
     "mean_reversion_flow_pressure_min",
     0.0
 )
+USE_BACKTEST_HEALTH_GATE = env_profile_bool(
+    "USE_BACKTEST_HEALTH_GATE",
+    "use_backtest_health_gate",
+    True,
+    CLI_ARGS.backtest_health_gate
+)
+BACKTEST_FAIL_CLOSED = env_profile_bool(
+    "BACKTEST_FAIL_CLOSED",
+    "backtest_fail_closed",
+    True,
+    CLI_ARGS.backtest_fail_closed
+)
+BACKTEST_MIN_TRADES = env_profile_int(
+    "BACKTEST_MIN_TRADES",
+    "backtest_min_trades",
+    5,
+    CLI_ARGS.backtest_min_trades
+)
+BACKTEST_REQUIRE_POLICY_BEATS_BASELINE = env_profile_bool(
+    "BACKTEST_REQUIRE_POLICY_BEATS_BASELINE",
+    "backtest_require_policy_beats_baseline",
+    True,
+    CLI_ARGS.backtest_require_policy_beats_baseline
+)
 
 PAIR_INFO_CACHE = None
 
@@ -283,7 +411,12 @@ DECISION_CSV_FIELDS = [
     "max_open_buy_orders",
     "price_high",
     "high_price_buy_block_pct",
-    "max_high_buy_price"
+    "max_high_buy_price",
+    "backtest_policy_trades",
+    "backtest_policy_win_rate",
+    "backtest_policy_avg_net_return_pct",
+    "backtest_baseline_win_rate",
+    "backtest_baseline_avg_net_return_pct"
 ]
 
 # ----------------------
@@ -867,6 +1000,80 @@ def load_signal():
     except Exception as e:
         log_event("SENTIMENT_ERROR", message=str(e))
         return None
+
+
+def load_backtest():
+    if not BOT_POLICY_BACKTEST_URL:
+        return None, "missing_backtest_url"
+
+    try:
+        r = requests.get(BOT_POLICY_BACKTEST_URL, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        return r.json(), None
+    except Exception as e:
+        log_event("BACKTEST_FETCH_ERROR", message=str(e))
+        return None, "backtest_unavailable"
+
+
+def backtest_health_failure():
+    if not USE_BACKTEST_HEALTH_GATE:
+        return None
+
+    backtest, error = load_backtest()
+    if backtest is None:
+        if BACKTEST_FAIL_CLOSED:
+            return {"reason": error or "backtest_unavailable"}
+        return None
+
+    bot_outputs = backtest.get("bot_outputs")
+    if not isinstance(bot_outputs, dict):
+        if BACKTEST_FAIL_CLOSED:
+            return {"reason": "backtest_missing_bot_outputs"}
+        return None
+
+    policy = bot_outputs.get("sentiment_long_policy")
+    baseline = bot_outputs.get("baseline_positive_signal")
+    if not isinstance(policy, dict) or not isinstance(baseline, dict):
+        if BACKTEST_FAIL_CLOSED:
+            return {"reason": "backtest_missing_strategy_outputs"}
+        return None
+
+    details = {
+        "backtest_policy_trades": policy.get("trades"),
+        "backtest_policy_win_rate": policy.get("win_rate"),
+        "backtest_policy_avg_net_return_pct": policy.get("avg_net_return_pct"),
+        "backtest_baseline_win_rate": baseline.get("win_rate"),
+        "backtest_baseline_avg_net_return_pct": baseline.get(
+            "avg_net_return_pct"
+        )
+    }
+
+    policy_trades = int(policy.get("trades") or 0)
+    if policy_trades < BACKTEST_MIN_TRADES:
+        details["reason"] = "backtest_insufficient_trades"
+        return details
+
+    if policy.get("win_rate") is None or policy.get("avg_net_return_pct") is None:
+        details["reason"] = "backtest_missing_policy_metrics"
+        return details
+
+    if BACKTEST_REQUIRE_POLICY_BEATS_BASELINE:
+        if (
+            baseline.get("win_rate") is None
+            or baseline.get("avg_net_return_pct") is None
+        ):
+            details["reason"] = "backtest_missing_baseline_metrics"
+            return details
+
+        if policy["win_rate"] < baseline["win_rate"]:
+            details["reason"] = "backtest_policy_win_rate_below_baseline"
+            return details
+
+        if policy["avg_net_return_pct"] < baseline["avg_net_return_pct"]:
+            details["reason"] = "backtest_policy_return_below_baseline"
+            return details
+
+    return None
 
 
 def normalize_signal(signal):
@@ -1878,6 +2085,24 @@ def run_cycle():
         )
         return
 
+    backtest_failure = backtest_health_failure()
+    if backtest_failure is not None:
+        reason = backtest_failure.pop("reason")
+        skip_cycle(
+            reason,
+            cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            action_recommendation=action_recommendation,
+            action_policy_reason=action_policy_reason,
+            contributor_count=sentiment.get("contributor_count"),
+            **backtest_failure
+        )
+        return
+
     target_limit_candidates = target_limit_orders(sentiment, price, 1)
     allow_target_limit_buy = (
         mean_reversion_setup_allowed(sentiment)
@@ -2357,6 +2582,13 @@ def main():
         mean_reversion_buy_threshold=MEAN_REVERSION_BUY_THRESHOLD,
         mean_reversion_range_position_max=MEAN_REVERSION_RANGE_POSITION_MAX,
         mean_reversion_flow_pressure_min=MEAN_REVERSION_FLOW_PRESSURE_MIN,
+        use_backtest_health_gate=USE_BACKTEST_HEALTH_GATE,
+        backtest_fail_closed=BACKTEST_FAIL_CLOSED,
+        backtest_min_trades=BACKTEST_MIN_TRADES,
+        backtest_require_policy_beats_baseline=(
+            BACKTEST_REQUIRE_POLICY_BEATS_BASELINE
+        ),
+        bot_policy_backtest_url=BOT_POLICY_BACKTEST_URL,
         decision_csv_file=DECISION_CSV_FILE,
         price_check_interval_seconds=PRICE_CHECK_INTERVAL_SECONDS
     )
