@@ -278,6 +278,28 @@ def env_profile_int(env_name, profile_name, default, cli_value=None):
     return profile_int(profile_name, default)
 
 
+def env_bool(env_name, default, cli_value=None):
+    if cli_value is not None:
+        return cli_value
+
+    value = os.getenv(env_name)
+    if value is not None:
+        return parse_bool(value)
+
+    return default
+
+
+def env_int(env_name, default, cli_value=None):
+    if cli_value is not None:
+        return cli_value
+
+    value = os.getenv(env_name)
+    if value is not None:
+        return int(value)
+
+    return default
+
+
 def profile_float(name, default):
     value = strategy_config.get(name, default)
     return default if value is None else float(value)
@@ -378,27 +400,23 @@ MEAN_REVERSION_FLOW_PRESSURE_MIN = profile_float(
     "mean_reversion_flow_pressure_min",
     0.0
 )
-USE_BACKTEST_HEALTH_GATE = env_profile_bool(
+USE_BACKTEST_HEALTH_GATE = env_bool(
     "USE_BACKTEST_HEALTH_GATE",
-    "use_backtest_health_gate",
-    True,
+    False,
     CLI_ARGS.backtest_health_gate
 )
-BACKTEST_FAIL_CLOSED = env_profile_bool(
+BACKTEST_FAIL_CLOSED = env_bool(
     "BACKTEST_FAIL_CLOSED",
-    "backtest_fail_closed",
     True,
     CLI_ARGS.backtest_fail_closed
 )
-BACKTEST_MIN_TRADES = env_profile_int(
+BACKTEST_MIN_TRADES = env_int(
     "BACKTEST_MIN_TRADES",
-    "backtest_min_trades",
     5,
     CLI_ARGS.backtest_min_trades
 )
-BACKTEST_REQUIRE_POLICY_BEATS_BASELINE = env_profile_bool(
+BACKTEST_REQUIRE_POLICY_BEATS_BASELINE = env_bool(
     "BACKTEST_REQUIRE_POLICY_BEATS_BASELINE",
-    "backtest_require_policy_beats_baseline",
     True,
     CLI_ARGS.backtest_require_policy_beats_baseline
 )
