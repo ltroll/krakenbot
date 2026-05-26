@@ -111,7 +111,11 @@ strategy file or backtest gate without editing tracked JSON:
 .venv/bin/python kraken_sentiment_executor.py --backtest-health-gate --backtest-min-trades 10
 .venv/bin/python kraken_sentiment_executor.py --bot-policy-backtest-url http://<host>/bot/bot_policy_backtest.json
 .venv/bin/python kraken_sentiment_executor.py --bot-replay-backtest-url http://<host>/bot/bot_replay_backtest.json
+.venv/bin/python kraken_sentiment_executor.py --run-backtest --backtest-min-trades 1 --bot-replay-backtest-url http://<host>/bot/bot_replay_backtest.json
 ```
+
+`--run-backtest` is a one-shot report mode. It fetches the configured backtest
+artifact, prints the findings, and exits without starting the live trading loop.
 
 Lock down env file permissions because they contain Kraken secrets:
 

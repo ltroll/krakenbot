@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 import os
+import sys
 import time
 from datetime import datetime, timezone
 
@@ -46,6 +47,14 @@ def parse_cli_args():
         help=(
             "Full replay backtest JSON URL. Overrides BOT_REPLAY_BACKTEST_URL "
             "and is preferred over BOT_POLICY_BACKTEST_URL when set."
+        )
+    )
+    parser.add_argument(
+        "--run-backtest",
+        action="store_true",
+        help=(
+            "Fetch the configured backtest JSON, print a summary, and exit "
+            "without starting the live trading loop."
         )
     )
     parser.add_argument(
@@ -143,6 +152,13 @@ BOT_POLICY_BACKTEST_URL = (
 BOT_REPLAY_BACKTEST_URL = (
     CLI_ARGS.bot_replay_backtest_url
     or os.getenv("BOT_REPLAY_BACKTEST_URL")
+)
+RUN_BACKTEST = (
+    CLI_ARGS.run_backtest
+    or os.getenv("SENTIMENT_RUN_BACKTEST", "").strip().lower()
+    in ("1", "true", "yes", "on")
+    or os.getenv("RUN_BACKTEST", "").strip().lower()
+    in ("1", "true", "yes", "on")
 )
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
 
@@ -1067,21 +1083,10 @@ def backtest_summary_pair(backtest):
     return None, None, None
 
 
-def backtest_health_failure():
-    if not USE_BACKTEST_HEALTH_GATE:
-        return None
-
-    backtest, error = load_backtest()
-    if backtest is None:
-        if BACKTEST_FAIL_CLOSED:
-            return {"reason": error or "backtest_unavailable"}
-        return None
-
+def evaluate_backtest_health(backtest):
     policy, baseline, backtest_kind = backtest_summary_pair(backtest)
     if not isinstance(policy, dict) or not isinstance(baseline, dict):
-        if BACKTEST_FAIL_CLOSED:
-            return {"reason": "backtest_missing_strategy_outputs"}
-        return None
+        return {"reason": "backtest_missing_strategy_outputs"}
 
     details = {
         "backtest_kind": backtest_kind,
@@ -1133,6 +1138,204 @@ def backtest_health_failure():
             return details
 
     return None
+
+
+def backtest_health_failure():
+    if not USE_BACKTEST_HEALTH_GATE:
+        return None
+
+    backtest, error = load_backtest()
+    if backtest is None:
+        if BACKTEST_FAIL_CLOSED:
+            return {"reason": error or "backtest_unavailable"}
+        return None
+
+    failure = evaluate_backtest_health(backtest)
+    if failure is not None and BACKTEST_FAIL_CLOSED:
+        return failure
+
+    return None
+
+
+def pct_text(value):
+    if value is None:
+        return "n/a"
+
+    try:
+        return f"{float(value):.4f}%"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def win_rate_text(value):
+    if value is None:
+        return "n/a"
+
+    try:
+        return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def number_text(value):
+    if value is None:
+        return "n/a"
+
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+
+    if parsed.is_integer():
+        return str(int(parsed))
+    return f"{parsed:.2f}"
+
+
+def backtest_strategy_names(backtest_kind):
+    if backtest_kind == "replay":
+        return "with_sentiment_policy", "price_target_only"
+
+    return "sentiment_policy", "positive_signal_baseline"
+
+
+def strategy_recent_trades(backtest, strategy_name):
+    strategies = backtest.get("strategies", {})
+    if not isinstance(strategies, dict):
+        return []
+
+    strategy = strategies.get(strategy_name, {})
+    if not isinstance(strategy, dict):
+        return []
+
+    trades = strategy.get("recent_trades", [])
+    return trades if isinstance(trades, list) else []
+
+
+def print_backtest_metric_block(label, metrics):
+    print(f"{label}:")
+    print(f"  trades: {number_text(metrics.get('trades'))}")
+    print(f"  win rate: {win_rate_text(metrics.get('win_rate'))}")
+    print(f"  avg net return: {pct_text(metrics.get('avg_net_return_pct'))}")
+    print(f"  total net return: {pct_text(metrics.get('total_net_return_pct'))}")
+    print(f"  max drawdown: {pct_text(metrics.get('max_drawdown_pct'))}")
+    print(f"  max runup: {pct_text(metrics.get('max_runup_pct'))}")
+    print(f"  avg hold: {number_text(metrics.get('avg_hold_minutes'))} min")
+    print(f"  take profit / stop / timeout: "
+          f"{number_text(metrics.get('take_profit_count'))} / "
+          f"{number_text(metrics.get('stop_loss_count'))} / "
+          f"{number_text(metrics.get('timeout_count'))}")
+
+    optional_counts = [
+        ("candidate signals", "candidate_signals"),
+        ("blocked by sentiment", "blocked_by_sentiment"),
+        ("not filled", "not_filled"),
+        ("skipped during position", "skipped_during_position"),
+        ("no target", "no_target"),
+    ]
+    present = [
+        f"{name}: {number_text(metrics.get(key))}"
+        for name, key in optional_counts
+        if key in metrics
+    ]
+    if present:
+        print("  " + " | ".join(present))
+
+
+def run_backtest_report():
+    backtest_url = BOT_REPLAY_BACKTEST_URL or BOT_POLICY_BACKTEST_URL
+    print("Backtest report")
+    print(f"URL: {backtest_url or 'unset'}")
+    print(f"strategy_profile: {STRATEGY_PROFILE}")
+    print(f"min_trades: {BACKTEST_MIN_TRADES}")
+    print(
+        "require_policy_beats_baseline: "
+        f"{BACKTEST_REQUIRE_POLICY_BEATS_BASELINE}"
+    )
+    print("")
+
+    backtest, error = load_backtest()
+    if backtest is None:
+        print(f"Result: FAIL ({error or 'backtest_unavailable'})")
+        return 1
+
+    policy, baseline, backtest_kind = backtest_summary_pair(backtest)
+    if not isinstance(policy, dict) or not isinstance(baseline, dict):
+        print("Result: FAIL (backtest_missing_strategy_outputs)")
+        return 1
+
+    print(f"timestamp: {backtest.get('timestamp', 'n/a')}")
+    if backtest.get("since"):
+        print(f"since: {backtest.get('since')}")
+    if backtest.get("signal_count") is not None:
+        print(f"signals tested: {number_text(backtest.get('signal_count'))}")
+
+    simulation = backtest.get("simulation", {})
+    if isinstance(simulation, dict):
+        print(
+            "simulation: "
+            f"{simulation.get('side', 'n/a')} | "
+            f"entry={simulation.get('entry', 'n/a')} | "
+            f"tp={simulation.get('take_profit_pct', 'n/a')} | "
+            f"sl={simulation.get('stop_loss_pct', 'n/a')} | "
+            f"max_hold={simulation.get('max_hold_hours', 'n/a')}h"
+        )
+    print("")
+
+    policy_name, baseline_name = backtest_strategy_names(backtest_kind)
+    print_backtest_metric_block(policy_name, policy)
+    print("")
+    print_backtest_metric_block(baseline_name, baseline)
+    print("")
+
+    failure = evaluate_backtest_health(backtest)
+    if failure is None:
+        print("Verdict: PASS")
+        print("Finding: sentiment policy is healthy enough under current gates.")
+    else:
+        print(f"Verdict: FAIL ({failure.get('reason')})")
+        print("Finding: live buys would be blocked by the backtest gate.")
+
+    if policy.get("trades") is not None and baseline.get("trades") is not None:
+        trade_delta = int(policy.get("trades") or 0) - int(
+            baseline.get("trades") or 0
+        )
+        print(f"Trade count delta vs baseline: {trade_delta}")
+
+    if (
+        policy.get("avg_net_return_pct") is not None
+        and baseline.get("avg_net_return_pct") is not None
+    ):
+        return_delta = (
+            float(policy.get("avg_net_return_pct"))
+            - float(baseline.get("avg_net_return_pct"))
+        )
+        print(f"Avg return delta vs baseline: {pct_text(return_delta)}")
+
+    if (
+        policy.get("max_drawdown_pct") is not None
+        and baseline.get("max_drawdown_pct") is not None
+    ):
+        drawdown_delta = (
+            float(policy.get("max_drawdown_pct"))
+            - float(baseline.get("max_drawdown_pct"))
+        )
+        print(f"Drawdown delta vs baseline: {pct_text(drawdown_delta)}")
+
+    recent_trades = strategy_recent_trades(backtest, policy_name)
+    if recent_trades:
+        print("")
+        print("Recent sentiment-policy trades:")
+        for trade in recent_trades[-3:]:
+            print(
+                "  "
+                f"{trade.get('decision_time', 'n/a')} | "
+                f"entry={trade.get('entry_price', 'n/a')} | "
+                f"exit={trade.get('exit_price', 'n/a')} | "
+                f"reason={trade.get('exit_reason', 'n/a')} | "
+                f"net={pct_text(trade.get('net_return_pct'))}"
+            )
+
+    return 0 if failure is None else 2
 
 
 def normalize_signal(signal):
@@ -2597,6 +2800,9 @@ def run_cycle():
 
 
 def main():
+    if RUN_BACKTEST:
+        return run_backtest_report()
+
     require_runtime_config()
 
     log_and_console(
@@ -2686,4 +2892,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
