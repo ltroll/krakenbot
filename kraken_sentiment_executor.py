@@ -42,6 +42,13 @@ def parse_cli_args():
         help="Backtest policy JSON URL. Overrides BOT_POLICY_BACKTEST_URL."
     )
     parser.add_argument(
+        "--bot-replay-backtest-url",
+        help=(
+            "Full replay backtest JSON URL. Overrides BOT_REPLAY_BACKTEST_URL "
+            "and is preferred over BOT_POLICY_BACKTEST_URL when set."
+        )
+    )
+    parser.add_argument(
         "--backtest-min-trades",
         type=int,
         help="Minimum policy trades required by the backtest health gate."
@@ -132,6 +139,10 @@ SIGNAL_FILE = os.getenv("SIGNAL_FILE")
 BOT_POLICY_BACKTEST_URL = (
     CLI_ARGS.bot_policy_backtest_url
     or os.getenv("BOT_POLICY_BACKTEST_URL")
+)
+BOT_REPLAY_BACKTEST_URL = (
+    CLI_ARGS.bot_replay_backtest_url
+    or os.getenv("BOT_REPLAY_BACKTEST_URL")
 )
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
 
@@ -412,11 +423,14 @@ DECISION_CSV_FIELDS = [
     "price_high",
     "high_price_buy_block_pct",
     "max_high_buy_price",
+    "backtest_kind",
     "backtest_policy_trades",
     "backtest_policy_win_rate",
     "backtest_policy_avg_net_return_pct",
+    "backtest_policy_max_drawdown_pct",
     "backtest_baseline_win_rate",
-    "backtest_baseline_avg_net_return_pct"
+    "backtest_baseline_avg_net_return_pct",
+    "backtest_baseline_max_drawdown_pct"
 ]
 
 # ----------------------
@@ -1003,16 +1017,54 @@ def load_signal():
 
 
 def load_backtest():
-    if not BOT_POLICY_BACKTEST_URL:
+    backtest_url = BOT_REPLAY_BACKTEST_URL or BOT_POLICY_BACKTEST_URL
+    if not backtest_url:
         return None, "missing_backtest_url"
 
     try:
-        r = requests.get(BOT_POLICY_BACKTEST_URL, timeout=REQUEST_TIMEOUT)
+        r = requests.get(backtest_url, timeout=REQUEST_TIMEOUT)
         r.raise_for_status()
         return r.json(), None
     except Exception as e:
         log_event("BACKTEST_FETCH_ERROR", message=str(e))
         return None, "backtest_unavailable"
+
+
+def backtest_summary_pair(backtest):
+    bot_outputs = backtest.get("bot_outputs")
+    strategies = backtest.get("strategies")
+
+    if isinstance(bot_outputs, dict):
+        policy = bot_outputs.get("with_sentiment_policy")
+        baseline = bot_outputs.get("price_target_only")
+        if isinstance(policy, dict) and isinstance(baseline, dict):
+            return policy, baseline, "replay"
+
+        policy = bot_outputs.get("sentiment_long_policy")
+        baseline = bot_outputs.get("baseline_positive_signal")
+        if isinstance(policy, dict) and isinstance(baseline, dict):
+            return policy, baseline, "policy"
+
+    if isinstance(strategies, dict):
+        policy = strategies.get("with_sentiment_policy")
+        baseline = strategies.get("price_target_only")
+        if isinstance(policy, dict) and isinstance(baseline, dict):
+            return (
+                policy.get("summary", {}),
+                baseline.get("summary", {}),
+                "replay"
+            )
+
+        policy = strategies.get("sentiment_policy")
+        baseline = strategies.get("positive_signal_baseline")
+        if isinstance(policy, dict) and isinstance(baseline, dict):
+            return (
+                policy.get("summary", {}),
+                baseline.get("summary", {}),
+                "policy"
+            )
+
+    return None, None, None
 
 
 def backtest_health_failure():
@@ -1025,27 +1077,23 @@ def backtest_health_failure():
             return {"reason": error or "backtest_unavailable"}
         return None
 
-    bot_outputs = backtest.get("bot_outputs")
-    if not isinstance(bot_outputs, dict):
-        if BACKTEST_FAIL_CLOSED:
-            return {"reason": "backtest_missing_bot_outputs"}
-        return None
-
-    policy = bot_outputs.get("sentiment_long_policy")
-    baseline = bot_outputs.get("baseline_positive_signal")
+    policy, baseline, backtest_kind = backtest_summary_pair(backtest)
     if not isinstance(policy, dict) or not isinstance(baseline, dict):
         if BACKTEST_FAIL_CLOSED:
             return {"reason": "backtest_missing_strategy_outputs"}
         return None
 
     details = {
+        "backtest_kind": backtest_kind,
         "backtest_policy_trades": policy.get("trades"),
         "backtest_policy_win_rate": policy.get("win_rate"),
         "backtest_policy_avg_net_return_pct": policy.get("avg_net_return_pct"),
+        "backtest_policy_max_drawdown_pct": policy.get("max_drawdown_pct"),
         "backtest_baseline_win_rate": baseline.get("win_rate"),
         "backtest_baseline_avg_net_return_pct": baseline.get(
             "avg_net_return_pct"
-        )
+        ),
+        "backtest_baseline_max_drawdown_pct": baseline.get("max_drawdown_pct")
     }
 
     policy_trades = int(policy.get("trades") or 0)
@@ -1071,6 +1119,17 @@ def backtest_health_failure():
 
         if policy["avg_net_return_pct"] < baseline["avg_net_return_pct"]:
             details["reason"] = "backtest_policy_return_below_baseline"
+            return details
+
+        policy_drawdown = policy.get("max_drawdown_pct")
+        baseline_drawdown = baseline.get("max_drawdown_pct")
+        if (
+            backtest_kind == "replay"
+            and policy_drawdown is not None
+            and baseline_drawdown is not None
+            and policy_drawdown < baseline_drawdown
+        ):
+            details["reason"] = "backtest_policy_drawdown_below_baseline"
             return details
 
     return None
@@ -1476,6 +1535,7 @@ def place_limit_sell(
 def skip_cycle(reason, cycle_id, **kwargs):
     state["stats"]["skips"] += 1
     save_state(state)
+    console(f"HOLD: {reason}")
     log_event(
         "TRADE_DECISION",
         cycle_id=cycle_id,
@@ -2589,8 +2649,16 @@ def main():
             BACKTEST_REQUIRE_POLICY_BEATS_BASELINE
         ),
         bot_policy_backtest_url=BOT_POLICY_BACKTEST_URL,
+        bot_replay_backtest_url=BOT_REPLAY_BACKTEST_URL,
         decision_csv_file=DECISION_CSV_FILE,
         price_check_interval_seconds=PRICE_CHECK_INTERVAL_SECONDS
+    )
+    console(
+        "Backtest gate: "
+        f"{'enabled' if USE_BACKTEST_HEALTH_GATE else 'disabled'} | "
+        f"fail_closed={BACKTEST_FAIL_CLOSED} | "
+        f"min_trades={BACKTEST_MIN_TRADES} | "
+        f"url={BOT_REPLAY_BACKTEST_URL or BOT_POLICY_BACKTEST_URL or 'unset'}"
     )
 
     while True:
