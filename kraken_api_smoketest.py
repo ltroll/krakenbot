@@ -119,13 +119,37 @@ def main():
             failures += 1
             print_step("Private Balance", False, str(e))
 
+        open_order_txid = None
         try:
             open_orders = private_post("/0/private/OpenOrders")
-            count = len(open_orders.get("result", {}).get("open", {}))
+            open_order_map = open_orders.get("result", {}).get("open", {})
+            count = len(open_order_map)
+            open_order_txid = next(iter(open_order_map.keys()), None)
             print_step("Private OpenOrders", True, f"open_orders={count}")
         except Exception as e:
             failures += 1
             print_step("Private OpenOrders", False, str(e))
+
+        if open_order_txid:
+            try:
+                order_info = private_post(
+                    "/0/private/QueryOrders",
+                    {"txid": open_order_txid}
+                )
+                found = open_order_txid in order_info.get("result", {})
+                detail = (
+                    f"txid={open_order_txid} found={found}"
+                )
+                print_step("Private QueryOrders", True, detail)
+            except Exception as e:
+                failures += 1
+                print_step("Private QueryOrders", False, str(e))
+        else:
+            print_step(
+                "Private QueryOrders",
+                True,
+                "skipped because no open orders were returned"
+            )
     else:
         print_step("Private API", False, "missing credentials")
         failures += 1
