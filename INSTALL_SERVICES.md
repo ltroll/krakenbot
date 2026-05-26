@@ -45,6 +45,7 @@ KRAKEN_API_SECRET=
 KRAKEN_API_URL=https://api.kraken.com
 KRAKEN_TICKER_URL=https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD
 LLM_SIGNAL_URL=http://<host>/bot/llm_signal.json
+BOT_POLICY_BACKTEST_URL=http://<host>/bot/bot_policy_backtest.json
 PRICE_LOG_URL=http://<host>/bot/btc_price_log.jsonl
 RANGE_GRID_STRATEGY_PROFILE=range_grid_strategy_default.json
 SENTIMENT_STRATEGY_PROFILE=sentiment_strategy_default.json
@@ -68,6 +69,7 @@ KRAKEN_TICKER_URL=https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD
 KRAKEN_ORDERBOOK_URL=https://api.kraken.com/0/public/Depth?pair=XBTUSD&count=5
 KRAKEN_OHLC_URL=https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=60
 LLM_SIGNAL_URL=http://<host>/bot/llm_signal.json
+BOT_POLICY_BACKTEST_URL=http://<host>/bot/bot_policy_backtest.json
 PRICE_LOG_URL=http://<host>/bot/btc_price_log.jsonl
 BOT_DIR_LIST_FILE=/home/<user>/tradingbot/bot_dirs.txt
 
@@ -97,6 +99,16 @@ Bot tuning values such as grid anchor, entry spacing, position sizing,
 profit targets, thresholds, dry-run mode, and loop intervals now live in the
 strategy JSON files named by `RANGE_GRID_STRATEGY_PROFILE` and
 `SENTIMENT_STRATEGY_PROFILE`.
+
+For one-off sentiment test runs, command-line arguments can override the
+strategy file or backtest gate without editing tracked JSON:
+
+```bash
+.venv/bin/python kraken_sentiment_executor.py --strategy-profile sentiment_strategy_default.json
+.venv/bin/python kraken_sentiment_executor.py --no-backtest-health-gate
+.venv/bin/python kraken_sentiment_executor.py --backtest-health-gate --backtest-min-trades 10
+.venv/bin/python kraken_sentiment_executor.py --bot-policy-backtest-url http://<host>/bot/bot_policy_backtest.json
+```
 
 Lock down env file permissions because they contain Kraken secrets:
 
