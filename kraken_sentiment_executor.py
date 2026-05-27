@@ -58,14 +58,27 @@ def parse_cli_args():
         )
     )
     parser.add_argument(
+        "--buynow",
+        action="store_true",
+        help=(
+            "Place one post-only test buy inside the current order book, "
+            "record it as an open buy, and exit."
+        )
+    )
+    parser.add_argument(
         "--usd",
         "--USD",
         "--backtest-usd",
         dest="backtest_usd",
         type=float,
         help=(
-            "Fixed USD allocation to emulate for each filled backtest trade."
+            "USD amount for --run-backtest emulation or --buynow sizing."
         )
+    )
+    parser.add_argument(
+        "--buynow-usd",
+        type=float,
+        help="USD amount for --buynow. Overrides --usd."
     )
     parser.add_argument(
         "--backtest-min-trades",
@@ -118,7 +131,11 @@ def parse_cli_args():
     )
     parser.set_defaults(backtest_require_policy_beats_baseline=None)
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.run_backtest and args.buynow:
+        parser.error("--run-backtest and --buynow cannot be used together")
+
+    return args
 
 
 CLI_ARGS = parse_cli_args()
@@ -153,6 +170,7 @@ KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY")
 KRAKEN_API_SECRET = os.getenv("KRAKEN_API_SECRET")
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL", "https://api.kraken.com")
 KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
+KRAKEN_ORDERBOOK_URL = os.getenv("KRAKEN_ORDERBOOK_URL")
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
 SIGNAL_FILE = os.getenv("SIGNAL_FILE")
 BOT_POLICY_BACKTEST_URL = (
@@ -173,6 +191,9 @@ RUN_BACKTEST = (
 BACKTEST_USD = CLI_ARGS.backtest_usd
 if BACKTEST_USD is None and os.getenv("BACKTEST_USD"):
     BACKTEST_USD = float(os.getenv("BACKTEST_USD"))
+BUYNOW_USD = CLI_ARGS.buynow_usd or CLI_ARGS.backtest_usd
+if BUYNOW_USD is None and os.getenv("BUYNOW_USD"):
+    BUYNOW_USD = float(os.getenv("BUYNOW_USD"))
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
 
 
@@ -945,6 +966,40 @@ def get_price():
         return None
 
 
+def get_orderbook():
+    try:
+        if KRAKEN_ORDERBOOK_URL:
+            r = requests.get(KRAKEN_ORDERBOOK_URL, timeout=REQUEST_TIMEOUT)
+        else:
+            url = KRAKEN_API_URL.rstrip("/") + "/0/public/Depth"
+            r = requests.get(
+                url,
+                params={"pair": KRAKEN_PAIR, "count": 5},
+                timeout=REQUEST_TIMEOUT
+            )
+        r.raise_for_status()
+        data = r.json()
+
+        if data.get("error"):
+            raise RuntimeError(data["error"])
+
+        book = next(iter(data.get("result", {}).values()), None)
+        if not book:
+            raise RuntimeError(f"Order book data not found for {KRAKEN_PAIR}")
+
+        bid = book.get("bids", [])[0]
+        ask = book.get("asks", [])[0]
+        return {
+            "bid": float(bid[0]),
+            "bid_volume": float(bid[1]),
+            "ask": float(ask[0]),
+            "ask_volume": float(ask[1])
+        }
+    except Exception as e:
+        log_event("ORDERBOOK_ERROR", message=str(e))
+        return None
+
+
 def get_pair_info():
     global PAIR_INFO_CACHE
 
@@ -1467,6 +1522,81 @@ def run_backtest_report():
     return 0 if failure is None else 2
 
 
+def price_tick():
+    pair_info = get_pair_info()
+    pair_decimals = int(pair_info.get("pair_decimals", 1))
+    return 10 ** (-pair_decimals)
+
+
+def buynow_price(book):
+    tick = price_tick()
+    bid = book["bid"]
+    ask = book["ask"]
+
+    if ask > bid + (2 * tick):
+        return round_price(bid + tick)
+
+    return round_price(bid)
+
+
+def run_buynow():
+    require_runtime_config()
+
+    usd_amount = BUYNOW_USD or MIN_TRADE_USD
+    if usd_amount <= 0:
+        console("BUYNOW_ERROR: usd amount must be positive")
+        return 1
+
+    book = get_orderbook()
+    if not book:
+        console("BUYNOW_ERROR: unable to fetch order book")
+        return 1
+
+    buy_price = buynow_price(book)
+    volume = round_volume(usd_amount / buy_price)
+    min_volume = get_min_order_volume()
+    if min_volume and volume < min_volume:
+        min_usd = min_volume * buy_price
+        console(
+            "BUYNOW_ERROR: "
+            f"{money_text(usd_amount)} is below minimum order size; "
+            f"need about {money_text(min_usd)}"
+        )
+        return 1
+
+    cycle_id = datetime.now(timezone.utc).isoformat()
+    target_profit_pct = TARGET_PROFIT_PCT
+    log_and_console(
+        "BUYNOW",
+        message=f"post-only buy {volume} @ {buy_price}",
+        cycle_id=cycle_id,
+        usd_amount=usd_amount,
+        bid=book["bid"],
+        ask=book["ask"],
+        price=buy_price,
+        volume=volume,
+        target_profit_pct=target_profit_pct,
+        round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+        gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT
+    )
+    result = place_limit_buy(
+        buy_price,
+        volume,
+        cycle_id,
+        target_profit_pct=target_profit_pct,
+        post_only=True
+    )
+    if result:
+        console(
+            "BUYNOW_SUBMITTED: "
+            "start the service loop to track the buy fill and place the sell"
+        )
+        return 0
+
+    console("BUYNOW_ERROR: order was not submitted")
+    return 1
+
+
 def normalize_signal(signal):
     if not isinstance(signal, dict):
         return {
@@ -1644,7 +1774,7 @@ def place_market_buy(volume, cycle_id):
     return result
 
 
-def place_limit_buy(price, volume, cycle_id, target_profit_pct=None):
+def place_limit_buy(price, volume, cycle_id, target_profit_pct=None, post_only=False):
     buy_price = round_price(price)
     buy_volume = round_volume(volume)
     profit_pct = (
@@ -1666,6 +1796,7 @@ def place_limit_buy(price, volume, cycle_id, target_profit_pct=None):
                 "ordertype": "limit",
                 "volume": buy_volume,
                 "price": buy_price,
+                "post_only": post_only,
                 "target_profit_pct": profit_pct,
                 "round_trip_fee_pct": ROUND_TRIP_FEE_PCT
             }
@@ -1677,22 +1808,27 @@ def place_limit_buy(price, volume, cycle_id, target_profit_pct=None):
             side="buy",
             volume=buy_volume,
             price=buy_price,
+            post_only=post_only,
             target_profit_pct=profit_pct,
             round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
             gross_target_pct=profit_pct + ROUND_TRIP_FEE_PCT
         )
         return {"dry_run": True}
 
+    order_payload = {
+        "pair": KRAKEN_PAIR,
+        "type": "buy",
+        "ordertype": "limit",
+        "price": str(buy_price),
+        "volume": str(buy_volume)
+    }
+    if post_only:
+        order_payload["oflags"] = "post"
+
     result = safe_kraken_private(
         "LIMIT_BUY",
         "/0/private/AddOrder",
-        {
-            "pair": KRAKEN_PAIR,
-            "type": "buy",
-            "ordertype": "limit",
-            "price": str(buy_price),
-            "volume": str(buy_volume)
-        }
+        order_payload
     )
 
     if result:
@@ -1715,6 +1851,7 @@ def place_limit_buy(price, volume, cycle_id, target_profit_pct=None):
             "txid": txid,
             "volume": buy_volume,
             "price": buy_price,
+            "post_only": post_only,
             "target_profit_pct": profit_pct,
             "round_trip_fee_pct": ROUND_TRIP_FEE_PCT,
             "placed_at": cycle_id,
@@ -1730,6 +1867,7 @@ def place_limit_buy(price, volume, cycle_id, target_profit_pct=None):
                 "ordertype": "limit",
                 "volume": buy_volume,
                 "price": buy_price,
+                "post_only": post_only,
                 "target_profit_pct": profit_pct,
                 "round_trip_fee_pct": ROUND_TRIP_FEE_PCT,
                 "txid": txid
@@ -1742,6 +1880,7 @@ def place_limit_buy(price, volume, cycle_id, target_profit_pct=None):
             side="buy",
             volume=buy_volume,
             price=buy_price,
+            post_only=post_only,
             target_profit_pct=profit_pct,
             round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
             gross_target_pct=profit_pct + ROUND_TRIP_FEE_PCT,
@@ -2931,6 +3070,9 @@ def run_cycle():
 def main():
     if RUN_BACKTEST:
         return run_backtest_report()
+
+    if CLI_ARGS.buynow:
+        return run_buynow()
 
     require_runtime_config()
 
