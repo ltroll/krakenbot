@@ -1587,9 +1587,10 @@ def run_buynow():
         post_only=True
     )
     if result:
+        process_open_buy_orders(cycle_id)
         console(
             "BUYNOW_SUBMITTED: "
-            "start the service loop to track the buy fill and place the sell"
+            "submitted and checked once for an immediate fill"
         )
         return 0
 
