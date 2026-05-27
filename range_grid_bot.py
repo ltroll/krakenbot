@@ -67,14 +67,26 @@ SELL_INSUFFICIENT_FUNDS_COOLDOWN_SECONDS = int(
 
 def parse_strategy_modes(raw_value):
     if not raw_value:
-        return ["low"]
+        return []
 
-    modes = [
-        mode.strip().lower()
-        for mode in raw_value.split(",")
-        if mode.strip()
-    ]
-    return modes or ["low"]
+    normalized_modes = []
+    alias_map = {
+        "llm": "llm_target",
+        "sentiment": "llm_target",
+    }
+    valid_modes = {"low", "mean", "median", "high", "llm_target"}
+    disabled_values = {"false", "none", "off", "disabled", "no"}
+
+    for mode in raw_value.split(","):
+        normalized_mode = mode.strip().lower()
+        if not normalized_mode:
+            continue
+        if normalized_mode in disabled_values:
+            continue
+        normalized_mode = alias_map.get(normalized_mode, normalized_mode)
+        if normalized_mode in valid_modes and normalized_mode not in normalized_modes:
+            normalized_modes.append(normalized_mode)
+    return normalized_modes
 
 def load_json_file(path):
     with open(path, encoding="utf-8") as f:
@@ -2192,7 +2204,8 @@ def main():
                 )
 
             llm_buy_allowed = (
-                low and high
+                "llm_target" in strategy_modes
+                and low and high
                 and llm_target is not None
                 and freshness_allows_trading
                 and source_guard_allows_trading
@@ -2206,6 +2219,7 @@ def main():
                 and source_guard_allows_trading
                 and sentiment_allows_long
                 and effective_position_size_pct > 0
+                and strategy_modes
                 and low and high
             ):
                 candidate_levels = []
@@ -2320,6 +2334,11 @@ def main():
                         skip_reason = "max_open_sell_orders"
                     elif deployed_inventory_usd >= effective_max_inventory_usd:
                         skip_reason = "max_inventory_usd"
+                    elif (
+                        buy_source == "llm_target"
+                        and "llm_target" not in strategy_modes
+                    ):
+                        skip_reason = "llm_target_disabled_in_strategy"
                     elif (
                         buy_source == "llm_target"
                         and not sentiment_allows_long
@@ -2537,6 +2556,9 @@ def main():
                     range_median=median,
                     sentiment_regime=regime["name"],
                     reason=(
+                        "buy_modes_disabled"
+                        if not strategy_modes
+                        else
                         freshness_block_reason
                         or (
                             None
@@ -2615,7 +2637,7 @@ def main():
                 buy_source=(
                     "llm_target"
                     if llm_buy_allowed
-                    else ",".join(strategy_modes)
+                    else ",".join(strategy_modes) or "disabled"
                 ),
                 strategy_modes=strategy_modes,
                 grid_levels=(
@@ -2627,6 +2649,7 @@ def main():
                         freshness_allows_trading
                         and source_guard_allows_trading
                         and sentiment_allows_long
+                        and strategy_modes
                         and low
                         and high
                     )
