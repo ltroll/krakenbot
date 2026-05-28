@@ -124,6 +124,24 @@ best bid or one tick inside the spread, records it as an open buy, and exits.
 Start the service loop afterward to track the fill and place the profit-taking
 sell.
 
+To create one daily file containing both backtest summaries and the last 24
+hours of bot trading logs:
+
+```bash
+.venv/bin/python daily_backtesting_report.py
+```
+
+By default it runs `/home/ben/sentiment_engine/bot_policy_backtest.py` and
+`/home/ben/sentiment_engine/bot_replay_backtest.py` with a 24 hour window, then
+writes `backtesting_report_YYYY-MM-DD.md` under
+`/var/www/html/bot/backtesting_reports`. Configure paths with
+`BACKTEST_SCRIPT_DIR`, `BACKTEST_REPORT_DIR`, `SENTIMENT_TRADE_LOG_FILE`, and
+the `BOT_*_BACKTEST_OUTPUT_FILE` variables in `.env`. If another host publishes
+the backtest JSON, set `BOT_POLICY_BACKTEST_URL` and `BOT_REPLAY_BACKTEST_URL`;
+the report will read those URLs for the summaries. Use `--skip-backtests` when
+the remote host is already producing the JSON and this bot should only build the
+daily report.
+
 Lock down env file permissions because they contain Kraken secrets:
 
 ```bash
