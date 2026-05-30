@@ -1434,6 +1434,151 @@ def kraken_reserved_sell_volume(open_orders_result):
     return reserved_volume
 
 
+def kraken_pair_matches(pair):
+    normalized_pair = (
+        str(pair or "")
+        .upper()
+        .replace("/", "")
+        .replace("-", "")
+    )
+    return (
+        normalized_pair == KRAKEN_PAIR.upper()
+        or ("XBT" in normalized_pair and "USD" in normalized_pair)
+        or ("XXBT" in normalized_pair and "ZUSD" in normalized_pair)
+    )
+
+
+def startup_reconcile_state():
+    open_order_txids = set()
+    kraken_open_orders = {}
+    state_changed = False
+
+    open_orders_resp = safe_kraken_private(
+        "OPEN_ORDERS_STARTUP_RECONCILE",
+        "/0/private/OpenOrders"
+    )
+    if open_orders_resp and "result" in open_orders_resp:
+        kraken_open_orders = open_orders_resp["result"].get("open", {}) or {}
+        open_order_txids = set(kraken_open_orders.keys())
+    else:
+        log_event(
+            "STARTUP_RECONCILE_SKIPPED",
+            reason="open_orders_fetch_failed"
+        )
+        return
+
+    tracked_buy_txids = [
+        order.get("txid")
+        for order in state["open_buy_orders"].values()
+        if order.get("txid")
+    ]
+    tracked_sell_txids = list(state["open_sell_orders"].keys())
+    tracked_txids = tracked_sell_txids + tracked_buy_txids
+    status_map = get_order_statuses(tracked_txids)
+
+    for level, order in list(state["open_buy_orders"].items()):
+        txid = order.get("txid")
+        if not txid:
+            state["open_buy_orders"].pop(level, None)
+            state_changed = True
+            log_event(
+                "STARTUP_RECONCILE_DROP_BUY",
+                level=level,
+                reason="missing_txid",
+                buy_source=order.get("buy_source")
+            )
+            continue
+
+        status = status_map.get(txid)
+        if txid in open_order_txids:
+            status = "open"
+
+        if status in ("open", "closed", None):
+            continue
+
+        if status in ("canceled", "expired"):
+            state["open_buy_orders"].pop(level, None)
+            state_changed = True
+            log_event(
+                "STARTUP_RECONCILE_DROP_BUY",
+                level=level,
+                txid=txid,
+                reason=f"status_{status}",
+                buy_source=order.get("buy_source")
+            )
+
+    for txid, order in list(state["open_sell_orders"].items()):
+        status = status_map.get(txid)
+        if txid in open_order_txids:
+            status = "open"
+
+        if status == "open":
+            continue
+
+        if status == "closed":
+            log_event(
+                "STARTUP_RECONCILE_SELL_PENDING_FILL",
+                txid=txid,
+                level=order.get("level"),
+                buy_source=order.get("buy_source")
+            )
+            continue
+
+        if status in ("canceled", "expired"):
+            state["open_sell_orders"].pop(txid, None)
+            state_changed = True
+            log_event(
+                "STARTUP_RECONCILE_DROP_SELL",
+                txid=txid,
+                level=order.get("level"),
+                reason=f"status_{status}",
+                buy_source=order.get("buy_source")
+            )
+
+    tracked_known_txids = set(
+        tracked_sell_txids
+        + [
+            txid
+            for txid in tracked_buy_txids
+            if txid
+        ]
+    )
+    for txid, order in kraken_open_orders.items():
+        if txid in tracked_known_txids:
+            continue
+        if not isinstance(order, dict):
+            continue
+
+        descr = order.get("descr", {})
+        if not isinstance(descr, dict):
+            continue
+
+        if not kraken_pair_matches(descr.get("pair")):
+            continue
+
+        log_event(
+            "STARTUP_RECONCILE_UNTRACKED_KRAKEN_ORDER",
+            txid=txid,
+            side=descr.get("type"),
+            ordertype=descr.get("ordertype"),
+            pair=descr.get("pair"),
+            price=positive_float(descr.get("price")),
+            volume=positive_float(order.get("vol")),
+            volume_executed=positive_float(order.get("vol_exec"))
+        )
+
+    if state_changed:
+        save_state(state)
+
+    log_event(
+        "STARTUP_RECONCILE_COMPLETE",
+        tracked_open_buy_count=len(state["open_buy_orders"]),
+        tracked_open_sell_count=len(state["open_sell_orders"]),
+        kraken_open_order_count=len(kraken_open_orders),
+        state_changed=state_changed
+    )
+
+
 def reconcile_btc_inventory(cycle_id):
     if not state["open_buy_orders"]:
         return []
@@ -1644,6 +1789,7 @@ def main():
             sentiment_defensive_extra_aging_reduction_pct
         )
     )
+    startup_reconcile_state()
 
     loop_count = 0
     while True:
