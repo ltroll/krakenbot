@@ -4,11 +4,14 @@
 # RANGE GRID SENTIMENT BOT (RESTORED STABLE VERSION)
 # =====================================================
 
+import atexit
 import base64
+import fcntl
 import hashlib
 import hmac
 import json
 import os
+import socket
 import statistics
 import time
 from datetime import datetime, timedelta, timezone
@@ -43,6 +46,11 @@ LOG_FILE = (
     os.getenv("RANGE_GRID_TRADE_LOG_FILE")
     or os.getenv("TRADE_LOG_FILE")
     or "trade_log.jsonl"
+)
+INSTANCE_LOCK_FILE = (
+    os.getenv("RANGE_GRID_LOCK_FILE")
+    or os.getenv("BOT_LOCK_FILE")
+    or f"{STATE_FILE}.lock"
 )
 
 KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
@@ -306,6 +314,7 @@ pair_info = api.query_public("AssetPairs")["result"]["XXBTZUSD"]
 
 PRICE_DECIMALS = pair_info["pair_decimals"]
 VOLUME_DECIMALS = pair_info["lot_decimals"]
+INSTANCE_LOCK_HANDLE = None
 
 # ----------------------
 # LOGGING
@@ -347,6 +356,84 @@ def log_and_console(event, message="", **kwargs):
         console(f"{event}: {message}")
     else:
         console(event)
+
+
+def key_fingerprint(value):
+    if not value:
+        return "missing"
+
+    digest = hashlib.sha256(value.encode()).hexdigest()[:12]
+    return f"sha256:{digest}"
+
+
+def runtime_identity():
+    return {
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "state_file": os.path.abspath(STATE_FILE),
+        "lock_file": os.path.abspath(INSTANCE_LOCK_FILE),
+        "log_file": os.path.abspath(LOG_FILE),
+        "strategy_profile": STRATEGY_PROFILE,
+        "api_key_fingerprint": key_fingerprint(KRAKEN_API_KEY),
+    }
+
+
+def release_instance_lock():
+    global INSTANCE_LOCK_HANDLE
+
+    if INSTANCE_LOCK_HANDLE is None:
+        return
+
+    try:
+        fcntl.flock(INSTANCE_LOCK_HANDLE.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+
+    try:
+        INSTANCE_LOCK_HANDLE.close()
+    except Exception:
+        pass
+
+    INSTANCE_LOCK_HANDLE = None
+
+
+def acquire_instance_lock():
+    global INSTANCE_LOCK_HANDLE
+
+    lock_path = os.path.abspath(INSTANCE_LOCK_FILE)
+    lock_dir = os.path.dirname(lock_path)
+    if lock_dir:
+        os.makedirs(lock_dir, exist_ok=True)
+
+    lock_handle = open(lock_path, "a+", encoding="utf-8")
+
+    try:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_handle.seek(0)
+        existing_metadata = lock_handle.read().strip()
+        lock_handle.close()
+        metadata = runtime_identity()
+        log_and_console(
+            "INSTANCE_LOCKED",
+            message="Another range grid bot instance is already running",
+            existing_lock_metadata=existing_metadata or None,
+            **metadata
+        )
+        raise SystemExit(1)
+
+    metadata = runtime_identity()
+    lock_handle.seek(0)
+    lock_handle.truncate()
+    lock_handle.write(json.dumps({
+        **metadata,
+        "locked_at": datetime.now(timezone.utc).isoformat()
+    }))
+    lock_handle.flush()
+
+    INSTANCE_LOCK_HANDLE = lock_handle
+    atexit.register(release_instance_lock)
+    return metadata
 
 
 def positive_float(value):
@@ -1477,9 +1564,11 @@ def reconcile_btc_inventory(cycle_id):
 # ----------------------
 
 def main():
+    instance_identity = acquire_instance_lock()
     log_and_console(
         "BOT_START",
         message="Range Grid Average bot starting",
+        **instance_identity,
         config_file=CONFIG_FILE,
         strategy_profile=STRATEGY_PROFILE,
         state_file=STATE_FILE,
