@@ -321,6 +321,14 @@ def env_int(env_name, default, cli_value=None):
     return default
 
 
+def env_profile_float(env_name, profile_name, default):
+    value = os.getenv(env_name)
+    if value is not None:
+        return float(value)
+
+    return profile_float(profile_name, default)
+
+
 def profile_float(name, default):
     value = strategy_config.get(name, default)
     return default if value is None else float(value)
@@ -337,6 +345,10 @@ def profile_str(name, default=""):
 
 
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
+REQUEST_RETRY_ATTEMPTS = int(os.getenv("REQUEST_RETRY_ATTEMPTS", "2"))
+REQUEST_RETRY_BACKOFF_SECONDS = float(
+    os.getenv("REQUEST_RETRY_BACKOFF_SECONDS", "1.5")
+)
 KRAKEN_NONCE_RETRIES = int(os.getenv("KRAKEN_NONCE_RETRIES", "2"))
 KRAKEN_LOCKOUT_COOLDOWN_SECONDS = int(
     os.getenv("KRAKEN_LOCKOUT_COOLDOWN_SECONDS", "300")
@@ -350,8 +362,13 @@ ORDER_TRACKER_SYMBOL = (
     os.getenv("ORDER_TRACKER_SYMBOL")
     or profile_str("order_tracker_symbol", KRAKEN_PAIR)
 )
-ORDER_TRACKER_TIMEOUT = profile_float("order_tracker_timeout_seconds", 5)
-ORDER_TRACKER_CHECKIN_TIMEOUT = profile_float(
+ORDER_TRACKER_TIMEOUT = env_profile_float(
+    "ORDER_TRACKER_TIMEOUT_SECONDS",
+    "order_tracker_timeout_seconds",
+    5
+)
+ORDER_TRACKER_CHECKIN_TIMEOUT = env_profile_float(
+    "ORDER_TRACKER_CHECKIN_TIMEOUT_SECONDS",
     "order_tracker_checkin_timeout_seconds",
     min(ORDER_TRACKER_TIMEOUT, 5)
 )
@@ -443,6 +460,46 @@ BACKTEST_REQUIRE_POLICY_BEATS_BASELINE = env_bool(
 )
 
 PAIR_INFO_CACHE = None
+
+
+def request_with_retries(
+    method,
+    url,
+    *,
+    attempts=None,
+    backoff_seconds=None,
+    retry_statuses=None,
+    **kwargs
+):
+    attempts = max(1, int(attempts or REQUEST_RETRY_ATTEMPTS))
+    backoff_seconds = (
+        REQUEST_RETRY_BACKOFF_SECONDS
+        if backoff_seconds is None
+        else float(backoff_seconds)
+    )
+    retry_statuses = retry_statuses or {429, 500, 502, 503, 504}
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.request(method, url, **kwargs)
+            if response.status_code in retry_statuses and attempt < attempts:
+                last_error = requests.HTTPError(
+                    f"{response.status_code} Server Error: {response.text[:200]}"
+                )
+            else:
+                return response
+        except requests.RequestException as e:
+            last_error = e
+            if attempt >= attempts:
+                raise
+
+        time.sleep(backoff_seconds * attempt)
+
+    if last_error:
+        raise last_error
+
+    raise RuntimeError(f"{method} {url} failed without a response")
 
 DECISION_CSV_FIELDS = [
     "ts",
@@ -653,7 +710,8 @@ def send_checkin(status="ok", loop_count=None, message="loop_complete"):
         payload["loop_count"] = str(loop_count)
 
     try:
-        response = requests.post(
+        response = request_with_retries(
+            "POST",
             ORDER_TRACKER_URL,
             data=payload,
             headers={"User-Agent": ORDER_TRACKER_USER_AGENT},
@@ -933,7 +991,11 @@ def safe_kraken_private(label, endpoint, data=None):
 def get_price():
     try:
         if KRAKEN_TICKER_URL:
-            r = requests.get(KRAKEN_TICKER_URL, timeout=REQUEST_TIMEOUT)
+            r = request_with_retries(
+                "GET",
+                KRAKEN_TICKER_URL,
+                timeout=REQUEST_TIMEOUT
+            )
             r.raise_for_status()
             data = r.json()
 
@@ -945,7 +1007,8 @@ def get_price():
                 return float(ticker["c"][0])
 
         url = KRAKEN_API_URL.rstrip("/") + "/0/public/Ticker"
-        r = requests.get(
+        r = request_with_retries(
+            "GET",
             url,
             params={"pair": KRAKEN_PAIR},
             timeout=REQUEST_TIMEOUT
@@ -969,10 +1032,15 @@ def get_price():
 def get_orderbook():
     try:
         if KRAKEN_ORDERBOOK_URL:
-            r = requests.get(KRAKEN_ORDERBOOK_URL, timeout=REQUEST_TIMEOUT)
+            r = request_with_retries(
+                "GET",
+                KRAKEN_ORDERBOOK_URL,
+                timeout=REQUEST_TIMEOUT
+            )
         else:
             url = KRAKEN_API_URL.rstrip("/") + "/0/public/Depth"
-            r = requests.get(
+            r = request_with_retries(
+                "GET",
                 url,
                 params={"pair": KRAKEN_PAIR, "count": 5},
                 timeout=REQUEST_TIMEOUT
@@ -1007,7 +1075,8 @@ def get_pair_info():
         return PAIR_INFO_CACHE
 
     url = KRAKEN_API_URL.rstrip("/") + "/0/public/AssetPairs"
-    r = requests.get(
+    r = request_with_retries(
+        "GET",
         url,
         params={"pair": KRAKEN_PAIR},
         timeout=REQUEST_TIMEOUT
@@ -1115,7 +1184,11 @@ def order_fill_summary(order):
 def load_signal():
     try:
         if LLM_SIGNAL_URL:
-            r = requests.get(LLM_SIGNAL_URL, timeout=REQUEST_TIMEOUT)
+            r = request_with_retries(
+                "GET",
+                LLM_SIGNAL_URL,
+                timeout=REQUEST_TIMEOUT
+            )
             r.raise_for_status()
             signal = r.json()
         else:
@@ -1134,7 +1207,11 @@ def load_backtest():
         return None, "missing_backtest_url"
 
     try:
-        r = requests.get(backtest_url, timeout=REQUEST_TIMEOUT)
+        r = request_with_retries(
+            "GET",
+            backtest_url,
+            timeout=REQUEST_TIMEOUT
+        )
         r.raise_for_status()
         return r.json(), None
     except Exception as e:
@@ -3087,6 +3164,11 @@ def main():
         pair=KRAKEN_PAIR,
         kraken_api_url=KRAKEN_API_URL,
         kraken_key_fingerprint=key_fingerprint(KRAKEN_API_KEY),
+        request_timeout_seconds=REQUEST_TIMEOUT,
+        request_retry_attempts=REQUEST_RETRY_ATTEMPTS,
+        request_retry_backoff_seconds=REQUEST_RETRY_BACKOFF_SECONDS,
+        order_tracker_timeout_seconds=ORDER_TRACKER_TIMEOUT,
+        order_tracker_checkin_timeout_seconds=ORDER_TRACKER_CHECKIN_TIMEOUT,
         dry_run=DRY_RUN,
         min_trade_usd=MIN_TRADE_USD,
         confidence_threshold=CONF_THRESHOLD,
