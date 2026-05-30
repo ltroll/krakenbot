@@ -745,6 +745,7 @@ def get_sentiment():
                 target_prices = []
 
             return {
+                "schema_version": data.get("schema_version"),
                 "execution_signal": data.get("execution_signal", 0),
                 "target_prices": target_prices,
                 "risk_multiplier": data.get("risk_multiplier"),
@@ -778,6 +779,9 @@ def get_sentiment():
                     else {}
                 ),
                 "contributor_count": data.get("contributor_count"),
+                "active_observation_count": data.get(
+                    "active_observation_count"
+                ),
                 "bot_action_allowed": data.get("bot_action_allowed"),
                 "action_reason": (
                     (
@@ -787,6 +791,7 @@ def get_sentiment():
                     )
                     or data.get("reason")
                 ),
+                "source": data.get("source"),
                 "processed_at": data.get("processed_at"),
                 "price_regime": (
                     data.get("price_regime")
@@ -806,13 +811,17 @@ def get_sentiment():
             }
 
         return {
+            "schema_version": None,
             "execution_signal": float(data),
             "target_prices": [],
             "price_regime": {},
             "trend_snapshot": {},
             "kraken_flow": {},
             "source_status": {},
-            "action_policy": {}
+            "action_policy": {},
+            "source": None,
+            "processed_at": None,
+            "active_observation_count": None
         }
     except Exception as e:
         log_event("SENTIMENT_ERROR", message=str(e))
@@ -1645,7 +1654,13 @@ def main():
                 direction_bias=sentiment_payload.get("direction_bias"),
                 raw_direction_bias=sentiment_payload.get("raw_direction_bias"),
                 fear_greed_index=sentiment_payload.get("fear_greed_index"),
+                schema_version=sentiment_payload.get("schema_version"),
+                sentiment_source=sentiment_payload.get("source"),
+                sentiment_processed_at=sentiment_payload.get("processed_at"),
                 contributor_count=sentiment_payload.get("contributor_count"),
+                active_observation_count=sentiment_payload.get(
+                    "active_observation_count"
+                ),
                 llm_target_count=len(target_prices),
                 active_llm_target=(
                     None if llm_target is None
@@ -2538,6 +2553,9 @@ def main():
                     mean_min_signal=mean_min_signal,
                     median_min_signal=median_min_signal,
                     high_min_signal=high_min_signal,
+                    schema_version=sentiment_payload.get("schema_version"),
+                    sentiment_source=sentiment_payload.get("source"),
+                    sentiment_processed_at=sentiment_payload.get("processed_at"),
                     signal_status=signal_status,
                     freshness_allows_trading=freshness_allows_trading,
                     freshness_block_reason=freshness_block_reason,
@@ -2545,6 +2563,10 @@ def main():
                     source_guard_allows_trading=source_guard_allows_trading,
                     action_recommendation=action_recommendation,
                     action_policy_reason=action_policy.get("reason"),
+                    contributor_count=sentiment_payload.get("contributor_count"),
+                    active_observation_count=sentiment_payload.get(
+                        "active_observation_count"
+                    ),
                     external_block_reason=external_block_reason,
                     smoothed_risk_multiplier=smoothed_risk_multiplier,
                     flow_pressure=flow_pressure,
@@ -2589,6 +2611,9 @@ def main():
                 mean_min_signal=mean_min_signal,
                 median_min_signal=median_min_signal,
                 high_min_signal=high_min_signal,
+                schema_version=sentiment_payload.get("schema_version"),
+                sentiment_source=sentiment_payload.get("source"),
+                sentiment_processed_at=sentiment_payload.get("processed_at"),
                 signal_status=signal_status,
                 freshness_allows_trading=freshness_allows_trading,
                 freshness_block_reason=freshness_block_reason,
@@ -2596,6 +2621,10 @@ def main():
                 source_guard_allows_trading=source_guard_allows_trading,
                 action_recommendation=action_recommendation,
                 action_policy_reason=action_policy.get("reason"),
+                contributor_count=sentiment_payload.get("contributor_count"),
+                active_observation_count=sentiment_payload.get(
+                    "active_observation_count"
+                ),
                 external_block_reason=external_block_reason,
                 smoothed_risk_multiplier=smoothed_risk_multiplier,
                 flow_pressure=flow_pressure,
