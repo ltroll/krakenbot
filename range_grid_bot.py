@@ -71,6 +71,9 @@ SELL_INSUFFICIENT_FUNDS_COOLDOWN_SECONDS = int(
         str(KRAKEN_LOCKOUT_COOLDOWN_SECONDS)
     )
 )
+PROCESSED_FILL_CACHE_LIMIT = int(
+    os.getenv("PROCESSED_FILL_CACHE_LIMIT", "2000")
+)
 
 
 def parse_strategy_modes(raw_value):
@@ -673,6 +676,10 @@ def load_state():
     default = {
         "open_buy_orders": {},
         "open_sell_orders": {},
+        "processed_fills": {
+            "buy": {},
+            "sell": {}
+        },
         "last_nonce": 0,
         "private_api_backoff_until": 0,
         "sell_insufficient_funds_backoff_until": 0,
@@ -717,6 +724,13 @@ def normalize_state(state):
     normalized_buy_orders = {}
     normalized_sell_orders = {}
     state.setdefault("stats", {})
+    state.setdefault("processed_fills", {})
+    if not isinstance(state["processed_fills"], dict):
+        state["processed_fills"] = {}
+    for side in ("buy", "sell"):
+        side_cache = state["processed_fills"].get(side)
+        if not isinstance(side_cache, dict):
+            state["processed_fills"][side] = {}
 
     for key, default_value in {
         "buy_orders_placed": 0,
@@ -738,6 +752,7 @@ def normalize_state(state):
                 "sell_pct_override": order.get("sell_pct_override"),
                 "buy_source": order.get("buy_source"),
                 "trade_id": order.get("trade_id") or order.get("txid"),
+                "filled_at": order.get("filled_at"),
                 "sell_retry_after": order.get("sell_retry_after"),
                 "sell_failure_reason": order.get("sell_failure_reason")
             }
@@ -750,6 +765,7 @@ def normalize_state(state):
                 "sell_pct_override": None,
                 "buy_source": None,
                 "trade_id": None,
+                "filled_at": None,
                 "sell_retry_after": None,
                 "sell_failure_reason": None
             }
@@ -791,6 +807,47 @@ def parse_iso8601(value):
         return datetime.fromisoformat(value)
     except Exception:
         return None
+
+
+def trim_processed_fill_cache():
+    processed_fills = state.setdefault("processed_fills", {})
+
+    for side in ("buy", "sell"):
+        cache = processed_fills.get(side)
+        if not isinstance(cache, dict):
+            processed_fills[side] = {}
+            continue
+        if len(cache) <= PROCESSED_FILL_CACHE_LIMIT:
+            continue
+
+        ordered_items = sorted(
+            cache.items(),
+            key=lambda item: parse_iso8601(item[1]) or datetime.min.replace(
+                tzinfo=timezone.utc
+            )
+        )
+        remove_count = len(cache) - PROCESSED_FILL_CACHE_LIMIT
+        for txid, _ in ordered_items[:remove_count]:
+            cache.pop(txid, None)
+
+
+def fill_already_processed(side, txid):
+    if not txid:
+        return False
+
+    processed_fills = state.get("processed_fills", {})
+    side_cache = processed_fills.get(side, {})
+    return txid in side_cache
+
+
+def mark_fill_processed(side, txid, processed_at):
+    if not txid:
+        return
+
+    processed_fills = state.setdefault("processed_fills", {})
+    side_cache = processed_fills.setdefault(side, {})
+    side_cache[txid] = processed_at
+    trim_processed_fill_cache()
 
 
 state = normalize_state(load_state())
@@ -1977,6 +2034,19 @@ def main():
                     continue
 
                 if status == "closed":
+                    if fill_already_processed("sell", txid):
+                        del state["open_sell_orders"][txid]
+                        save_state(state)
+                        actions.append("sell_fill_already_processed")
+                        log_event(
+                            "SELL_FILL_ALREADY_PROCESSED",
+                            cycle_id=cycle_id,
+                            txid=txid,
+                            level=order.get("level"),
+                            buy_source=order.get("buy_source")
+                        )
+                        continue
+
                     buy_price = order.get("buy_price")
                     sell_price = order.get("sell_price")
                     volume = order.get("volume", 0)
@@ -2013,6 +2083,7 @@ def main():
                         state["stats"]["realized_estimated_net_pnl"] += (
                             estimated_net_pnl
                         )
+                    mark_fill_processed("sell", txid, cycle_id)
                     save_state(state)
                     actions.append("sell_filled")
 
@@ -2273,22 +2344,38 @@ def main():
                         now - placed_at
                     ).total_seconds() / 60
 
-                state["stats"]["buy_orders_filled"] += 1
-                actions.append("buy_filled")
+                first_buy_fill_processing = not fill_already_processed("buy", txid)
+                if first_buy_fill_processing:
+                    state["stats"]["buy_orders_filled"] += 1
+                    order["filled_at"] = cycle_id
+                    mark_fill_processed("buy", txid, cycle_id)
+                    actions.append("buy_filled")
 
-                log_and_console(
-                    "BUY_ORDER_FILLED",
-                    message=f"BUY filled @ {round(buy_price, PRICE_DECIMALS)}",
-                    cycle_id=cycle_id,
-                    txid=txid,
-                    level=level,
-                    volume=round(order["volume"], VOLUME_DECIMALS),
-                    price=round(buy_price, PRICE_DECIMALS),
-                    hold_minutes=hold_minutes,
-                    sell_pct_override=sell_pct_override
-                )
+                    log_and_console(
+                        "BUY_ORDER_FILLED",
+                        message=f"BUY filled @ {round(buy_price, PRICE_DECIMALS)}",
+                        cycle_id=cycle_id,
+                        txid=txid,
+                        level=level,
+                        volume=round(order["volume"], VOLUME_DECIMALS),
+                        price=round(buy_price, PRICE_DECIMALS),
+                        hold_minutes=hold_minutes,
+                        sell_pct_override=sell_pct_override
+                    )
+                else:
+                    actions.append("buy_fill_already_processed")
+                    log_event(
+                        "BUY_FILL_ALREADY_PROCESSED",
+                        cycle_id=cycle_id,
+                        txid=txid,
+                        level=level,
+                        volume=round(order["volume"], VOLUME_DECIMALS),
+                        price=round(buy_price, PRICE_DECIMALS),
+                        buy_source=buy_source
+                    )
                 order.pop("sell_retry_after", None)
                 order.pop("sell_failure_reason", None)
+                save_state(state)
 
                 log_event(
                     "TRADE_DECISION",
