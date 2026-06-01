@@ -111,6 +111,9 @@ class LlmTargetBacktestTests(unittest.TestCase):
         result = backtest.simulate_strategy("with_target_quality", snapshots)
 
         self.assertEqual(result["summary"]["trades"], 1)
+        self.assertEqual(result["summary"]["raw_candidates"], 1)
+        self.assertEqual(result["summary"]["approved_candidates"], 1)
+        self.assertEqual(result["summary"]["fill_rate_after_approval"], 1.0)
         trade = result["recent_trades"][0]
         self.assertEqual(trade["exit_reason"], "take_profit")
         self.assertAlmostEqual(trade["exit_price"], 100.7, places=2)
@@ -131,6 +134,9 @@ class LlmTargetBacktestTests(unittest.TestCase):
         result = backtest.simulate_strategy("with_target_quality", snapshots)
 
         self.assertEqual(result["summary"]["trades"], 0)
+        self.assertEqual(result["summary"]["raw_candidates"], 1)
+        self.assertEqual(result["summary"]["approved_candidates"], 0)
+        self.assertIsNone(result["summary"]["fill_rate_after_approval"])
         self.assertEqual(result["summary"]["blocked_by_target_quality"], 1)
 
     def test_build_report_and_write_report(self):
@@ -163,6 +169,11 @@ class LlmTargetBacktestTests(unittest.TestCase):
             self.assertTrue(os.path.exists(archive_file))
             self.assertIn("with_target_quality", report["strategies"])
             self.assertEqual(report["bot_outputs"]["with_target_quality"]["trades"], 1)
+            self.assertEqual(
+                report["top_summary"]["best_strategy"],
+                "with_target_quality"
+            )
+            self.assertIn("strategy_headlines", report["top_summary"])
 
 
 if __name__ == "__main__":

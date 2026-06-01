@@ -319,6 +319,8 @@ def empty_summary():
         "timeout_count": 0,
         "max_drawdown_pct": None,
         "max_runup_pct": None,
+        "raw_candidates": 0,
+        "approved_candidates": 0,
         "candidate_signals": 0,
         "blocked_by_sentiment": 0,
         "blocked_by_target_quality": 0,
@@ -331,10 +333,19 @@ def empty_summary():
 
 
 def finalize_summary(summary, trades):
+    summary["trades"] = len(trades)
+    approved_candidates = summary["approved_candidates"]
+    if approved_candidates > 0:
+        summary["fill_rate_after_approval"] = round(
+            (len(trades) + summary["not_filled"]) / approved_candidates,
+            4
+        )
+    else:
+        summary["fill_rate_after_approval"] = None
+
     if not trades:
         return summary
 
-    summary["trades"] = len(trades)
     winning = [trade for trade in trades if trade["net_return_pct"] > 0]
     summary["win_rate"] = round(len(winning) / len(trades), 4)
     summary["avg_net_return_pct"] = round(
@@ -474,6 +485,7 @@ def simulate_strategy(strategy_name, snapshots):
             summary["no_target"] += 1
             continue
 
+        summary["raw_candidates"] += 1
         decision = quality_decision(snapshot, candidate, strategy_name)
         policy = decision["policy"]
         if strategy_name != "price_target_only" and not decision["allowed"]:
@@ -491,6 +503,7 @@ def simulate_strategy(strategy_name, snapshots):
             })
             continue
 
+        summary["approved_candidates"] += 1
         summary["candidate_signals"] += 1
         profit_target_pct = decision["profit_target_pct"]
         if profit_target_pct is None:
@@ -529,6 +542,47 @@ def simulate_strategy(strategy_name, snapshots):
     }
 
 
+def top_summary(strategies):
+    summary_rows = []
+    for name, payload in strategies.items():
+        summary = payload["summary"]
+        total_net = summary.get("total_net_return_pct")
+        trades = summary.get("trades", 0)
+        if trades > 0 and total_net is not None:
+            score = (1, total_net, summary.get("win_rate") or 0.0)
+        else:
+            score = (0, float("-inf"), float("-inf"))
+        summary_rows.append((score, name, summary))
+
+    best_score, best_name, best_summary = max(summary_rows, key=lambda item: item[0])
+    best_strategy = None
+    best_strategy_reason = "No strategy produced any completed trades in this window."
+    if best_score[0] > 0:
+        best_strategy = best_name
+        best_strategy_reason = (
+            f"Best completed-trade result by total net return over the window: "
+            f"{best_summary['total_net_return_pct']}% across {best_summary['trades']} trades."
+        )
+
+    return {
+        "best_strategy": best_strategy,
+        "best_strategy_reason": best_strategy_reason,
+        "strategy_headlines": {
+            name: {
+                "raw_candidates": payload["summary"].get("raw_candidates"),
+                "approved_candidates": payload["summary"].get("approved_candidates"),
+                "trades": payload["summary"].get("trades"),
+                "win_rate": payload["summary"].get("win_rate"),
+                "total_net_return_pct": payload["summary"].get("total_net_return_pct"),
+                "fill_rate_after_approval": payload["summary"].get(
+                    "fill_rate_after_approval"
+                ),
+            }
+            for name, payload in strategies.items()
+        }
+    }
+
+
 def build_report():
     now = now_utc()
     since_dt = now - timedelta(hours=BACKTEST_WINDOW_HOURS)
@@ -561,6 +615,7 @@ def build_report():
             "cooldown_minutes": BACKTEST_COOLDOWN_MINUTES,
             "fee_bps": BACKTEST_FEE_BPS
         },
+        "top_summary": top_summary(strategies),
         "strategies": strategies,
         "bot_outputs": {
             name: payload["summary"]
