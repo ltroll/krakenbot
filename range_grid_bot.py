@@ -1772,8 +1772,6 @@ def main():
         message="Range Grid Average bot starting",
         **instance_identity,
         config_file=CONFIG_FILE,
-        state_file=STATE_FILE,
-        log_file=LOG_FILE,
         grid_anchor=grid_anchor,
         strategy_modes=strategy_modes,
         range_window_hours=range_window_hours,
