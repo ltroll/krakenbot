@@ -43,6 +43,10 @@ BACKTEST_COOLDOWN_MINUTES = float(
 )
 BACKTEST_FEE_BPS = float(os.getenv("LLM_TARGET_BACKTEST_FEE_BPS", "0.0"))
 BACKTEST_RECENT_LIMIT = int(os.getenv("LLM_TARGET_BACKTEST_RECENT_LIMIT", "25"))
+SNAPSHOT_ROTATE_DAILY = os.getenv(
+    "LLM_TARGET_BACKTEST_ROTATE_DAILY",
+    "true"
+).strip().lower() in ("1", "true", "yes", "on")
 
 
 def now_utc():
@@ -73,6 +77,39 @@ def load_jsonl(path):
             except Exception:
                 continue
     return rows
+
+
+def rotated_snapshot_path(base_path, dt):
+    root, ext = os.path.splitext(base_path)
+    suffix = dt.strftime("%Y%m%d")
+    return f"{root}_{suffix}{ext or '.jsonl'}"
+
+
+def daterange(start_date, end_date):
+    current = start_date
+    while current <= end_date:
+        yield current
+        current += timedelta(days=1)
+
+
+def snapshot_source_files(base_path, since_dt, until_dt):
+    rotated_files = []
+    if SNAPSHOT_ROTATE_DAILY:
+        for day in daterange(since_dt.date(), until_dt.date()):
+            rotated_path = rotated_snapshot_path(
+                base_path,
+                datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+            )
+            if os.path.exists(rotated_path):
+                rotated_files.append(os.path.abspath(rotated_path))
+
+    if rotated_files:
+        return rotated_files
+
+    if os.path.exists(base_path):
+        return [os.path.abspath(base_path)]
+
+    return []
 
 
 def strategy_config(snapshot):
@@ -586,7 +623,10 @@ def top_summary(strategies):
 def build_report():
     now = now_utc()
     since_dt = now - timedelta(hours=BACKTEST_WINDOW_HOURS)
-    all_snapshots = load_jsonl(SNAPSHOT_LOG_FILE)
+    snapshot_files = snapshot_source_files(SNAPSHOT_LOG_FILE, since_dt, now)
+    all_snapshots = []
+    for path in snapshot_files:
+        all_snapshots.extend(load_jsonl(path))
     snapshots = [
         snapshot
         for snapshot in all_snapshots
@@ -603,6 +643,7 @@ def build_report():
     return {
         "timestamp": now.isoformat(),
         "snapshot_file": os.path.abspath(SNAPSHOT_LOG_FILE),
+        "snapshot_files": snapshot_files,
         "since": since_dt.isoformat(),
         "snapshot_count": len(snapshots),
         "simulation": {

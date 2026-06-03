@@ -89,6 +89,7 @@ class LlmTargetBacktestTests(unittest.TestCase):
         self.original_stop_loss_pct = backtest.BACKTEST_STOP_LOSS_PCT
         self.original_cooldown_minutes = backtest.BACKTEST_COOLDOWN_MINUTES
         self.original_fee_bps = backtest.BACKTEST_FEE_BPS
+        self.original_rotate_daily = backtest.SNAPSHOT_ROTATE_DAILY
 
     def tearDown(self):
         backtest.SNAPSHOT_LOG_FILE = self.original_snapshot_log_file
@@ -100,6 +101,7 @@ class LlmTargetBacktestTests(unittest.TestCase):
         backtest.BACKTEST_STOP_LOSS_PCT = self.original_stop_loss_pct
         backtest.BACKTEST_COOLDOWN_MINUTES = self.original_cooldown_minutes
         backtest.BACKTEST_FEE_BPS = self.original_fee_bps
+        backtest.SNAPSHOT_ROTATE_DAILY = self.original_rotate_daily
 
     def test_with_target_quality_uses_quality_profit_target(self):
         snapshots = [
@@ -174,6 +176,27 @@ class LlmTargetBacktestTests(unittest.TestCase):
                 "with_target_quality"
             )
             self.assertIn("strategy_headlines", report["top_summary"])
+            self.assertEqual(len(report["snapshot_files"]), 1)
+
+    def test_snapshot_source_files_prefers_rotated_daily_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_path = os.path.join(tmpdir, "snapshots.jsonl")
+            may30 = os.path.join(tmpdir, "snapshots_20260530.jsonl")
+            may31 = os.path.join(tmpdir, "snapshots_20260531.jsonl")
+            june01 = os.path.join(tmpdir, "snapshots_20260601.jsonl")
+
+            for path in (may30, may31, june01):
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("")
+
+            backtest.SNAPSHOT_ROTATE_DAILY = True
+            files = backtest.snapshot_source_files(
+                base_path,
+                backtest.parse_iso8601("2026-05-31T12:00:00+00:00"),
+                backtest.parse_iso8601("2026-06-01T12:00:00+00:00"),
+            )
+
+            self.assertEqual(files, [os.path.abspath(may31), os.path.abspath(june01)])
 
 
 if __name__ == "__main__":

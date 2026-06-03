@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import socket
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import requests
@@ -33,6 +33,14 @@ SNAPSHOT_LOG_FILE = os.getenv(
     "LLM_TARGET_BACKTEST_SNAPSHOT_FILE",
     "llm_target_backtest_snapshot_log.jsonl"
 )
+SNAPSHOT_ROTATE_DAILY = os.getenv(
+    "LLM_TARGET_BACKTEST_ROTATE_DAILY",
+    "true"
+).strip().lower() in ("1", "true", "yes", "on")
+SNAPSHOT_RETENTION_DAYS = int(os.getenv(
+    "LLM_TARGET_BACKTEST_SNAPSHOT_RETENTION_DAYS",
+    "14"
+))
 SNAPSHOT_REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
 
 
@@ -206,6 +214,43 @@ def append_jsonl(path, record):
         f.write(json.dumps(record) + "\n")
 
 
+def rotated_snapshot_path(base_path, dt):
+    root, ext = os.path.splitext(base_path)
+    suffix = dt.strftime("%Y%m%d")
+    return f"{root}_{suffix}{ext or '.jsonl'}"
+
+
+def prune_rotated_snapshots(base_path, retention_days, now=None):
+    if retention_days <= 0:
+        return []
+
+    now = now or now_utc()
+    cutoff_date = (now - timedelta(days=retention_days)).date()
+    directory = os.path.dirname(base_path) or "."
+    base_name = os.path.basename(base_path)
+    root, ext = os.path.splitext(base_name)
+    suffix_ext = ext or ".jsonl"
+    prefix = f"{root}_"
+
+    removed = []
+    try:
+        for name in os.listdir(directory):
+            if not name.startswith(prefix) or not name.endswith(suffix_ext):
+                continue
+            stamp = name[len(prefix):-len(suffix_ext)]
+            try:
+                file_date = datetime.strptime(stamp, "%Y%m%d").date()
+            except ValueError:
+                continue
+            if file_date < cutoff_date:
+                os.remove(os.path.join(directory, name))
+                removed.append(name)
+    except FileNotFoundError:
+        pass
+
+    return removed
+
+
 def build_snapshot():
     captured_at = now_utc().isoformat()
     signal_source = SIGNAL_FILE or LLM_SIGNAL_URL
@@ -275,12 +320,27 @@ def build_snapshot():
 
 def main():
     snapshot = build_snapshot()
-    append_jsonl(SNAPSHOT_LOG_FILE, snapshot)
+    now = now_utc()
+    actual_snapshot_file = SNAPSHOT_LOG_FILE
+    pruned_files = []
+    if SNAPSHOT_ROTATE_DAILY:
+        actual_snapshot_file = rotated_snapshot_path(SNAPSHOT_LOG_FILE, now)
+        pruned_files = prune_rotated_snapshots(
+            SNAPSHOT_LOG_FILE,
+            SNAPSHOT_RETENTION_DAYS,
+            now=now
+        )
+
+    append_jsonl(actual_snapshot_file, snapshot)
     print(
         json.dumps(
             {
                 "captured_at": snapshot["captured_at"],
-                "snapshot_file": os.path.abspath(SNAPSHOT_LOG_FILE),
+                "snapshot_file": os.path.abspath(actual_snapshot_file),
+                "snapshot_file_base": os.path.abspath(SNAPSHOT_LOG_FILE),
+                "rotate_daily": SNAPSHOT_ROTATE_DAILY,
+                "retention_days": SNAPSHOT_RETENTION_DAYS,
+                "pruned_files": pruned_files,
                 "errors": snapshot["errors"],
                 "signal_ok": snapshot["signal"]["ok"],
                 "target_quality_ok": snapshot["target_quality"]["ok"],
