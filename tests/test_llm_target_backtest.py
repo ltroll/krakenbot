@@ -177,6 +177,49 @@ class LlmTargetBacktestTests(unittest.TestCase):
             )
             self.assertIn("strategy_headlines", report["top_summary"])
             self.assertEqual(len(report["snapshot_files"]), 1)
+            self.assertIsNone(report["snapshot_diagnostics"]["empty_window_reason"])
+
+    def test_build_report_diagnoses_missing_snapshot_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backtest.SNAPSHOT_LOG_FILE = os.path.join(tmpdir, "snapshots.jsonl")
+            backtest.SNAPSHOT_ROTATE_DAILY = True
+            backtest.BACKTEST_WINDOW_HOURS = 24
+
+            report = backtest.build_report()
+
+            diagnostics = report["snapshot_diagnostics"]
+            self.assertEqual(report["snapshot_count"], 0)
+            self.assertEqual(report["snapshot_files"], [])
+            self.assertEqual(
+                diagnostics["empty_window_reason"],
+                "no snapshot files found"
+            )
+            self.assertGreaterEqual(len(diagnostics["expected_snapshot_files"]), 1)
+            self.assertFalse(diagnostics["expected_file_metadata"][0]["exists"])
+
+    def test_build_report_diagnoses_snapshots_outside_window(self):
+        snapshots = [make_snapshot("2026-05-30T12:00:00+00:00", 101.0)]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_file = os.path.join(tmpdir, "snapshots.jsonl")
+            with open(snapshot_file, "w", encoding="utf-8") as f:
+                for row in snapshots:
+                    f.write(json.dumps(row) + "\n")
+
+            backtest.SNAPSHOT_LOG_FILE = snapshot_file
+            backtest.SNAPSHOT_ROTATE_DAILY = False
+            backtest.BACKTEST_WINDOW_HOURS = 1
+
+            report = backtest.build_report()
+
+            diagnostics = report["snapshot_diagnostics"]
+            self.assertEqual(report["snapshot_count"], 0)
+            self.assertEqual(diagnostics["loaded_snapshot_count"], 1)
+            self.assertEqual(diagnostics["filtered_out_by_window"], 1)
+            self.assertEqual(
+                diagnostics["empty_window_reason"],
+                "all loaded snapshots were older than the report window"
+            )
 
     def test_snapshot_source_files_prefers_rotated_daily_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:

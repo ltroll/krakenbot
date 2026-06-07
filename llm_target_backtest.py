@@ -112,6 +112,41 @@ def snapshot_source_files(base_path, since_dt, until_dt):
     return []
 
 
+def expected_snapshot_source_files(base_path, since_dt, until_dt):
+    if SNAPSHOT_ROTATE_DAILY:
+        return [
+            os.path.abspath(rotated_snapshot_path(
+                base_path,
+                datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+            ))
+            for day in daterange(since_dt.date(), until_dt.date())
+        ]
+
+    return [os.path.abspath(base_path)]
+
+
+def snapshot_file_metadata(paths):
+    metadata = []
+    for path in paths:
+        exists = os.path.exists(path)
+        row_count = None
+        if exists:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    row_count = sum(1 for line in f if line.strip())
+            except Exception:
+                row_count = None
+
+        metadata.append({
+            "path": path,
+            "exists": exists,
+            "size_bytes": os.path.getsize(path) if exists else None,
+            "row_count": row_count,
+        })
+
+    return metadata
+
+
 def strategy_config(snapshot):
     profile = snapshot.get("strategy_profile", {})
     payload = profile.get("payload", {})
@@ -623,6 +658,11 @@ def top_summary(strategies):
 def build_report():
     now = now_utc()
     since_dt = now - timedelta(hours=BACKTEST_WINDOW_HOURS)
+    expected_snapshot_files = expected_snapshot_source_files(
+        SNAPSHOT_LOG_FILE,
+        since_dt,
+        now
+    )
     snapshot_files = snapshot_source_files(SNAPSHOT_LOG_FILE, since_dt, now)
     all_snapshots = []
     for path in snapshot_files:
@@ -633,6 +673,7 @@ def build_report():
         if (snapshot_timestamp(snapshot) or datetime.min.replace(tzinfo=timezone.utc)) >= since_dt
     ]
     snapshots.sort(key=lambda snapshot: snapshot_timestamp(snapshot) or datetime.min.replace(tzinfo=timezone.utc))
+    filtered_out_by_window = len(all_snapshots) - len(snapshots)
 
     strategies = {
         "with_target_quality": simulate_strategy("with_target_quality", snapshots),
@@ -644,6 +685,23 @@ def build_report():
         "timestamp": now.isoformat(),
         "snapshot_file": os.path.abspath(SNAPSHOT_LOG_FILE),
         "snapshot_files": snapshot_files,
+        "snapshot_diagnostics": {
+            "rotate_daily": SNAPSHOT_ROTATE_DAILY,
+            "expected_snapshot_files": expected_snapshot_files,
+            "found_snapshot_files": snapshot_files,
+            "expected_file_metadata": snapshot_file_metadata(expected_snapshot_files),
+            "loaded_snapshot_count": len(all_snapshots),
+            "filtered_out_by_window": filtered_out_by_window,
+            "empty_window_reason": (
+                "no snapshot files found"
+                if not snapshot_files else
+                "snapshot files had no rows"
+                if not all_snapshots else
+                "all loaded snapshots were older than the report window"
+                if not snapshots else
+                None
+            ),
+        },
         "since": since_dt.isoformat(),
         "snapshot_count": len(snapshots),
         "simulation": {
