@@ -17,6 +17,7 @@ def make_snapshot(
 ):
     strategy_payload = {
         "target_profit_pct": 0.005,
+        "round_trip_fee_pct": 0.0032,
         "target_limit_max_premium_pct": 0.01,
         "prevent_buy_above_last_sell": True,
         "buy_after_sell_discount_pct": 0.001,
@@ -119,6 +120,9 @@ class LlmTargetBacktestTests(unittest.TestCase):
         trade = result["recent_trades"][0]
         self.assertEqual(trade["exit_reason"], "take_profit")
         self.assertAlmostEqual(trade["exit_price"], 100.7, places=2)
+        self.assertAlmostEqual(trade["fee_bps"], 32.0, places=2)
+        self.assertAlmostEqual(trade["gross_return_pct"], 0.7, places=2)
+        self.assertAlmostEqual(trade["net_return_pct"], 0.38, places=2)
 
     def test_with_target_quality_blocks_low_sample_target(self):
         quality_targets = [{
@@ -140,6 +144,50 @@ class LlmTargetBacktestTests(unittest.TestCase):
         self.assertEqual(result["summary"]["approved_candidates"], 0)
         self.assertIsNone(result["summary"]["fill_rate_after_approval"])
         self.assertEqual(result["summary"]["blocked_by_target_quality"], 1)
+
+    def test_sentiment_block_records_shadow_target_quality(self):
+        snapshots = [
+            make_snapshot(
+                "2026-05-30T12:00:00+00:00",
+                101.0,
+                action_recommendation="contrarian_watch"
+            )
+        ]
+
+        result = backtest.simulate_strategy("with_target_quality", snapshots)
+
+        summary = result["summary"]
+        self.assertEqual(summary["raw_candidates"], 1)
+        self.assertEqual(summary["approved_candidates"], 0)
+        self.assertEqual(summary["blocked_by_sentiment"], 1)
+        self.assertEqual(summary["shadow_target_quality_approved"], 1)
+        self.assertEqual(summary["shadow_target_quality_rejected"], 0)
+        decision = result["recent_decisions"][0]
+        self.assertTrue(decision["shadow_target_quality"]["allowed"])
+
+    def test_negative_best_trade_result_mentions_no_trade_outperformed(self):
+        strategies = {
+            "with_target_quality": {
+                "summary": {
+                    **backtest.empty_summary(),
+                    "trades": 0,
+                    "total_net_return_pct": None,
+                }
+            },
+            "price_target_only": {
+                "summary": {
+                    **backtest.empty_summary(),
+                    "trades": 1,
+                    "win_rate": 0.0,
+                    "total_net_return_pct": -0.5,
+                }
+            },
+        }
+
+        summary = backtest.top_summary(strategies)
+
+        self.assertEqual(summary["best_strategy"], "price_target_only")
+        self.assertIn("No-trade outperformed", summary["best_strategy_reason"])
 
     def test_build_report_and_write_report(self):
         snapshots = [

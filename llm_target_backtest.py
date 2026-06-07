@@ -191,6 +191,22 @@ def snapshot_timestamp(snapshot):
     return parse_iso8601(snapshot.get("captured_at"))
 
 
+def effective_fee_bps(snapshot=None):
+    if BACKTEST_FEE_BPS > 0:
+        return BACKTEST_FEE_BPS
+
+    if snapshot is None:
+        return BACKTEST_FEE_BPS
+
+    round_trip_fee_pct = numeric_or_none(
+        strategy_config(snapshot).get("round_trip_fee_pct")
+    )
+    if round_trip_fee_pct is None:
+        return BACKTEST_FEE_BPS
+
+    return round_trip_fee_pct * 10000.0
+
+
 def select_target_candidate(snapshot, current_price, last_sell_price=None):
     signal = signal_payload(snapshot)
     targets = signal.get("target_prices", [])
@@ -232,7 +248,7 @@ def select_target_candidate(snapshot, current_price, last_sell_price=None):
     return max(valid, key=lambda item: item["buy_price"])
 
 
-def quality_decision(snapshot, candidate, strategy_name):
+def quality_decision(snapshot, candidate, strategy_name, ignore_sentiment=False):
     config = strategy_config(snapshot)
 
     if strategy_name == "price_target_only":
@@ -254,7 +270,7 @@ def quality_decision(snapshot, candidate, strategy_name):
     if not isinstance(action_policy, dict):
         action_policy = {}
 
-    if action_recommendation != "bullish_allowed":
+    if not ignore_sentiment and action_recommendation != "bullish_allowed":
         return {
             "allowed": False,
             "reason": "blocked",
@@ -370,9 +386,9 @@ def exit_prices(entry_price, target_profit_pct):
     return tp_price, sl_price
 
 
-def compute_trade_stats(entry_price, exit_price, high_water, low_water):
+def compute_trade_stats(entry_price, exit_price, high_water, low_water, fee_bps=None):
     gross_return_pct = ((exit_price - entry_price) / entry_price) * 100.0
-    fee_pct = BACKTEST_FEE_BPS / 100.0
+    fee_pct = (BACKTEST_FEE_BPS if fee_bps is None else fee_bps) / 100.0
     net_return_pct = gross_return_pct - fee_pct
     max_runup_pct = ((high_water - entry_price) / entry_price) * 100.0
     max_drawdown_pct = ((low_water - entry_price) / entry_price) * 100.0
@@ -384,6 +400,7 @@ def empty_summary():
         "trades": 0,
         "win_rate": None,
         "avg_net_return_pct": None,
+        "avg_fee_bps": None,
         "total_net_return_pct": None,
         "avg_hold_minutes": None,
         "take_profit_count": 0,
@@ -396,6 +413,9 @@ def empty_summary():
         "candidate_signals": 0,
         "blocked_by_sentiment": 0,
         "blocked_by_target_quality": 0,
+        "shadow_target_quality_approved": 0,
+        "shadow_target_quality_rejected": 0,
+        "shadow_target_quality_unavailable": 0,
         "missing_signal": 0,
         "missing_price": 0,
         "no_target": 0,
@@ -422,6 +442,10 @@ def finalize_summary(summary, trades):
     summary["win_rate"] = round(len(winning) / len(trades), 4)
     summary["avg_net_return_pct"] = round(
         sum(trade["net_return_pct"] for trade in trades) / len(trades),
+        6
+    )
+    summary["avg_fee_bps"] = round(
+        sum(trade.get("fee_bps", 0.0) for trade in trades) / len(trades),
         6
     )
     summary["total_net_return_pct"] = round(
@@ -507,7 +531,8 @@ def simulate_strategy(strategy_name, snapshots):
                         position["entry_price"],
                         exit_price,
                         position["high_water"],
-                        position["low_water"]
+                        position["low_water"],
+                        position["fee_bps"]
                     )
                 )
                 trade = {
@@ -521,6 +546,7 @@ def simulate_strategy(strategy_name, snapshots):
                     "exit_time": timestamp.isoformat(),
                     "exit_price": round(exit_price, 2),
                     "exit_reason": exit_reason,
+                    "fee_bps": round(position["fee_bps"], 6),
                     "gross_return_pct": round(gross_return_pct, 6),
                     "net_return_pct": round(net_return_pct, 6),
                     "max_runup_pct": round(max_runup_pct, 6),
@@ -563,15 +589,40 @@ def simulate_strategy(strategy_name, snapshots):
         if strategy_name != "price_target_only" and not decision["allowed"]:
             if decision["reason"] == "blocked":
                 summary["blocked_by_sentiment"] += 1
+                shadow_quality = None
+                if strategy_name == "with_target_quality":
+                    shadow_quality = quality_decision(
+                        snapshot,
+                        candidate,
+                        strategy_name,
+                        ignore_sentiment=True
+                    )
+                    if shadow_quality["allowed"]:
+                        summary["shadow_target_quality_approved"] += 1
+                    elif shadow_quality["reason"].startswith("target_quality_unavailable"):
+                        summary["shadow_target_quality_unavailable"] += 1
+                    else:
+                        summary["shadow_target_quality_rejected"] += 1
             else:
                 summary["blocked_by_target_quality"] += 1
-            recent_decisions.append({
+                shadow_quality = None
+            decision_record = {
                 "strategy": strategy_name,
                 "decision_time": timestamp.isoformat(),
                 "signal_timestamp": signal.get("processed_at"),
                 "decision_price": price,
                 "buy_target": candidate,
                 "policy": policy
+            }
+            if shadow_quality is not None:
+                decision_record["shadow_target_quality"] = {
+                    "allowed": shadow_quality["allowed"],
+                    "reason": shadow_quality["reason"],
+                    "policy": shadow_quality["policy"],
+                    "profit_target_pct": shadow_quality["profit_target_pct"],
+                }
+            recent_decisions.append({
+                **decision_record
             })
             continue
 
@@ -592,6 +643,7 @@ def simulate_strategy(strategy_name, snapshots):
             "policy": policy,
             "fill_deadline": timestamp + timedelta(hours=BACKTEST_ENTRY_WAIT_HOURS),
             "target_profit_pct": profit_target_pct,
+            "fee_bps": effective_fee_bps(snapshot),
             "execution_signal": numeric_or_none(signal.get("execution_signal")),
             "confidence": numeric_or_none(signal.get("confidence")),
             "contributor_count": signal.get("contributor_count"),
@@ -635,6 +687,8 @@ def top_summary(strategies):
             f"Best completed-trade result by total net return over the window: "
             f"{best_summary['total_net_return_pct']}% across {best_summary['trades']} trades."
         )
+        if best_summary["total_net_return_pct"] < 0:
+            best_strategy_reason += " No-trade outperformed all completed-trade strategies."
 
     return {
         "best_strategy": best_strategy,
@@ -712,7 +766,12 @@ def build_report():
             "stop_loss_pct": BACKTEST_STOP_LOSS_PCT,
             "max_hold_hours": BACKTEST_MAX_HOLD_HOURS,
             "cooldown_minutes": BACKTEST_COOLDOWN_MINUTES,
-            "fee_bps": BACKTEST_FEE_BPS
+            "fee_bps": BACKTEST_FEE_BPS,
+            "fee_source": (
+                "LLM_TARGET_BACKTEST_FEE_BPS"
+                if BACKTEST_FEE_BPS > 0 else
+                "strategy_profile.round_trip_fee_pct"
+            )
         },
         "top_summary": top_summary(strategies),
         "strategies": strategies,
