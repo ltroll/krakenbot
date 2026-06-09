@@ -45,6 +45,9 @@ KRAKEN_API_SECRET=
 KRAKEN_API_URL=https://api.kraken.com
 KRAKEN_TICKER_URL=https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD
 LLM_SIGNAL_URL=http://<host>/bot/llm_signal.json
+# For multi-asset sentiment:
+# LLM_SIGNAL_URL=http://<host>/bot/multi_asset_signal.json
+# SIGNAL_ASSET_ID=BTC
 BOT_POLICY_BACKTEST_URL=http://<host>/bot/bot_policy_backtest.json
 BOT_REPLAY_BACKTEST_URL=http://<host>/bot/bot_replay_backtest.json
 PRICE_LOG_URL=http://<host>/bot/btc_price_log.jsonl
@@ -70,6 +73,9 @@ KRAKEN_TICKER_URL=https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD
 KRAKEN_ORDERBOOK_URL=https://api.kraken.com/0/public/Depth?pair=XBTUSD&count=5
 KRAKEN_OHLC_URL=https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=60
 LLM_SIGNAL_URL=http://<host>/bot/llm_signal.json
+# For multi-asset sentiment:
+# LLM_SIGNAL_URL=http://<host>/bot/multi_asset_signal.json
+# SIGNAL_ASSET_ID=BTC
 BOT_POLICY_BACKTEST_URL=http://<host>/bot/bot_policy_backtest.json
 BOT_REPLAY_BACKTEST_URL=http://<host>/bot/bot_replay_backtest.json
 PRICE_LOG_URL=http://<host>/bot/btc_price_log.jsonl

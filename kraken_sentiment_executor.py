@@ -172,6 +172,11 @@ KRAKEN_API_URL = os.getenv("KRAKEN_API_URL", "https://api.kraken.com")
 KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
 KRAKEN_ORDERBOOK_URL = os.getenv("KRAKEN_ORDERBOOK_URL")
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
+SIGNAL_ASSET_ID = (
+    os.getenv("SENTIMENT_ASSET_ID")
+    or os.getenv("SIGNAL_ASSET_ID")
+    or os.getenv("ASSET_ID")
+)
 SIGNAL_FILE = os.getenv("SIGNAL_FILE")
 BOT_POLICY_BACKTEST_URL = (
     CLI_ARGS.bot_policy_backtest_url
@@ -195,6 +200,22 @@ BUYNOW_USD = CLI_ARGS.buynow_usd or CLI_ARGS.backtest_usd
 if BUYNOW_USD is None and os.getenv("BUYNOW_USD"):
     BUYNOW_USD = float(os.getenv("BUYNOW_USD"))
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
+
+
+def infer_asset_id_from_pair(pair):
+    pair = (pair or "").upper()
+    if "ETH" in pair or "XETH" in pair:
+        return "ETH"
+    if "SOL" in pair:
+        return "SOL"
+    if "XBT" in pair or "BTC" in pair:
+        return "BTC"
+    return "BTC"
+
+
+SELECTED_SIGNAL_ASSET_ID = (
+    SIGNAL_ASSET_ID or infer_asset_id_from_pair(KRAKEN_PAIR)
+).upper()
 
 
 def key_fingerprint(value):
@@ -1675,6 +1696,54 @@ def run_buynow():
     return 1
 
 
+def select_asset_signal(signal):
+    assets = signal.get("assets")
+    if not isinstance(assets, dict):
+        return signal
+
+    asset_id = SELECTED_SIGNAL_ASSET_ID
+    selected = assets.get(asset_id)
+    if isinstance(selected, dict):
+        result = dict(selected)
+        result.setdefault("processed_at", signal.get("processed_at"))
+        result.setdefault("schema_version", signal.get("single_asset_schema_version"))
+        return result
+
+    available = ",".join(sorted(str(key) for key in assets.keys()))
+    log_event(
+        "SIGNAL_ASSET_MISSING",
+        requested_asset_id=asset_id,
+        available_asset_ids=available
+    )
+    return {}
+
+
+def normalize_price_regime(price_regime):
+    normalized = dict(price_regime)
+    aliases = {
+        "range_position": "range_position_24h",
+        "realized_volatility_pct": "realized_volatility_24h_pct",
+        "price_high": "price_high_24h",
+        "price_low": "price_low_24h",
+        "price_mean": "price_mean_24h",
+        "price_median": "price_median_24h",
+        "price_return_24h_pct": "return_24h_pct",
+    }
+    for source, target in aliases.items():
+        if target not in normalized and source in normalized:
+            normalized[target] = normalized[source]
+    return normalized
+
+
+def normalize_source_status(source_status):
+    normalized = dict(source_status)
+    if "asset_price" in normalized and "market_data" not in normalized:
+        normalized["market_data"] = normalized["asset_price"]
+    if "asset_price_regime" in normalized and "price_regime" not in normalized:
+        normalized["price_regime"] = normalized["asset_price_regime"]
+    return normalized
+
+
 def normalize_signal(signal):
     if not isinstance(signal, dict):
         return {
@@ -1683,9 +1752,14 @@ def normalize_signal(signal):
             "price_regime": {}
         }
 
+    signal = select_asset_signal(signal)
+
     price_regime = signal.get("price_regime")
     if not isinstance(price_regime, dict):
+        price_regime = signal.get("asset_price_regime")
+    if not isinstance(price_regime, dict):
         price_regime = {}
+    price_regime = normalize_price_regime(price_regime)
 
     kraken_flow = signal.get("kraken_flow")
     if not isinstance(kraken_flow, dict):
@@ -1694,6 +1768,7 @@ def normalize_signal(signal):
     source_status = signal.get("source_status")
     if not isinstance(source_status, dict):
         source_status = {}
+    source_status = normalize_source_status(source_status)
 
     action_policy = signal.get("action_policy")
     if not isinstance(action_policy, dict):
@@ -1704,9 +1779,22 @@ def normalize_signal(signal):
         target_prices = []
 
     return {
+        "asset_id": signal.get("asset_id"),
+        "asset_symbol": signal.get("asset", {}).get("symbol")
+        if isinstance(signal.get("asset"), dict)
+        else signal.get("asset_id"),
+        "asset_name": signal.get("asset", {}).get("name")
+        if isinstance(signal.get("asset"), dict)
+        else None,
+        "asset_price": signal.get("asset_price"),
+        "asset_sentiment": signal.get("asset_sentiment"),
+        "liquidity_risk": signal.get("liquidity_risk"),
+        "btc_relative_strength": signal.get("btc_relative_strength"),
+        "eth_relative_strength": signal.get("eth_relative_strength"),
+        "market_interpretation": signal.get("market_interpretation"),
         "execution_signal": float(signal.get("execution_signal", 0)),
         "confidence": float(signal.get("confidence", 0)),
-        "btc_sentiment": signal.get("btc_sentiment"),
+        "btc_sentiment": signal.get("btc_sentiment", signal.get("asset_sentiment")),
         "regulatory_risk": signal.get("regulatory_risk"),
         "macro_tightening_bias": signal.get("macro_tightening_bias"),
         "direction_bias": signal.get("direction_bias"),
@@ -1714,7 +1802,10 @@ def normalize_signal(signal):
         "smoothed_risk_multiplier": signal.get("smoothed_risk_multiplier"),
         "mean_reversion_opportunity": signal.get("mean_reversion_opportunity"),
         "flow_pressure": signal.get("flow_pressure"),
-        "raw_btc_sentiment": signal.get("raw_btc_sentiment"),
+        "raw_btc_sentiment": signal.get(
+            "raw_btc_sentiment",
+            signal.get("asset_sentiment")
+        ),
         "raw_confidence": signal.get("raw_confidence"),
         "raw_direction_bias": signal.get("raw_direction_bias"),
         "fear_greed_index": signal.get("fear_greed_index"),
@@ -2634,11 +2725,18 @@ def run_cycle():
     log_event(
         "SIGNAL_UPDATE",
         cycle_id=cycle_id,
+        signal_asset_id=sentiment.get("asset_id"),
+        signal_asset_symbol=sentiment.get("asset_symbol"),
+        asset_price=sentiment.get("asset_price"),
         price=price,
         execution_signal=raw_signal,
         smoothed_signal=smoothed_signal,
         weighted_signal=weighted_signal,
         confidence=confidence,
+        asset_sentiment=sentiment.get("asset_sentiment"),
+        liquidity_risk=sentiment.get("liquidity_risk"),
+        btc_relative_strength=sentiment.get("btc_relative_strength"),
+        eth_relative_strength=sentiment.get("eth_relative_strength"),
         btc_sentiment=sentiment.get("btc_sentiment"),
         raw_btc_sentiment=sentiment.get("raw_btc_sentiment"),
         raw_confidence=sentiment.get("raw_confidence"),
@@ -3162,6 +3260,8 @@ def main():
         state_file=STATE_FILE,
         log_file=LOG_FILE,
         pair=KRAKEN_PAIR,
+        signal_asset_id=SELECTED_SIGNAL_ASSET_ID,
+        signal_url=LLM_SIGNAL_URL,
         kraken_api_url=KRAKEN_API_URL,
         kraken_key_fingerprint=key_fingerprint(KRAKEN_API_KEY),
         request_timeout_seconds=REQUEST_TIMEOUT,
