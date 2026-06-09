@@ -39,6 +39,27 @@ class BacktestRun:
     error: Optional[str] = None
 
 
+@dataclass
+class LogSummary:
+    lines: list[str]
+    event_counts: Counter[str]
+    decision_reasons: Counter[str]
+    trade_events: Counter[str]
+    signal_statuses: Counter[str]
+
+
+@dataclass
+class ReportMetrics:
+    date: str
+    live_trade_events: int
+    replay_sentiment_trades: Optional[float]
+    replay_sentiment_return_pct: Optional[float]
+    replay_price_only_return_pct: Optional[float]
+    policy_sentiment_trades: Optional[float]
+    policy_sentiment_return_pct: Optional[float]
+    error_events: int
+
+
 def load_dotenv(path: Path) -> None:
     if not path.exists():
         return
@@ -292,14 +313,15 @@ def clean_log_line(line: str) -> str:
     return ANSI_RE.sub("", line).strip()
 
 
-def collect_log_lines(log_file: Path, since: datetime) -> tuple[list[str], Counter[str], Counter[str], Counter[str]]:
+def collect_log_lines(log_file: Path, since: datetime) -> LogSummary:
     lines: list[str] = []
     event_counts: Counter[str] = Counter()
     decision_reasons: Counter[str] = Counter()
     trade_events: Counter[str] = Counter()
+    signal_statuses: Counter[str] = Counter()
 
     if not log_file.exists():
-        return lines, event_counts, decision_reasons, trade_events
+        return LogSummary(lines, event_counts, decision_reasons, trade_events, signal_statuses)
 
     with log_file.open("r", encoding="utf-8", errors="replace") as handle:
         for raw_line in handle:
@@ -314,6 +336,8 @@ def collect_log_lines(log_file: Path, since: datetime) -> tuple[list[str], Count
             event_counts[event] += 1
             if event == "TRADE_DECISION":
                 decision_reasons[str(payload.get("reason") or "unknown")] += 1
+            if event == "SIGNAL_UPDATE":
+                signal_statuses[str(payload.get("signal_status") or "unknown")] += 1
             if event in {
                 "BUY_LIMIT_ORDER_PLACED",
                 "SELL_LIMIT_ORDER_PLACED",
@@ -324,7 +348,7 @@ def collect_log_lines(log_file: Path, since: datetime) -> tuple[list[str], Count
             }:
                 trade_events[event] += 1
 
-    return lines, event_counts, decision_reasons, trade_events
+    return LogSummary(lines, event_counts, decision_reasons, trade_events, signal_statuses)
 
 
 def load_json_path(path: Path) -> Optional[dict[str, Any]]:
@@ -360,8 +384,14 @@ def fmt_pct(value: Any) -> str:
 
 def fmt_count(value: Any) -> str:
     if isinstance(value, (int, float)):
-        return str(value)
+        return str(int(value)) if float(value).is_integer() else str(value)
     return "n/a"
+
+
+def number_value(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
 
 
 def strategy_rows(payload: Optional[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
@@ -377,6 +407,302 @@ def strategy_rows(payload: Optional[dict[str, Any]]) -> list[tuple[str, dict[str
             if isinstance(strategy, dict) and isinstance(strategy.get("summary"), dict):
                 rows.append((str(name), strategy["summary"]))
     return rows
+
+
+def strategy_summary(payload: Optional[dict[str, Any]], *names: str) -> dict[str, Any]:
+    rows = dict(strategy_rows(payload))
+    for name in names:
+        summary = rows.get(name)
+        if isinstance(summary, dict):
+            return summary
+    return {}
+
+
+def trade_event_total(trade_events: Counter[str]) -> int:
+    return sum(
+        trade_events.get(name, 0)
+        for name in (
+            "BUY_LIMIT_ORDER_PLACED",
+            "SELL_LIMIT_ORDER_PLACED",
+            "MARKET_BUY_PLACED",
+            "BUYNOW",
+            "BUY_FILLED",
+            "SELL_FILLED",
+        )
+    )
+
+
+def error_group_counts(event_counts: Counter[str], signal_statuses: Counter[str]) -> dict[str, int]:
+    tracker = (
+        event_counts.get("ORDER_TRACKER_CHECKIN_ERROR", 0)
+        + event_counts.get("ORDER_TRACKER_ERROR", 0)
+    )
+    kraken = event_counts.get("KRAKEN_EXCEPTION", 0)
+    sentiment = event_counts.get("SENTIMENT_ERROR", 0)
+    market = event_counts.get("PRICE_ERROR", 0) + event_counts.get("ORDERBOOK_ERROR", 0)
+    backtest = event_counts.get("BACKTEST_FETCH_ERROR", 0)
+    known = {
+        "ORDER_TRACKER_CHECKIN_ERROR",
+        "ORDER_TRACKER_ERROR",
+        "KRAKEN_EXCEPTION",
+        "SENTIMENT_ERROR",
+        "PRICE_ERROR",
+        "ORDERBOOK_ERROR",
+        "BACKTEST_FETCH_ERROR",
+    }
+    other = sum(
+        count
+        for event, count in event_counts.items()
+        if (event.endswith("ERROR") or event.endswith("EXCEPTION")) and event not in known
+    )
+    stale = sum(
+        count
+        for status, count in signal_statuses.items()
+        if status not in ("fresh", "unknown")
+    )
+    return {
+        "tracker_errors": tracker,
+        "kraken_exceptions": kraken,
+        "sentiment_errors": sentiment,
+        "market_data_errors": market,
+        "backtest_fetch_errors": backtest,
+        "other_errors": other,
+        "signal_stale_events": stale,
+    }
+
+
+def current_metrics(
+    date_label: str,
+    policy_json: Optional[dict[str, Any]],
+    replay_json: Optional[dict[str, Any]],
+    log_summary: LogSummary,
+) -> ReportMetrics:
+    policy = strategy_summary(policy_json, "sentiment_long_policy", "sentiment_policy")
+    replay = strategy_summary(replay_json, "with_sentiment_policy")
+    price_only = strategy_summary(replay_json, "price_target_only")
+    errors = error_group_counts(log_summary.event_counts, log_summary.signal_statuses)
+    return ReportMetrics(
+        date=date_label,
+        live_trade_events=trade_event_total(log_summary.trade_events),
+        replay_sentiment_trades=number_value(replay.get("trades")),
+        replay_sentiment_return_pct=number_value(replay.get("total_net_return_pct")),
+        replay_price_only_return_pct=number_value(price_only.get("total_net_return_pct")),
+        policy_sentiment_trades=number_value(policy.get("trades")),
+        policy_sentiment_return_pct=number_value(policy.get("total_net_return_pct")),
+        error_events=sum(errors.values()),
+    )
+
+
+def render_health_summary(
+    event_counts: Counter[str],
+    signal_statuses: Counter[str],
+) -> list[str]:
+    errors = error_group_counts(event_counts, signal_statuses)
+    network_errors = (
+        errors["tracker_errors"]
+        + errors["kraken_exceptions"]
+        + errors["sentiment_errors"]
+        + errors["market_data_errors"]
+        + errors["backtest_fetch_errors"]
+        + errors["other_errors"]
+    )
+    return [
+        "## Health Summary",
+        "",
+        f"- Network/API errors: {network_errors}",
+        f"- Kraken exceptions: {errors['kraken_exceptions']}",
+        f"- Tracker errors: {errors['tracker_errors']}",
+        f"- Sentiment fetch errors: {errors['sentiment_errors']}",
+        f"- Market data errors: {errors['market_data_errors']}",
+        f"- Backtest fetch errors: {errors['backtest_fetch_errors']}",
+        f"- Other errors: {errors['other_errors']}",
+        f"- Signal stale/non-fresh events: {errors['signal_stale_events']}",
+        "",
+    ]
+
+
+def render_verdict(metrics: ReportMetrics) -> list[str]:
+    notes: list[str] = []
+    verdict = "PASS"
+    live = metrics.live_trade_events
+    replay_trades = metrics.replay_sentiment_trades
+    price_return = metrics.replay_price_only_return_pct
+    policy_return = metrics.policy_sentiment_return_pct
+
+    if metrics.error_events:
+        verdict = "WARN"
+        notes.append(f"{metrics.error_events} health/error events were logged.")
+
+    if metrics.replay_sentiment_trades is None and metrics.policy_sentiment_trades is None:
+        verdict = "WARN"
+        notes.append("Backtest summaries were unavailable or could not be parsed.")
+
+    if replay_trades is not None:
+        if live == 0 and replay_trades == 0:
+            if isinstance(price_return, (int, float)) and price_return < 0:
+                notes.append("Live bot avoided a losing price-target replay day.")
+            else:
+                notes.append("Live bot matched replay: no sentiment-policy trades expected.")
+        elif live == 0 and replay_trades > 0:
+            verdict = "WARN"
+            notes.append(
+                "Replay expected sentiment-policy trades, but live bot logged no trade events."
+            )
+        elif live > 0 and replay_trades == 0:
+            verdict = "WARN"
+            notes.append(
+                "Live bot logged trade events while replay expected no sentiment-policy trades."
+            )
+        else:
+            notes.append("Live bot and replay both showed trading activity.")
+
+    if isinstance(policy_return, (int, float)) and policy_return < 0:
+        notes.append("Policy backtest trade outcome was negative.")
+    if isinstance(price_return, (int, float)) and price_return < 0:
+        notes.append("Price-target replay baseline was negative.")
+
+    if not notes:
+        notes.append("No obvious mismatch or health issue detected.")
+
+    return [
+        "## Verdict",
+        "",
+        f"Verdict: **{verdict}**",
+        "",
+        *[f"- {note}" for note in notes],
+        "",
+    ]
+
+
+def parse_float_text(value: str) -> Optional[float]:
+    value = value.strip()
+    if value in ("", "n/a"):
+        return None
+    value = value.rstrip("%")
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def parse_int_text(value: str) -> int:
+    parsed = parse_float_text(value)
+    return int(parsed) if parsed is not None else 0
+
+
+def parse_strategy_table_row(text: str, strategy: str) -> dict[str, Any]:
+    for line in text.splitlines():
+        if not line.startswith(f"| {strategy} |"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if len(cells) < 6:
+            return {}
+        return {
+            "trades": parse_float_text(cells[1]),
+            "total_net_return_pct": parse_float_text(cells[4]),
+        }
+    return {}
+
+
+def parse_event_count(text: str, event_name: str) -> int:
+    match = re.search(rf"^- {re.escape(event_name)}: (\d+)$", text, re.MULTILINE)
+    return int(match.group(1)) if match else 0
+
+
+def parse_old_report(path: Path) -> Optional[ReportMetrics]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    title = re.search(r"^# Bot Backtesting Report - ([0-9-]+)", text, re.MULTILINE)
+    if not title:
+        return None
+
+    replay = parse_strategy_table_row(text, "with_sentiment_policy")
+    price_only = parse_strategy_table_row(text, "price_target_only")
+    policy = parse_strategy_table_row(text, "sentiment_long_policy")
+    live_trade_events = sum(
+        parse_event_count(text, event)
+        for event in (
+            "BUY_LIMIT_ORDER_PLACED",
+            "SELL_LIMIT_ORDER_PLACED",
+            "MARKET_BUY_PLACED",
+            "BUYNOW",
+            "BUY_FILLED",
+            "SELL_FILLED",
+        )
+    )
+    error_events = sum(
+        parse_event_count(text, event)
+        for event in (
+            "ORDER_TRACKER_CHECKIN_ERROR",
+            "ORDER_TRACKER_ERROR",
+            "KRAKEN_EXCEPTION",
+            "SENTIMENT_ERROR",
+            "PRICE_ERROR",
+            "ORDERBOOK_ERROR",
+            "BACKTEST_FETCH_ERROR",
+        )
+    )
+
+    return ReportMetrics(
+        date=title.group(1),
+        live_trade_events=live_trade_events,
+        replay_sentiment_trades=number_value(replay.get("trades")),
+        replay_sentiment_return_pct=number_value(replay.get("total_net_return_pct")),
+        replay_price_only_return_pct=number_value(price_only.get("total_net_return_pct")),
+        policy_sentiment_trades=number_value(policy.get("trades")),
+        policy_sentiment_return_pct=number_value(policy.get("total_net_return_pct")),
+        error_events=error_events,
+    )
+
+
+def render_rolling_summary(
+    report_dir: Path,
+    report_path: Path,
+    current: ReportMetrics,
+    days: int = 7,
+) -> list[str]:
+    rows: dict[str, ReportMetrics] = {}
+    for path in report_dir.glob("backtesting_report_*.md"):
+        if path == report_path:
+            continue
+        parsed = parse_old_report(path)
+        if parsed:
+            rows[parsed.date] = parsed
+    rows[current.date] = current
+
+    ordered = [rows[key] for key in sorted(rows)[-days:]]
+    if not ordered:
+        return []
+
+    lines = [
+        "## Rolling Summary",
+        "",
+        f"Last {min(days, len(ordered))} report days:",
+        "",
+        "| date | live trade events | replay sentiment trades | replay sentiment return | price-only return | policy return | errors |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in ordered:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    row.date,
+                    str(row.live_trade_events),
+                    fmt_count(row.replay_sentiment_trades),
+                    fmt_pct(row.replay_sentiment_return_pct),
+                    fmt_pct(row.replay_price_only_return_pct),
+                    fmt_pct(row.policy_sentiment_return_pct),
+                    str(row.error_events),
+                ]
+            )
+            + " |"
+        )
+    lines.append("")
+    return lines
 
 
 def render_backtest_summary(title: str, source: str, payload: Optional[dict[str, Any]]) -> list[str]:
@@ -475,7 +801,7 @@ def write_report(args: argparse.Namespace, runs: list[BacktestRun]) -> Path:
     if not log_file.is_absolute():
         log_file = Path.cwd() / log_file
 
-    log_lines, event_counts, decision_reasons, trade_events = collect_log_lines(log_file, since)
+    log_summary = collect_log_lines(log_file, since)
     policy_json, policy_source = load_json_source(
         args.policy_url,
         Path(args.policy_output),
@@ -486,6 +812,12 @@ def write_report(args: argparse.Namespace, runs: list[BacktestRun]) -> Path:
         Path(args.replay_output),
         args.timeout_seconds,
     )
+    metrics = current_metrics(
+        now.date().isoformat(),
+        policy_json,
+        replay_json,
+        log_summary,
+    )
 
     report: list[str] = [
         f"# Bot Backtesting Report - {now.date().isoformat()}",
@@ -494,9 +826,32 @@ def write_report(args: argparse.Namespace, runs: list[BacktestRun]) -> Path:
         f"window_start_utc: `{since.isoformat()}`",
         f"window_hours: `{args.hours:g}`",
         "",
+    ]
+    report.extend(render_verdict(metrics))
+    report.extend(
+        render_health_summary(
+            log_summary.event_counts,
+            log_summary.signal_statuses,
+        )
+    )
+    report.extend(render_rolling_summary(report_dir, report_path, metrics))
+    report.extend(
+        [
+            "## Live Vs Backtest",
+            "",
+            f"- Live trade events: {metrics.live_trade_events}",
+            f"- Replay sentiment-policy trades: {fmt_count(metrics.replay_sentiment_trades)}",
+            f"- Policy backtest sentiment trades: {fmt_count(metrics.policy_sentiment_trades)}",
+            f"- Replay price-target-only return: {fmt_pct(metrics.replay_price_only_return_pct)}",
+            "",
+        ]
+    )
+    report.extend(
+        [
         "## Backtest Summaries",
         "",
-    ]
+        ]
+    )
     report.extend(render_backtest_summary("Policy Backtest", policy_source, policy_json))
     report.extend(render_backtest_summary("Replay Backtest", replay_source, replay_json))
 
@@ -509,26 +864,26 @@ def write_report(args: argparse.Namespace, runs: list[BacktestRun]) -> Path:
             "## Bot Log Summary",
             "",
             f"log_file: `{log_file}`",
-            f"lines_in_window: `{len(log_lines)}`",
+            f"lines_in_window: `{len(log_summary.lines)}`",
             "",
             "### Events",
             "",
-            *render_counter(event_counts),
+            *render_counter(log_summary.event_counts),
             "",
             "### Trade Decisions",
             "",
-            *render_counter(decision_reasons),
+            *render_counter(log_summary.decision_reasons),
             "",
             "### Trade Events",
             "",
-            *render_counter(trade_events),
+            *render_counter(log_summary.trade_events),
             "",
         ]
     )
 
     if not args.no_raw_log:
         report.extend(["## Raw Bot Logs", "", "```jsonl"])
-        report.extend(log_lines)
+        report.extend(log_summary.lines)
         report.extend(["```", ""])
 
     temp_path = report_path.with_suffix(".tmp")
