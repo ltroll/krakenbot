@@ -50,6 +50,7 @@ LLM_SIGNAL_URL=http://<host>/bot/llm_signal.json
 # SIGNAL_ASSET_ID=BTC
 BOT_POLICY_BACKTEST_URL=http://<host>/bot/bot_policy_backtest.json
 BOT_REPLAY_BACKTEST_URL=http://<host>/bot/bot_replay_backtest.json
+SIGNAL_FORWARD_BACKTEST_URL=http://<host>/bot/signal_forward_backtest.json
 PRICE_LOG_URL=http://<host>/bot/btc_price_log.jsonl
 RANGE_GRID_STRATEGY_PROFILE=range_grid_strategy_default.json
 SENTIMENT_STRATEGY_PROFILE=sentiment_strategy_default.json
@@ -78,6 +79,7 @@ LLM_SIGNAL_URL=http://<host>/bot/llm_signal.json
 # SIGNAL_ASSET_ID=BTC
 BOT_POLICY_BACKTEST_URL=http://<host>/bot/bot_policy_backtest.json
 BOT_REPLAY_BACKTEST_URL=http://<host>/bot/bot_replay_backtest.json
+SIGNAL_FORWARD_BACKTEST_URL=http://<host>/bot/signal_forward_backtest.json
 PRICE_LOG_URL=http://<host>/bot/btc_price_log.jsonl
 BOT_DIR_LIST_FILE=/home/<user>/tradingbot/bot_dirs.txt
 
@@ -147,9 +149,11 @@ writes `backtesting_report_YYYY-MM-DD.md` under
 `/var/www/html/bot/backtesting_reports`. Configure paths with
 `BACKTEST_SCRIPT_DIR`, `BACKTEST_REPORT_DIR`, `SENTIMENT_TRADE_LOG_FILE`, and
 the `BOT_*_BACKTEST_OUTPUT_FILE` variables in `.env`. If another host publishes
-the backtest JSON, set `BOT_POLICY_BACKTEST_URL` and `BOT_REPLAY_BACKTEST_URL`;
-the report will read those URLs for the summaries. Use `--skip-backtests` when
-the remote host is already producing the JSON and this bot should only build the
+the backtest JSON, set `BOT_POLICY_BACKTEST_URL`, `BOT_REPLAY_BACKTEST_URL`, and
+optionally `SIGNAL_FORWARD_BACKTEST_URL`; the report will read those URLs for
+the summaries. The signal-forward section calls out inverted bearish signals,
+contrarian value, and thin sample buckets. Use `--skip-backtests` when the
+remote host is already producing the JSON and this bot should only build the
 daily report.
 
 Lock down env file permissions because they contain Kraken secrets:
