@@ -192,6 +192,55 @@ class LlmTargetBacktestTests(unittest.TestCase):
         decision = result["recent_decisions"][0]
         self.assertTrue(decision["shadow_target_quality"]["allowed"])
 
+    def test_price_target_variant_uses_larger_profit_target(self):
+        snapshots = [
+            make_snapshot("2026-05-30T12:00:00+00:00", 101.0),
+            make_snapshot("2026-05-30T12:30:00+00:00", 100.0),
+            make_snapshot("2026-05-30T13:00:00+00:00", 100.7),
+            make_snapshot("2026-05-30T13:30:00+00:00", 100.8),
+        ]
+
+        default_result = backtest.simulate_strategy("price_target_only", snapshots)
+        variant_result = backtest.simulate_strategy(
+            "price_target_only_tp_0_8",
+            snapshots
+        )
+
+        self.assertEqual(default_result["recent_trades"][0]["exit_time"], "2026-05-30T13:00:00+00:00")
+        self.assertEqual(variant_result["recent_trades"][0]["exit_time"], "2026-05-30T13:30:00+00:00")
+        self.assertAlmostEqual(
+            variant_result["recent_trades"][0]["gross_return_pct"],
+            0.8,
+            places=2
+        )
+
+    def test_sentiment_discount_requires_deeper_entry(self):
+        shallow = make_snapshot(
+            "2026-05-30T12:00:00+00:00",
+            101.0,
+            action_recommendation="watch_only",
+            target_prices=[{"buy_price": 100.9, "sell_pct": 0.5}]
+        )
+        deep = make_snapshot(
+            "2026-05-30T12:30:00+00:00",
+            101.0,
+            action_recommendation="watch_only",
+            target_prices=[{"buy_price": 100.0, "sell_pct": 0.5}]
+        )
+        fill = make_snapshot("2026-05-30T13:00:00+00:00", 100.0)
+        exit_snapshot = make_snapshot("2026-05-30T13:30:00+00:00", 100.8)
+
+        result = backtest.simulate_strategy(
+            "sentiment_discount_with_quality",
+            [shallow, deep, fill, exit_snapshot]
+        )
+
+        summary = result["summary"]
+        self.assertEqual(summary["raw_candidates"], 2)
+        self.assertEqual(summary["blocked_by_sentiment"], 1)
+        self.assertEqual(summary["approved_candidates"], 1)
+        self.assertEqual(summary["trades"], 1)
+
     def test_negative_best_trade_result_mentions_no_trade_outperformed(self):
         strategies = {
             "with_target_quality": {
@@ -246,11 +295,10 @@ class LlmTargetBacktestTests(unittest.TestCase):
             self.assertTrue(os.path.exists(archive_file))
             self.assertIn("with_target_quality", report["strategies"])
             self.assertEqual(report["bot_outputs"]["with_target_quality"]["trades"], 1)
-            self.assertEqual(
-                report["top_summary"]["best_strategy"],
-                "with_target_quality"
-            )
+            self.assertIsNotNone(report["top_summary"]["best_strategy"])
             self.assertIn("strategy_headlines", report["top_summary"])
+            self.assertIn("price_target_only_tp_0_8", report["strategies"])
+            self.assertIn("sentiment_discount_with_quality", report["strategies"])
             self.assertEqual(len(report["snapshot_files"]), 1)
             self.assertIsNone(report["snapshot_diagnostics"]["empty_window_reason"])
 

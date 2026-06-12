@@ -51,6 +51,33 @@ SNAPSHOT_ROTATE_DAILY = os.getenv(
     "LLM_TARGET_BACKTEST_ROTATE_DAILY",
     "true"
 ).strip().lower() in ("1", "true", "yes", "on")
+BACKTEST_SENTIMENT_DISCOUNT_WATCH_PCT = float(os.getenv(
+    "LLM_TARGET_BACKTEST_SENTIMENT_DISCOUNT_WATCH_PCT",
+    "0.25"
+))
+BACKTEST_SENTIMENT_DISCOUNT_BEARISH_PCT = float(os.getenv(
+    "LLM_TARGET_BACKTEST_SENTIMENT_DISCOUNT_BEARISH_PCT",
+    "0.5"
+))
+
+
+BACKTEST_STRATEGIES = {
+    "with_target_quality": {},
+    "sentiment_policy_only": {},
+    "price_target_only": {},
+    "price_target_only_tp_0_8": {
+        "base_strategy": "price_target_only",
+        "profit_target_pct": 0.008,
+    },
+    "price_target_only_tp_1_0": {
+        "base_strategy": "price_target_only",
+        "profit_target_pct": 0.01,
+    },
+    "sentiment_discount_with_quality": {
+        "base_strategy": "with_target_quality",
+        "sentiment_discount": True,
+    },
+}
 
 
 def now_utc():
@@ -213,6 +240,48 @@ def effective_fee_bps(snapshot=None):
     return round_trip_fee_pct * 10000.0
 
 
+def strategy_options(strategy_name):
+    return BACKTEST_STRATEGIES.get(strategy_name, {})
+
+
+def base_strategy_name(strategy_name):
+    return strategy_options(strategy_name).get("base_strategy", strategy_name)
+
+
+def strategy_profit_target_override(strategy_name):
+    return strategy_options(strategy_name).get("profit_target_pct")
+
+
+def strategy_uses_sentiment_discount(strategy_name):
+    return bool(strategy_options(strategy_name).get("sentiment_discount"))
+
+
+def sentiment_discount_requirement_pct(snapshot, signal):
+    config = strategy_config(snapshot)
+    recommendation = signal.get("action_recommendation")
+    mode = (signal.get("market_interpretation") or {}).get("mode")
+
+    watch_discount = float(config.get(
+        "sentiment_discount_watch_pct",
+        BACKTEST_SENTIMENT_DISCOUNT_WATCH_PCT
+    ))
+    bearish_discount = float(config.get(
+        "sentiment_discount_bearish_pct",
+        BACKTEST_SENTIMENT_DISCOUNT_BEARISH_PCT
+    ))
+
+    if recommendation == "bullish_allowed":
+        return 0.0
+    if recommendation in ("watch_only", "contrarian_watch") or mode in (
+        "watch_only_rebound",
+        "contrarian_watch",
+    ):
+        return watch_discount
+    if recommendation in ("risk_off", "bearish_allowed"):
+        return bearish_discount
+    return None
+
+
 def select_target_candidate(snapshot, current_price, last_sell_price=None):
     signal = signal_payload(snapshot)
     targets = signal.get("target_prices", [])
@@ -254,10 +323,17 @@ def select_target_candidate(snapshot, current_price, last_sell_price=None):
     return max(valid, key=lambda item: item["buy_price"])
 
 
-def quality_decision(snapshot, candidate, strategy_name, ignore_sentiment=False):
+def quality_decision(
+    snapshot,
+    candidate,
+    strategy_name,
+    ignore_sentiment=False,
+    current_price=None
+):
+    effective_strategy = base_strategy_name(strategy_name)
     config = strategy_config(snapshot)
 
-    if strategy_name == "price_target_only":
+    if effective_strategy == "price_target_only":
         return {
             "allowed": True,
             "reason": "price_target_only",
@@ -276,7 +352,42 @@ def quality_decision(snapshot, candidate, strategy_name, ignore_sentiment=False)
     if not isinstance(action_policy, dict):
         action_policy = {}
 
-    if not ignore_sentiment and action_recommendation != "bullish_allowed":
+    if (
+        strategy_uses_sentiment_discount(strategy_name)
+        and not ignore_sentiment
+        and action_recommendation != "bullish_allowed"
+    ):
+        required_discount_pct = sentiment_discount_requirement_pct(snapshot, signal)
+        if required_discount_pct is None or current_price is None:
+            return {
+                "allowed": False,
+                "reason": "blocked",
+                "policy": {
+                    "recommendation": action_recommendation,
+                    "reason": action_policy.get("reason") or signal.get("reason"),
+                    "sentiment_discount_required_pct": required_discount_pct,
+                    "sentiment_discount_actual_pct": None,
+                },
+                "profit_target_pct": None
+            }
+
+        actual_discount_pct = (
+            (current_price - candidate["buy_price"]) / current_price
+        ) * 100.0
+        if actual_discount_pct < required_discount_pct:
+            return {
+                "allowed": False,
+                "reason": "blocked",
+                "policy": {
+                    "recommendation": action_recommendation,
+                    "reason": action_policy.get("reason") or signal.get("reason"),
+                    "sentiment_discount_required_pct": required_discount_pct,
+                    "sentiment_discount_actual_pct": round(actual_discount_pct, 6),
+                },
+                "profit_target_pct": None
+            }
+
+    elif not ignore_sentiment and action_recommendation != "bullish_allowed":
         return {
             "allowed": False,
             "reason": "blocked",
@@ -287,7 +398,7 @@ def quality_decision(snapshot, candidate, strategy_name, ignore_sentiment=False)
             "profit_target_pct": None
         }
 
-    if strategy_name == "sentiment_policy_only":
+    if effective_strategy == "sentiment_policy_only":
         return {
             "allowed": True,
             "reason": "sentiment_policy_only",
@@ -368,20 +479,39 @@ def quality_decision(snapshot, candidate, strategy_name, ignore_sentiment=False)
     )
     if profit_target_pct is None:
         profit_target_pct = normalize_profit_target_pct(candidate.get("signal_sell_pct"))
+    override_profit_target_pct = strategy_profit_target_override(strategy_name)
+    if override_profit_target_pct is not None:
+        profit_target_pct = override_profit_target_pct
+
+    policy = {
+        "recommendation": evaluation.get("recommendation"),
+        "reason": evaluation["reason"],
+        "matched_sample_count": evaluation.get("matched_sample_count"),
+        "fill_probability_4h": evaluation.get("fill_probability_4h"),
+        "best_expected_value_pct_per_signal": evaluation.get(
+            "best_expected_value_pct_per_signal"
+        ),
+        "best_profit_target_pct": evaluation.get("best_profit_target_pct")
+    }
+    if strategy_uses_sentiment_discount(strategy_name):
+        required_discount_pct = sentiment_discount_requirement_pct(snapshot, signal)
+        actual_discount_pct = None
+        if current_price is not None:
+            actual_discount_pct = (
+                (current_price - candidate["buy_price"]) / current_price
+            ) * 100.0
+        policy["sentiment_recommendation"] = action_recommendation
+        policy["sentiment_discount_required_pct"] = required_discount_pct
+        policy["sentiment_discount_actual_pct"] = (
+            round(actual_discount_pct, 6)
+            if actual_discount_pct is not None else
+            None
+        )
 
     return {
         "allowed": evaluation["allowed"],
         "reason": evaluation["reason"],
-        "policy": {
-            "recommendation": evaluation.get("recommendation"),
-            "reason": evaluation["reason"],
-            "matched_sample_count": evaluation.get("matched_sample_count"),
-            "fill_probability_4h": evaluation.get("fill_probability_4h"),
-            "best_expected_value_pct_per_signal": evaluation.get(
-                "best_expected_value_pct_per_signal"
-            ),
-            "best_profit_target_pct": evaluation.get("best_profit_target_pct")
-        },
+        "policy": policy,
         "profit_target_pct": profit_target_pct
     }
 
@@ -590,7 +720,12 @@ def simulate_strategy(strategy_name, snapshots):
             continue
 
         summary["raw_candidates"] += 1
-        decision = quality_decision(snapshot, candidate, strategy_name)
+        decision = quality_decision(
+            snapshot,
+            candidate,
+            strategy_name,
+            current_price=price
+        )
         policy = decision["policy"]
         if strategy_name != "price_target_only" and not decision["allowed"]:
             if decision["reason"] == "blocked":
@@ -601,7 +736,8 @@ def simulate_strategy(strategy_name, snapshots):
                         snapshot,
                         candidate,
                         strategy_name,
-                        ignore_sentiment=True
+                        ignore_sentiment=True,
+                        current_price=price
                     )
                     if shadow_quality["allowed"]:
                         summary["shadow_target_quality_approved"] += 1
@@ -635,6 +771,9 @@ def simulate_strategy(strategy_name, snapshots):
         summary["approved_candidates"] += 1
         summary["candidate_signals"] += 1
         profit_target_pct = decision["profit_target_pct"]
+        override_profit_target_pct = strategy_profit_target_override(strategy_name)
+        if override_profit_target_pct is not None:
+            profit_target_pct = override_profit_target_pct
         if profit_target_pct is None:
             profit_target_pct = float(
                 strategy_value(snapshot, "target_profit_pct", 0.005)
@@ -736,9 +875,8 @@ def build_report():
     filtered_out_by_window = len(all_snapshots) - len(snapshots)
 
     strategies = {
-        "with_target_quality": simulate_strategy("with_target_quality", snapshots),
-        "sentiment_policy_only": simulate_strategy("sentiment_policy_only", snapshots),
-        "price_target_only": simulate_strategy("price_target_only", snapshots),
+        name: simulate_strategy(name, snapshots)
+        for name in BACKTEST_STRATEGIES
     }
 
     return {
@@ -777,7 +915,14 @@ def build_report():
                 "LLM_TARGET_BACKTEST_FEE_BPS"
                 if BACKTEST_FEE_BPS > 0 else
                 "strategy_profile.round_trip_fee_pct"
-            )
+            ),
+            "strategy_variants": {
+                name: options
+                for name, options in BACKTEST_STRATEGIES.items()
+                if options
+            },
+            "sentiment_discount_watch_pct": BACKTEST_SENTIMENT_DISCOUNT_WATCH_PCT,
+            "sentiment_discount_bearish_pct": BACKTEST_SENTIMENT_DISCOUNT_BEARISH_PCT,
         },
         "top_summary": top_summary(strategies),
         "strategies": strategies,

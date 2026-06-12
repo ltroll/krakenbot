@@ -219,6 +219,21 @@ TARGET_QUALITY_ALLOWED_RECOMMENDATIONS = {
     )).split(",")
     if value.strip()
 }
+KILL_SWITCH_FILE = env_or_profile(
+    "LLM_TARGET_KILL_SWITCH_FILE",
+    "kill_switch_file",
+    ""
+)
+MAX_DAILY_REALIZED_LOSS_USD = float(env_or_profile(
+    "LLM_TARGET_MAX_DAILY_REALIZED_LOSS_USD",
+    "max_daily_realized_loss_usd",
+    0
+))
+MAX_CONSECUTIVE_LOSING_SELLS = int(env_or_profile(
+    "LLM_TARGET_MAX_CONSECUTIVE_LOSING_SELLS",
+    "max_consecutive_losing_sells",
+    0
+))
 
 
 def log_event(event, message="", **kwargs):
@@ -255,6 +270,12 @@ def load_state():
         "last_sell_price": None,
         "last_sell_at": None,
         "last_cycle": None,
+        "risk": {
+            "day": None,
+            "realized_pnl_usd": 0.0,
+            "consecutive_losing_sells": 0,
+            "last_realized_pnl_usd": None,
+        },
         "stats": {
             "cycles": 0,
             "buy_orders_placed": 0,
@@ -271,6 +292,10 @@ def load_state():
 
     for key, value in default.items():
         state.setdefault(key, value)
+    if not isinstance(state.get("risk"), dict):
+        state["risk"] = {}
+    for key, value in default["risk"].items():
+        state["risk"].setdefault(key, value)
     for key, value in default["stats"].items():
         state["stats"].setdefault(key, value)
     return state
@@ -510,6 +535,72 @@ def current_inventory_usd(current_price):
     return open_buy_notional + open_sell_notional
 
 
+def reset_daily_risk_if_needed(now):
+    today = now.date().isoformat()
+    risk = state.setdefault("risk", {})
+    if risk.get("day") == today:
+        return
+
+    risk["day"] = today
+    risk["realized_pnl_usd"] = 0.0
+    risk["consecutive_losing_sells"] = 0
+    risk["last_realized_pnl_usd"] = None
+    save_state(state)
+
+
+def record_realized_sell_pnl(order, fill):
+    volume = fill.get("volume") or order.get("volume") or 0
+    buy_price = order.get("buy_price") or 0
+    sell_price = fill.get("price") or order.get("sell_price") or 0
+    buy_fee = order.get("buy_fee") or 0
+    sell_fee = fill.get("fee") or 0
+    pnl = ((sell_price - buy_price) * volume) - buy_fee - sell_fee
+
+    risk = state.setdefault("risk", {})
+    risk["realized_pnl_usd"] = float(risk.get("realized_pnl_usd") or 0) + pnl
+    risk["last_realized_pnl_usd"] = pnl
+    if pnl < 0:
+        risk["consecutive_losing_sells"] = int(
+            risk.get("consecutive_losing_sells") or 0
+        ) + 1
+    else:
+        risk["consecutive_losing_sells"] = 0
+    return pnl
+
+
+def risk_gate_failure():
+    if KILL_SWITCH_FILE and os.path.exists(os.path.expanduser(KILL_SWITCH_FILE)):
+        return {
+            "reason": "kill_switch_file_present",
+            "kill_switch_file": os.path.expanduser(KILL_SWITCH_FILE)
+        }
+
+    risk = state.get("risk", {})
+    realized_pnl = float(risk.get("realized_pnl_usd") or 0)
+    if (
+        MAX_DAILY_REALIZED_LOSS_USD > 0
+        and realized_pnl <= -abs(MAX_DAILY_REALIZED_LOSS_USD)
+    ):
+        return {
+            "reason": "max_daily_realized_loss",
+            "daily_realized_pnl_usd": realized_pnl,
+            "max_daily_realized_loss_usd": MAX_DAILY_REALIZED_LOSS_USD
+        }
+
+    losing_sells = int(risk.get("consecutive_losing_sells") or 0)
+    if (
+        MAX_CONSECUTIVE_LOSING_SELLS > 0
+        and losing_sells >= MAX_CONSECUTIVE_LOSING_SELLS
+    ):
+        return {
+            "reason": "max_consecutive_losing_sells",
+            "consecutive_losing_sells": losing_sells,
+            "max_consecutive_losing_sells": MAX_CONSECUTIVE_LOSING_SELLS
+        }
+
+    return None
+
+
 def load_signal():
     try:
         if SIGNAL_FILE:
@@ -701,6 +792,7 @@ def process_open_buy_orders(cycle_id):
                 state["open_sell_orders"][sell_txid] = {
                     "buy_txid": txid,
                     "buy_price": fill["price"],
+                    "buy_fee": fill["fee"],
                     "sell_price": sell_price,
                     "volume": fill["volume"],
                     "placed_at": cycle_id,
@@ -742,6 +834,7 @@ def process_open_sell_orders(cycle_id):
             state["stats"]["sell_orders_filled"] += 1
             state["last_sell_price"] = fill["price"] or order.get("sell_price")
             state["last_sell_at"] = cycle_id
+            realized_pnl_usd = record_realized_sell_pnl(order, fill)
             del state["open_sell_orders"][txid]
             save_state(state)
             log_and_console(
@@ -751,7 +844,14 @@ def process_open_sell_orders(cycle_id):
                 txid=txid,
                 volume=fill["volume"],
                 price=state["last_sell_price"],
-                buy_price=order.get("buy_price")
+                buy_price=order.get("buy_price"),
+                realized_pnl_usd=realized_pnl_usd,
+                daily_realized_pnl_usd=state.get("risk", {}).get(
+                    "realized_pnl_usd"
+                ),
+                consecutive_losing_sells=state.get("risk", {}).get(
+                    "consecutive_losing_sells"
+                )
             )
         elif order_status in ("canceled", "expired"):
             del state["open_sell_orders"][txid]
@@ -786,6 +886,7 @@ def skip_cycle(reason, cycle_id, **kwargs):
 def run_cycle():
     now = datetime.now(timezone.utc)
     cycle_id = now.isoformat()
+    reset_daily_risk_if_needed(now)
     state["last_cycle"] = cycle_id
     state["stats"]["cycles"] += 1
     save_state(state)
@@ -797,6 +898,11 @@ def run_cycle():
 
     process_open_buy_orders(cycle_id)
     process_open_sell_orders(cycle_id)
+
+    risk_failure = risk_gate_failure()
+    if risk_failure is not None:
+        skip_cycle(risk_failure.pop("reason"), cycle_id, price=price, **risk_failure)
+        return
 
     signal = load_signal()
     if signal is None:
@@ -1031,7 +1137,10 @@ def main():
         ),
         target_quality_allowed_recommendations=sorted(
             TARGET_QUALITY_ALLOWED_RECOMMENDATIONS
-        )
+        ),
+        kill_switch_file=KILL_SWITCH_FILE,
+        max_daily_realized_loss_usd=MAX_DAILY_REALIZED_LOSS_USD,
+        max_consecutive_losing_sells=MAX_CONSECUTIVE_LOSING_SELLS
     )
 
     while True:
