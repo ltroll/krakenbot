@@ -21,6 +21,7 @@ from target_quality import (
     parse_iso8601,
     unavailable_quality_decision,
 )
+from signal_normalizer import normalize_signal_payload, selected_signal_asset_id
 
 ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(dotenv_path=ENV_FILE, override=True)
@@ -53,6 +54,7 @@ KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
 SIGNAL_FILE = os.getenv("SIGNAL_FILE")
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
+SIGNAL_ASSET_ID = selected_signal_asset_id(pair=KRAKEN_PAIR)
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
 KRAKEN_NONCE_RETRIES = int(os.getenv("KRAKEN_NONCE_RETRIES", "2"))
 PRICE_CHECK_INTERVAL_SECONDS = int(os.getenv("PRICE_CHECK_INTERVAL_SECONDS", "60"))
@@ -522,36 +524,11 @@ def load_signal():
 
 
 def normalize_signal(signal):
-    if not isinstance(signal, dict):
-        return {"execution_signal": float(signal), "target_prices": []}
-
-    source_status = signal.get("source_status")
-    if not isinstance(source_status, dict):
-        source_status = {}
-    action_policy = signal.get("action_policy")
-    if not isinstance(action_policy, dict):
-        action_policy = {}
-    price_regime = signal.get("price_regime")
-    if not isinstance(price_regime, dict):
-        price_regime = {}
-    target_prices = signal.get("target_prices")
-    if not isinstance(target_prices, list):
-        target_prices = []
-
-    return {
-        "execution_signal": float(signal.get("execution_signal", 0)),
-        "confidence": float(signal.get("confidence", 0)),
-        "signal_status": signal.get("signal_status"),
-        "bot_action_allowed": signal.get("bot_action_allowed"),
-        "action_recommendation": signal.get("action_recommendation"),
-        "action_policy": action_policy,
-        "contributor_count": signal.get("contributor_count"),
-        "reason": signal.get("reason"),
-        "processed_at": signal.get("processed_at"),
-        "price_regime": price_regime,
-        "source_status": source_status,
-        "target_prices": target_prices
-    }
+    return normalize_signal_payload(
+        signal,
+        asset_id=SIGNAL_ASSET_ID,
+        pair=KRAKEN_PAIR
+    )
 
 
 def signal_age_minutes(signal, now):

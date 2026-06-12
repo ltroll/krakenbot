@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 import requests
 from dotenv import load_dotenv
 
+from signal_normalizer import normalize_signal_payload, selected_signal_asset_id
+
 
 ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(dotenv_path=ENV_FILE, override=True)
@@ -255,6 +257,16 @@ def build_snapshot():
     captured_at = now_utc().isoformat()
     signal_source = SIGNAL_FILE or LLM_SIGNAL_URL
     sentiment = read_json_source(signal_source, timeout=SNAPSHOT_REQUEST_TIMEOUT)
+    signal_asset_id = selected_signal_asset_id(pair=KRAKEN_PAIR)
+    signal_payload = (
+        normalize_signal_payload(
+            sentiment["payload"],
+            asset_id=signal_asset_id,
+            pair=KRAKEN_PAIR
+        )
+        if sentiment["ok"] else
+        sentiment["payload"]
+    )
     target_quality = read_json_source(
         TARGET_QUALITY_FILE,
         timeout=SNAPSHOT_REQUEST_TIMEOUT
@@ -270,6 +282,7 @@ def build_snapshot():
         "snapshot_kind": "llm_target_backtest_input",
         "sources": {
             "signal_source": signal_source,
+            "signal_asset_id": signal_asset_id,
             "target_quality_source": TARGET_QUALITY_FILE,
             "ticker_source": ticker["source"],
             "orderbook_source": orderbook["source"],
@@ -278,7 +291,7 @@ def build_snapshot():
         "signal": {
             "ok": sentiment["ok"],
             "error": sentiment["error"],
-            "payload": sentiment["payload"]
+            "payload": signal_payload
         },
         "target_quality": {
             "ok": target_quality["ok"],

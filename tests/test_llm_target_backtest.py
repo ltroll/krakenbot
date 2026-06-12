@@ -124,6 +124,33 @@ class LlmTargetBacktestTests(unittest.TestCase):
         self.assertAlmostEqual(trade["gross_return_pct"], 0.7, places=2)
         self.assertAlmostEqual(trade["net_return_pct"], 0.38, places=2)
 
+    def test_backtest_accepts_multi_asset_signal_payload(self):
+        snapshots = [
+            make_snapshot("2026-05-30T12:00:00+00:00", 101.0),
+            make_snapshot("2026-05-30T12:30:00+00:00", 100.0),
+            make_snapshot("2026-05-30T13:00:00+00:00", 100.8),
+        ]
+        snapshots[0]["signal"]["payload"] = {
+            "schema_version": "multi-asset-sentiment-v1",
+            "single_asset_schema_version": "web-sentiment-v2",
+            "processed_at": "2026-05-30T12:00:00+00:00",
+            "assets": {
+                "BTC": snapshots[0]["signal"]["payload"],
+                "ETH": {
+                    "processed_at": "2026-05-30T12:00:00+00:00",
+                    "action_recommendation": "blocked",
+                    "execution_signal": -0.5,
+                    "confidence": 0.2,
+                    "target_prices": [{"buy_price": 1.0, "sell_pct": 0.5}],
+                },
+            },
+        }
+
+        result = backtest.simulate_strategy("with_target_quality", snapshots)
+
+        self.assertEqual(result["summary"]["trades"], 1)
+        self.assertEqual(result["recent_trades"][0]["entry_price"], 100.0)
+
     def test_with_target_quality_blocks_low_sample_target(self):
         quality_targets = [{
             "buy_price": 100.0,

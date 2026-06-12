@@ -13,6 +13,7 @@ from target_quality import (
     parse_iso8601,
     unavailable_quality_decision,
 )
+from signal_normalizer import normalize_signal_payload, selected_signal_asset_id
 
 
 ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -21,6 +22,9 @@ load_dotenv(dotenv_path=ENV_FILE, override=True)
 SNAPSHOT_LOG_FILE = os.getenv(
     "LLM_TARGET_BACKTEST_SNAPSHOT_FILE",
     "llm_target_backtest_snapshot_log.jsonl"
+)
+SIGNAL_ASSET_ID = selected_signal_asset_id(
+    pair=os.getenv("KRAKEN_PAIR", "XXBTZUSD")
 )
 BACKTEST_OUTPUT_FILE = os.getenv(
     "LLM_TARGET_BACKTEST_OUTPUT_FILE",
@@ -179,7 +183,9 @@ def extract_price(snapshot):
 
 def signal_payload(snapshot):
     payload = (snapshot.get("signal") or {}).get("payload")
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    return normalize_signal_payload(payload, asset_id=SIGNAL_ASSET_ID)
 
 
 def quality_payload(snapshot):

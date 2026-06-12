@@ -3,10 +3,10 @@ import os
 import json
 import logging
 import requests
+from signal_normalizer import normalize_signal_payload, selected_signal_asset_id
 from datetime import datetime, timezone, timedelta
 import krakenex
 from dotenv import load_dotenv
-from pnl_tracker import PnLTracker
 from llm_trade_summary import send_trade_summary
 
 load_dotenv()
@@ -32,8 +32,6 @@ class KrakenTrader:
         self.config = self.load_json(CONFIG_FILE)
 
         self.validate_env()
-
-        self.pnl = PnLTracker()
 
         self.api = krakenex.API()
         self.api.key = os.getenv("KRAKEN_API_KEY")
@@ -152,6 +150,12 @@ class KrakenTrader:
             os.getenv("LLM_SIGNAL_URL"),
             timeout=5
         ).json()
+        sentiment = normalize_signal_payload(
+            sentiment,
+            asset_id=selected_signal_asset_id(
+                pair=os.getenv("KRAKEN_PAIR", "XXBTZUSD")
+            )
+        )
 
         if "execution_signal" not in sentiment:
 
