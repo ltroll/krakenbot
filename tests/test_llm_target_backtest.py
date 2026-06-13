@@ -214,6 +214,22 @@ class LlmTargetBacktestTests(unittest.TestCase):
             places=2
         )
 
+    def test_unfilled_approved_candidate_has_zero_fill_rate(self):
+        snapshots = [
+            make_snapshot("2026-05-30T12:00:00+00:00", 101.0),
+            make_snapshot("2026-05-30T17:00:00+00:00", 101.0),
+        ]
+        snapshots[1]["signal"]["payload"] = {}
+
+        result = backtest.simulate_strategy("price_target_only", snapshots)
+
+        summary = result["summary"]
+        self.assertEqual(summary["approved_candidates"], 1)
+        self.assertEqual(summary["not_filled"], 1)
+        self.assertEqual(summary["trades"], 0)
+        self.assertEqual(summary["fill_rate_after_approval"], 0.0)
+        self.assertEqual(summary["terminal_rate_after_approval"], 1.0)
+
     def test_sentiment_discount_requires_deeper_entry(self):
         shallow = make_snapshot(
             "2026-05-30T12:00:00+00:00",
@@ -299,6 +315,9 @@ class LlmTargetBacktestTests(unittest.TestCase):
             self.assertIn("strategy_headlines", report["top_summary"])
             self.assertIn("price_target_only_tp_0_8", report["strategies"])
             self.assertIn("sentiment_discount_with_quality", report["strategies"])
+            headline = report["top_summary"]["strategy_headlines"]["with_target_quality"]
+            self.assertEqual(headline["not_filled"], 0)
+            self.assertEqual(headline["terminal_rate_after_approval"], 1.0)
             self.assertEqual(len(report["snapshot_files"]), 1)
             self.assertIsNone(report["snapshot_diagnostics"]["empty_window_reason"])
 

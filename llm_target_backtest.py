@@ -556,7 +556,9 @@ def empty_summary():
         "missing_price": 0,
         "no_target": 0,
         "not_filled": 0,
-        "skipped_during_position": 0
+        "skipped_during_position": 0,
+        "fill_rate_after_approval": None,
+        "terminal_rate_after_approval": None
     }
 
 
@@ -565,11 +567,16 @@ def finalize_summary(summary, trades):
     approved_candidates = summary["approved_candidates"]
     if approved_candidates > 0:
         summary["fill_rate_after_approval"] = round(
+            len(trades) / approved_candidates,
+            4
+        )
+        summary["terminal_rate_after_approval"] = round(
             (len(trades) + summary["not_filled"]) / approved_candidates,
             4
         )
     else:
         summary["fill_rate_after_approval"] = None
+        summary["terminal_rate_after_approval"] = None
 
     if not trades:
         return summary
@@ -845,8 +852,13 @@ def top_summary(strategies):
                 "trades": payload["summary"].get("trades"),
                 "win_rate": payload["summary"].get("win_rate"),
                 "total_net_return_pct": payload["summary"].get("total_net_return_pct"),
+                "no_target": payload["summary"].get("no_target"),
+                "not_filled": payload["summary"].get("not_filled"),
                 "fill_rate_after_approval": payload["summary"].get(
                     "fill_rate_after_approval"
+                ),
+                "terminal_rate_after_approval": payload["summary"].get(
+                    "terminal_rate_after_approval"
                 ),
             }
             for name, payload in strategies.items()
