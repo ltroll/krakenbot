@@ -165,6 +165,15 @@ def profile_str(name, default=""):
     return default if value is None else str(value)
 
 
+def profile_bool(name, default):
+    value = strategy_config.get(name, default)
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 strategy_config = load_strategy_config()
 
 order_tracker_url = (
@@ -231,6 +240,10 @@ flow_block_llm_only_below = profile_float("flow_block_llm_only_below", -0.50)
 mean_reversion_min_opportunity = profile_float(
     "mean_reversion_min_opportunity",
     0.0
+)
+allow_range_fallback_without_sentiment = profile_bool(
+    "allow_range_fallback_without_sentiment",
+    True
 )
 require_fresh_signal = bool(strategy_config.get("require_fresh_signal", True))
 price_check_interval_seconds = profile_int("price_check_interval_seconds", 120)
@@ -300,6 +313,10 @@ sentiment_disable_high_anchor_below = profile_float(
 sentiment_defensive_extra_aging_reduction_pct = profile_float(
     "sentiment_defensive_extra_aging_reduction_pct",
     0.001
+)
+range_fallback_execution_signal = profile_float(
+    "range_fallback_execution_signal",
+    max(execution_signal_threshold, sentiment_defensive_threshold)
 )
 grid_anchor = strategy_config.get("grid_anchor", "low").strip().lower()
 strategy_modes = parse_strategy_modes(grid_anchor)
@@ -972,6 +989,46 @@ def get_sentiment():
         return None
 
 
+def synthetic_range_sentiment_payload(reason, price):
+    return {
+        "schema_version": "range_fallback_v1",
+        "execution_signal": range_fallback_execution_signal,
+        "target_prices": [],
+        "risk_multiplier": 1.0,
+        "smoothed_risk_multiplier": 1.0,
+        "btc_sentiment": None,
+        "regulatory_risk": None,
+        "macro_tightening_bias": None,
+        "confidence": None,
+        "direction_bias": None,
+        "raw_btc_sentiment": None,
+        "raw_regulatory_risk": None,
+        "raw_macro_tightening_bias": None,
+        "raw_confidence": None,
+        "raw_direction_bias": None,
+        "btc_price": price,
+        "fear_greed_index": None,
+        "flow_pressure": None,
+        "mean_reversion_opportunity": mean_reversion_min_opportunity,
+        "signal_status": "fallback",
+        "source_status": {},
+        "action_recommendation": "neutral",
+        "action_policy": {
+            "recommendation": "neutral",
+            "reason": reason,
+        },
+        "contributor_count": None,
+        "active_observation_count": None,
+        "bot_action_allowed": True,
+        "action_reason": reason,
+        "source": "range_fallback",
+        "processed_at": datetime.now(timezone.utc).isoformat(),
+        "price_regime": {},
+        "trend_snapshot": {},
+        "kraken_flow": {}
+    }
+
+
 # ----------------------
 # RANGE REFRESH
 # ----------------------
@@ -1449,6 +1506,13 @@ def current_inventory_usd(current_price):
     return open_buy_notional + open_sell_notional
 
 
+def reserved_buy_capital_usd():
+    return sum(
+        (order.get("price") or 0) * (order.get("volume") or 0)
+        for order in state["open_buy_orders"].values()
+    )
+
+
 def kraken_btc_balance(balance_result):
     if not isinstance(balance_result, dict):
         return None
@@ -1813,6 +1877,10 @@ def main():
         flow_block_high_only=flow_block_high_only,
         flow_block_llm_only_below=flow_block_llm_only_below,
         mean_reversion_min_opportunity=mean_reversion_min_opportunity,
+        allow_range_fallback_without_sentiment=(
+            allow_range_fallback_without_sentiment
+        ),
+        range_fallback_execution_signal=range_fallback_execution_signal,
         price_check_interval_seconds=price_check_interval_seconds,
         range_refresh_interval_minutes=range_refresh_interval_minutes,
         max_open_sell_orders=max_open_sell_orders,
@@ -1868,18 +1936,53 @@ def main():
             price = get_price()
             sentiment_payload = get_sentiment()
 
-            if price is None or sentiment_payload is None:
+            if price is None:
                 log_event(
                     "TRADE_DECISION",
                     side="hold",
                     price=price,
                     execution_signal=None,
-                    reason="missing_price_or_signal",
+                    reason="missing_price",
                     cycle_id=cycle_id
                 )
                 send_checkin(loop_count=loop_count, message="loop_complete")
                 time.sleep(price_check_interval_seconds)
                 continue
+
+            if sentiment_payload is None:
+                range_modes_enabled = any(
+                    mode != "llm_target" for mode in strategy_modes
+                )
+                if (
+                    allow_range_fallback_without_sentiment
+                    and range_modes_enabled
+                ):
+                    fallback_reason = "sentiment_unavailable_range_fallback"
+                    sentiment_payload = synthetic_range_sentiment_payload(
+                        fallback_reason,
+                        price
+                    )
+                    actions.append("sentiment_fallback")
+                    log_event(
+                        "SENTIMENT_FALLBACK_ACTIVE",
+                        cycle_id=cycle_id,
+                        reason=fallback_reason,
+                        fallback_execution_signal=range_fallback_execution_signal,
+                        strategy_modes=strategy_modes,
+                        llm_buys_disabled=True
+                    )
+                else:
+                    log_event(
+                        "TRADE_DECISION",
+                        side="hold",
+                        price=price,
+                        execution_signal=None,
+                        reason="missing_signal",
+                        cycle_id=cycle_id
+                    )
+                    send_checkin(loop_count=loop_count, message="loop_complete")
+                    time.sleep(price_check_interval_seconds)
+                    continue
 
             execution_signal = sentiment_payload["execution_signal"]
             target_prices = sentiment_payload.get("target_prices", [])
@@ -1920,7 +2023,25 @@ def main():
             buy_permissions = sentiment_buy_permissions(action_recommendation)
             llm_buys_allowed = buy_permissions["llm_buys_allowed"]
             range_buys_allowed = buy_permissions["range_buys_allowed"]
-            any_buys_allowed = buy_permissions["any_buys_allowed"]
+            base_any_buys_allowed = buy_permissions["any_buys_allowed"]
+            range_modes_enabled = any(
+                mode != "llm_target" for mode in strategy_modes
+            )
+            llm_signal_gates_allow = (
+                freshness_allows_trading and source_guard_allows_trading
+            )
+            range_fallback_active = (
+                allow_range_fallback_without_sentiment
+                and range_modes_enabled
+                and not llm_signal_gates_allow
+            )
+            range_signal_gates_allow = (
+                llm_signal_gates_allow or range_fallback_active
+            )
+            any_buys_allowed = (
+                (llm_buys_allowed and llm_signal_gates_allow)
+                or (range_buys_allowed and range_signal_gates_allow)
+            )
             external_block_reason = sentiment_payload.get("action_reason")
             regime = sentiment_regime(execution_signal)
             effective_position_size_pct = (
@@ -1973,6 +2094,7 @@ def main():
                 signal_allows_trading=any_buys_allowed,
                 llm_buys_allowed=llm_buys_allowed,
                 range_buys_allowed=range_buys_allowed,
+                range_fallback_active=range_fallback_active,
                 source_guard_allows_trading=source_guard_allows_trading,
                 freshness_allows_trading=freshness_allows_trading,
                 freshness_block_reason=freshness_block_reason,
@@ -2555,20 +2677,18 @@ def main():
                 "llm_target" in strategy_modes
                 and low and high
                 and llm_target is not None
-                and freshness_allows_trading
-                and source_guard_allows_trading
+                and llm_signal_gates_allow
                 and llm_buys_allowed
                 and mean_reversion_opportunity >= mean_reversion_min_opportunity
             )
 
             # BUY CANDIDATES
             if (
-                freshness_allows_trading
-                and source_guard_allows_trading
+                range_signal_gates_allow
                 and effective_position_size_pct > 0
                 and strategy_modes
                 and low and high
-                and any_buys_allowed
+                and base_any_buys_allowed
             ):
                 candidate_levels = []
                 if llm_buy_allowed:
@@ -2635,6 +2755,8 @@ def main():
                     continue
 
                 usd = float(bal["result"].get("ZUSD", 0))
+                reserved_buy_usd = reserved_buy_capital_usd()
+                available_usd = max(0.0, usd - reserved_buy_usd)
                 reserved_sell_levels = {
                     sell_order.get("level")
                     for sell_order in state["open_sell_orders"].values()
@@ -2689,6 +2811,22 @@ def main():
                         skip_reason = "llm_target_disabled_in_strategy"
                     elif (
                         buy_source == "llm_target"
+                        and not llm_signal_gates_allow
+                    ):
+                        skip_reason = (
+                            freshness_block_reason
+                            or "source_guard_blocked"
+                        )
+                    elif (
+                        buy_source != "llm_target"
+                        and not range_signal_gates_allow
+                    ):
+                        skip_reason = (
+                            freshness_block_reason
+                            or "source_guard_blocked"
+                        )
+                    elif (
+                        buy_source == "llm_target"
                         and not llm_buys_allowed
                     ):
                         skip_reason = "sentiment_action_not_bullish_allowed"
@@ -2716,9 +2854,11 @@ def main():
                         and high_anchor_order_count >= max_open_high_anchor_orders
                     ):
                         skip_reason = "max_open_high_anchor_orders"
+                    elif available_usd <= 0:
+                        skip_reason = "insufficient_available_usd"
 
                     volume = (
-                        usd
+                        available_usd
                         * effective_position_size_pct
                         * flow_control["size_multiplier"]
                     ) / level
@@ -2750,6 +2890,8 @@ def main():
                             market_price=price,
                             execution_signal=execution_signal,
                             usd_balance=usd,
+                            available_usd_balance=round(available_usd, 8),
+                            reserved_buy_capital_usd=round(reserved_buy_usd, 8),
                             trade_notional_usd=round(trade_notional_usd, 8),
                             deployed_inventory_usd=deployed_inventory_usd,
                             high_anchor_order_count=high_anchor_order_count,
@@ -2793,6 +2935,9 @@ def main():
                         trade_notional_usd=round(trade_notional_usd, 8),
                         price=round(level, PRICE_DECIMALS),
                         execution_signal=execution_signal,
+                        usd_balance=usd,
+                        available_usd_balance=round(available_usd, 8),
+                        reserved_buy_capital_usd=round(reserved_buy_usd, 8),
                         action_recommendation=action_recommendation,
                         action_policy_reason=action_policy.get("reason"),
                         range_low=low,
@@ -2856,6 +3001,8 @@ def main():
                     save_state(state)
                     actions.append("buy_placed")
                     deployed_inventory_usd = projected_inventory_usd
+                    reserved_buy_usd += level * volume
+                    available_usd = max(0.0, usd - reserved_buy_usd)
 
                     log_and_console(
                         "BUY_ORDER_PLACED",
@@ -2897,6 +3044,7 @@ def main():
                     signal_allows_trading=any_buys_allowed,
                     llm_buys_allowed=llm_buys_allowed,
                     range_buys_allowed=range_buys_allowed,
+                    range_fallback_active=range_fallback_active,
                     source_guard_allows_trading=source_guard_allows_trading,
                     action_recommendation=action_recommendation,
                     action_policy_reason=action_policy.get("reason"),
@@ -2918,11 +3066,15 @@ def main():
                         "buy_modes_disabled"
                         if not strategy_modes
                         else
-                        freshness_block_reason
-                        or (
+                        (
                             None
                             if any_buys_allowed
                             else f"action_recommendation_{action_recommendation}"
+                        )
+                        or (
+                            None
+                            if range_fallback_active
+                            else freshness_block_reason
                         )
                         or external_block_reason
                         or "signal_below_threshold_or_range_unavailable"
@@ -2957,6 +3109,7 @@ def main():
                 signal_allows_trading=any_buys_allowed,
                 llm_buys_allowed=llm_buys_allowed,
                 range_buys_allowed=range_buys_allowed,
+                range_fallback_active=range_fallback_active,
                 source_guard_allows_trading=source_guard_allows_trading,
                 action_recommendation=action_recommendation,
                 action_policy_reason=action_policy.get("reason"),
@@ -3014,9 +3167,8 @@ def main():
                         for candidate in deduped_candidates
                     ]
                     if (
-                        freshness_allows_trading
-                        and source_guard_allows_trading
-                        and any_buys_allowed
+                        range_signal_gates_allow
+                        and base_any_buys_allowed
                         and strategy_modes
                         and low
                         and high

@@ -326,10 +326,29 @@ def build_candidates(snapshot, price):
     buy_permissions = sentiment_buy_permissions(action_recommendation)
     llm_buys_allowed = buy_permissions["llm_buys_allowed"]
     range_buys_allowed = buy_permissions["range_buys_allowed"]
-    any_buys_allowed = buy_permissions["any_buys_allowed"]
+    base_any_buys_allowed = buy_permissions["any_buys_allowed"]
 
     low, high, mean, median = derive_range_values(snapshot)
     strategy_modes = context.get("strategy_modes") or parse_strategy_modes(context.get("grid_anchor"))
+    range_modes_enabled = any(mode != "llm_target" for mode in strategy_modes)
+    allow_range_fallback_without_sentiment = bool(
+        config.get("allow_range_fallback_without_sentiment", True)
+    )
+    llm_signal_gates_allow = (
+        freshness_allows_trading and bool(source_guard_allows_trading)
+    )
+    range_fallback_active = (
+        allow_range_fallback_without_sentiment
+        and range_modes_enabled
+        and not llm_signal_gates_allow
+    )
+    range_signal_gates_allow = (
+        llm_signal_gates_allow or range_fallback_active
+    )
+    any_buys_allowed = (
+        (llm_buys_allowed and llm_signal_gates_allow)
+        or (range_buys_allowed and range_signal_gates_allow)
+    )
     llm_target_proximity_pct = safe_float(config.get("llm_target_proximity_pct")) or safe_float(config.get("entry_step_pct")) or 0.0
     llm_target = find_llm_target(signal, price, llm_target_proximity_pct)
     mean_reversion_min_opportunity = safe_float(config.get("mean_reversion_min_opportunity")) or 0.0
@@ -344,6 +363,7 @@ def build_candidates(snapshot, price):
         "llm_buys_allowed": llm_buys_allowed,
         "range_buys_allowed": range_buys_allowed,
         "any_buys_allowed": any_buys_allowed,
+        "range_fallback_active": range_fallback_active,
         "action_recommendation": action_recommendation,
         "low": low,
         "high": high,
@@ -361,28 +381,30 @@ def build_candidates(snapshot, price):
         "llm_target" in strategy_modes
         and low and high
         and llm_target is not None
-        and freshness_allows_trading
-        and bool(source_guard_allows_trading)
+        and llm_signal_gates_allow
         and llm_buys_allowed
         and mean_reversion_opportunity >= mean_reversion_min_opportunity
     )
     result["llm_buy_allowed"] = llm_buy_allowed
 
     if not (
-        freshness_allows_trading
-        and bool(source_guard_allows_trading)
+        range_signal_gates_allow
         and strategy_modes
         and low and high
-        and any_buys_allowed
+        and base_any_buys_allowed
     ):
         result["hold_reason"] = (
             "buy_modes_disabled"
             if not strategy_modes
-            else freshness_block_reason
-            or (
+            else (
                 None
                 if any_buys_allowed
                 else f"action_recommendation_{action_recommendation}"
+            )
+            or (
+                None
+                if range_fallback_active
+                else freshness_block_reason
             )
             or (
                 None
@@ -467,6 +489,31 @@ def evaluate_candidate(snapshot, candidate, price):
     )
     llm_buys_allowed = buy_permissions["llm_buys_allowed"]
     range_buys_allowed = buy_permissions["range_buys_allowed"]
+    allow_range_fallback_without_sentiment = bool(
+        config.get("allow_range_fallback_without_sentiment", True)
+    )
+    signal_status = signal.get("signal_status")
+    source_status = signal.get("source_status", {})
+    source_guard_allows_trading = signal.get("bot_action_allowed")
+    if source_guard_allows_trading is None:
+        source_guard_allows_trading = True
+    require_fresh_signal = bool(config.get("require_fresh_signal", True))
+    min_signal_status = config.get("min_signal_status", "fresh")
+    freshness_allows_trading, freshness_block_reason = source_status_allows_trading(
+        signal_status,
+        source_status,
+        require_fresh_signal,
+        min_signal_status
+    )
+    llm_signal_gates_allow = (
+        freshness_allows_trading and bool(source_guard_allows_trading)
+    )
+    range_fallback_active = (
+        allow_range_fallback_without_sentiment
+        and any(mode != "llm_target" for mode in (strategy_context(snapshot).get("strategy_modes") or []))
+        and not llm_signal_gates_allow
+    )
+    range_signal_gates_allow = llm_signal_gates_allow or range_fallback_active
 
     open_buy_orders = state_data.get("open_buy_orders") or []
     open_sell_orders = state_data.get("open_sell_orders") or []
@@ -507,6 +554,10 @@ def evaluate_candidate(snapshot, candidate, price):
         return False, "max_open_sell_orders"
     if deployed_inventory_usd >= max_inventory_usd:
         return False, "max_inventory_usd"
+    if buy_source == "llm_target" and not llm_signal_gates_allow:
+        return False, freshness_block_reason or "source_guard_blocked"
+    if buy_source != "llm_target" and not range_signal_gates_allow:
+        return False, freshness_block_reason or "source_guard_blocked"
     if buy_source == "llm_target" and not llm_buys_allowed:
         return False, "sentiment_action_not_bullish_allowed"
     if buy_source != "llm_target" and not range_buys_allowed:
