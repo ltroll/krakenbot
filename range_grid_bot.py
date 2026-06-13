@@ -20,6 +20,11 @@ from urllib.parse import urlencode
 import krakenex
 import requests
 from dotenv import load_dotenv
+from range_grid_guardrails import (
+    runtime_buy_block_reason,
+    summarize_sell_backlog,
+    validate_strategy_config,
+)
 
 load_dotenv()
 
@@ -52,6 +57,16 @@ INSTANCE_LOCK_FILE = (
     or os.getenv("BOT_LOCK_FILE")
     or f"{STATE_FILE}.lock"
 )
+STATUS_FILE = (
+    os.getenv("RANGE_GRID_STATUS_FILE")
+    or os.getenv("BOT_STATUS_FILE")
+    or "range_grid_status.json"
+)
+ALERT_LOG_FILE = (
+    os.getenv("RANGE_GRID_ALERT_LOG_FILE")
+    or os.getenv("BOT_ALERT_LOG_FILE")
+    or "range_grid_alerts.jsonl"
+)
 
 KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
@@ -74,6 +89,7 @@ SELL_INSUFFICIENT_FUNDS_COOLDOWN_SECONDS = int(
 PROCESSED_FILL_CACHE_LIMIT = int(
     os.getenv("PROCESSED_FILL_CACHE_LIMIT", "2000")
 )
+ALERT_DEDUP_MINUTES = int(os.getenv("RANGE_GRID_ALERT_DEDUP_MINUTES", "30"))
 
 
 def parse_strategy_modes(raw_value):
@@ -202,6 +218,12 @@ def profile_bool(name, default):
 
 
 strategy_config = load_strategy_config()
+strategy_config_errors = validate_strategy_config(strategy_config)
+if strategy_config_errors:
+    raise RuntimeError(
+        "Invalid strategy configuration: "
+        + "; ".join(strategy_config_errors)
+    )
 bucket_inventory_caps_config = strategy_config.get("max_inventory_usd_by_bucket", {})
 if not isinstance(bucket_inventory_caps_config, dict):
     bucket_inventory_caps_config = {}
@@ -348,6 +370,24 @@ range_fallback_execution_signal = profile_float(
     "range_fallback_execution_signal",
     max(execution_signal_threshold, sentiment_defensive_threshold)
 )
+max_daily_loss_usd = profile_float("max_daily_loss_usd", 0.0)
+disable_new_buys_on_sell_backlog_count = profile_int(
+    "disable_new_buys_on_sell_backlog_count",
+    0
+)
+disable_new_buys_on_sell_backlog_minutes = profile_int(
+    "disable_new_buys_on_sell_backlog_minutes",
+    0
+)
+reconcile_state_interval_minutes = profile_int(
+    "reconcile_state_interval_minutes",
+    30
+)
+max_consecutive_loop_errors = profile_int("max_consecutive_loop_errors", 10)
+max_consecutive_private_api_failures = profile_int(
+    "max_consecutive_private_api_failures",
+    10
+)
 grid_anchor = strategy_config.get("grid_anchor", "low").strip().lower()
 operating_mode = normalize_operating_mode(
     strategy_config.get("operating_mode", "range_plus_llm")
@@ -413,6 +453,87 @@ def log_and_console(event, message="", **kwargs):
         console(f"{event}: {message}")
     else:
         console(event)
+
+
+def append_jsonl(path, record):
+    path = os.path.abspath(path)
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def write_json_file(path, payload):
+    path = os.path.abspath(path)
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def emit_alert(alert_type, severity, message, **kwargs):
+    now = datetime.now(timezone.utc)
+    dedup_key = f"{alert_type}:{severity}:{message}"
+    last_alerts = state.setdefault("last_alerts", {})
+    previous_at = parse_iso8601(last_alerts.get(dedup_key))
+    if previous_at is not None:
+        age_minutes = (now - previous_at).total_seconds() / 60.0
+        if age_minutes < ALERT_DEDUP_MINUTES:
+            return
+
+    record = {
+        "ts": now.isoformat(),
+        "event": "ALERT",
+        "alert_type": alert_type,
+        "severity": severity,
+        "message": message,
+    }
+    record.update(kwargs)
+    log_event("ALERT", alert_type=alert_type, severity=severity, message=message, **kwargs)
+    try:
+        append_jsonl(ALERT_LOG_FILE, record)
+    except Exception as e:
+        log_event("ALERT_LOG_WRITE_ERROR", message=str(e), alert_type=alert_type)
+
+    last_alerts[dedup_key] = now.isoformat()
+    save_state(state)
+
+
+def realized_pnl_for_utc_day(day_start):
+    total = 0.0
+    try:
+        with open(LOG_FILE, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
+                if record.get("event") != "SELL_ORDER_FILLED":
+                    continue
+                ts = parse_iso8601(record.get("ts"))
+                if ts is None or ts < day_start:
+                    continue
+                try:
+                    total += float(record.get("estimated_net_pnl") or 0.0)
+                except Exception:
+                    continue
+    except FileNotFoundError:
+        return 0.0
+    except Exception as e:
+        log_event("DAILY_PNL_SCAN_ERROR", message=str(e))
+    return total
+
+
+def write_status_snapshot(payload):
+    try:
+        write_json_file(STATUS_FILE, payload)
+    except Exception as e:
+        log_event("STATUS_FILE_WRITE_ERROR", message=str(e), status_file=os.path.abspath(STATUS_FILE))
 
 
 def key_fingerprint(value):
@@ -580,6 +701,15 @@ def notify_order_tracker(
             side=side,
             order_id=order_id
         )
+        emit_alert(
+            "order_tracker_error",
+            "warning",
+            "Order tracker update failed",
+            trade_id=trade_id,
+            side=side,
+            order_id=order_id,
+            error=short_error_summary(e)
+        )
 
 
 def short_error_summary(error):
@@ -608,6 +738,13 @@ def send_checkin(status="ok", loop_count=None, message="loop_complete"):
         response.raise_for_status()
     except Exception as e:
         log_event("ORDER_TRACKER_CHECKIN_ERROR", message=str(e), status=status)
+        emit_alert(
+            "order_tracker_checkin_error",
+            "warning",
+            "Order tracker check-in failed",
+            status=status,
+            error=short_error_summary(e)
+        )
 
 
 # ----------------------
@@ -692,21 +829,50 @@ def safe_kraken_private(label, endpoint, data=None):
 
     for attempt in range(1, attempts + 1):
         try:
-            return kraken_private(endpoint, data)
+            result = kraken_private(endpoint, data)
+            if state.get("consecutive_private_api_failures", 0):
+                state["consecutive_private_api_failures"] = 0
+                save_state(state)
+            return result
         except Exception as e:
             message = str(e)
+            state["consecutive_private_api_failures"] = int(
+                state.get("consecutive_private_api_failures", 0) or 0
+            ) + 1
+            save_state(state)
             log_event(
                 "KRAKEN_EXCEPTION",
                 operation=label,
                 message=message,
                 attempt=attempt
             )
+            if (
+                max_consecutive_private_api_failures > 0
+                and state["consecutive_private_api_failures"]
+                >= max_consecutive_private_api_failures
+            ):
+                emit_alert(
+                    "kraken_private_failures",
+                    "critical",
+                    "Kraken private API failures exceeded configured threshold",
+                    operation=label,
+                    consecutive_private_api_failures=state[
+                        "consecutive_private_api_failures"
+                    ]
+                )
 
             if "Temporary lockout" in message:
                 state["private_api_backoff_until"] = (
                     time.time() + KRAKEN_LOCKOUT_COOLDOWN_SECONDS
                 )
                 save_state(state)
+                emit_alert(
+                    "kraken_lockout",
+                    "warning",
+                    "Kraken private API entered temporary lockout",
+                    operation=label,
+                    cooldown_seconds=KRAKEN_LOCKOUT_COOLDOWN_SECONDS
+                )
                 return None
 
             if "Invalid nonce" not in message or attempt >= attempts:
@@ -746,6 +912,10 @@ def load_state():
         "last_sell_price": None,
         "last_sell_at": None,
         "last_llm_sell_at": None,
+        "last_alerts": {},
+        "last_state_reconcile_at": None,
+        "consecutive_loop_errors": 0,
+        "consecutive_private_api_failures": 0,
         "stats": {
             "buy_orders_placed": 0,
             "buy_orders_filled": 0,
@@ -779,6 +949,13 @@ def normalize_state(state):
     normalized_sell_orders = {}
     state.setdefault("stats", {})
     state.setdefault("processed_fills", {})
+    state.setdefault("last_alerts", {})
+    if not isinstance(state["last_alerts"], dict):
+        state["last_alerts"] = {}
+    state["consecutive_loop_errors"] = int(state.get("consecutive_loop_errors", 0) or 0)
+    state["consecutive_private_api_failures"] = int(
+        state.get("consecutive_private_api_failures", 0) or 0
+    )
     if not isinstance(state["processed_fills"], dict):
         state["processed_fills"] = {}
     for side in ("buy", "sell"):
@@ -1889,6 +2066,16 @@ def reconcile_btc_inventory(cycle_id):
 
     if reconciled_levels:
         save_state(state)
+        emit_alert(
+            "btc_reconciled",
+            "critical",
+            "Tracked buy volume exceeded available BTC and was repaired",
+            cycle_id=cycle_id,
+            removed_levels=reconciled_levels,
+            removed_volume=round(removed_volume, 8),
+            actual_btc=round(actual_btc, 8),
+            available_btc_for_new_sells=round(available_btc_for_new_sells, 8),
+        )
         log_and_console(
             "BTC_RECONCILED",
             message=(
@@ -1905,6 +2092,22 @@ def reconcile_btc_inventory(cycle_id):
         )
 
     return reconciled_levels
+
+
+def maybe_periodic_state_reconcile(now, cycle_id):
+    if reconcile_state_interval_minutes <= 0:
+        return False
+
+    last_reconcile_at = parse_iso8601(state.get("last_state_reconcile_at"))
+    if last_reconcile_at is not None:
+        elapsed_minutes = (now - last_reconcile_at).total_seconds() / 60.0
+        if elapsed_minutes < reconcile_state_interval_minutes:
+            return False
+
+    startup_reconcile_state()
+    state["last_state_reconcile_at"] = cycle_id
+    save_state(state)
+    return True
 
 
 # ----------------------
@@ -1942,6 +2145,20 @@ def main():
         kraken_lockout_cooldown_seconds=KRAKEN_LOCKOUT_COOLDOWN_SECONDS,
         min_signal_status=min_signal_status,
         require_fresh_signal=require_fresh_signal,
+        status_file=os.path.abspath(STATUS_FILE),
+        alert_log_file=os.path.abspath(ALERT_LOG_FILE),
+        max_daily_loss_usd=max_daily_loss_usd,
+        disable_new_buys_on_sell_backlog_count=(
+            disable_new_buys_on_sell_backlog_count
+        ),
+        disable_new_buys_on_sell_backlog_minutes=(
+            disable_new_buys_on_sell_backlog_minutes
+        ),
+        reconcile_state_interval_minutes=reconcile_state_interval_minutes,
+        max_consecutive_loop_errors=max_consecutive_loop_errors,
+        max_consecutive_private_api_failures=(
+            max_consecutive_private_api_failures
+        ),
         risk_multiplier_floor=risk_multiplier_floor,
         risk_multiplier_ceiling=risk_multiplier_ceiling,
         flow_defensive_threshold=flow_defensive_threshold,
@@ -2007,10 +2224,16 @@ def main():
             actions = []
             deduped_candidates = []
 
+            # Periodically resync tracked state against Kraken as source of truth.
+            if maybe_periodic_state_reconcile(now, cycle_id):
+                actions.append("state_reconciled")
+
             price = get_price()
             sentiment_payload = get_sentiment()
 
             if price is None:
+                state["consecutive_loop_errors"] = 0
+                save_state(state)
                 log_event(
                     "TRADE_DECISION",
                     side="hold",
@@ -2046,6 +2269,8 @@ def main():
                         llm_buys_disabled=True
                     )
                 else:
+                    state["consecutive_loop_errors"] = 0
+                    save_state(state)
                     log_event(
                         "TRADE_DECISION",
                         side="hold",
@@ -2101,6 +2326,43 @@ def main():
             range_modes_enabled = any(
                 mode != "llm_target" for mode in strategy_modes
             )
+            daily_pnl_start = now.astimezone(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            realized_pnl_today = realized_pnl_for_utc_day(daily_pnl_start)
+            sell_backlog = summarize_sell_backlog(state["open_sell_orders"], now)
+            runtime_block_reason = runtime_buy_block_reason(
+                operating_mode=operating_mode,
+                realized_pnl_today=realized_pnl_today,
+                max_daily_loss_usd=max_daily_loss_usd,
+                sell_backlog_count=sell_backlog["count"],
+                sell_backlog_limit=disable_new_buys_on_sell_backlog_count,
+                sell_backlog_oldest_minutes=sell_backlog["oldest_age_minutes"],
+                sell_backlog_minutes_limit=disable_new_buys_on_sell_backlog_minutes,
+                consecutive_loop_errors=int(state.get("consecutive_loop_errors", 0) or 0),
+                max_consecutive_loop_errors=max_consecutive_loop_errors,
+                consecutive_private_api_failures=int(
+                    state.get("consecutive_private_api_failures", 0) or 0
+                ),
+                max_consecutive_private_api_failures=(
+                    max_consecutive_private_api_failures
+                ),
+            )
+            if runtime_block_reason:
+                emit_alert(
+                    "buy_guardrail_blocked",
+                    "warning",
+                    "New buys blocked by runtime guardrail",
+                    cycle_id=cycle_id,
+                    operating_mode=operating_mode,
+                    reason=runtime_block_reason,
+                    sell_backlog_count=sell_backlog["count"],
+                    sell_backlog_oldest_minutes=round(
+                        sell_backlog["oldest_age_minutes"],
+                        2
+                    ),
+                    realized_pnl_today=round(realized_pnl_today, 8),
+                )
             llm_signal_gates_allow = (
                 freshness_allows_trading and source_guard_allows_trading
             )
@@ -2116,6 +2378,11 @@ def main():
                 (llm_buys_allowed and llm_signal_gates_allow)
                 or (range_buys_allowed and range_signal_gates_allow)
             )
+            if runtime_block_reason:
+                llm_buys_allowed = False
+                range_buys_allowed = False
+                base_any_buys_allowed = False
+                any_buys_allowed = False
             external_block_reason = sentiment_payload.get("action_reason")
             regime = sentiment_regime(execution_signal)
             effective_position_size_pct = (
@@ -2673,6 +2940,19 @@ def main():
 
                 if not sell_resp or sell_resp.get("error"):
                     actions.append("sell_rejected")
+                    emit_alert(
+                        "sell_rejected",
+                        "critical",
+                        "Filled buy could not place its sell order",
+                        cycle_id=cycle_id,
+                        level=level,
+                        buy_source=buy_source,
+                        sell_price=round(sell_price, PRICE_DECIMALS),
+                        error=(
+                            None if not sell_resp
+                            else sell_resp.get("error")
+                        )
+                    )
                     log_event(
                         "ORDER_REJECTED",
                         cycle_id=cycle_id,
@@ -3189,6 +3469,13 @@ def main():
                     range_buys_allowed=range_buys_allowed,
                     range_fallback_active=range_fallback_active,
                     source_guard_allows_trading=source_guard_allows_trading,
+                    runtime_block_reason=runtime_block_reason,
+                    realized_pnl_today=round(realized_pnl_today, 8),
+                    sell_backlog_count=sell_backlog["count"],
+                    sell_backlog_oldest_minutes=round(
+                        sell_backlog["oldest_age_minutes"],
+                        2
+                    ),
                     action_recommendation=action_recommendation,
                     action_policy_reason=action_policy.get("reason"),
                     contributor_count=sentiment_payload.get("contributor_count"),
@@ -3218,7 +3505,10 @@ def main():
                         (
                             None
                             if any_buys_allowed
-                            else f"action_recommendation_{action_recommendation}"
+                            else (
+                                runtime_block_reason
+                                or f"action_recommendation_{action_recommendation}"
+                            )
                         )
                         or (
                             None
@@ -3261,6 +3551,13 @@ def main():
                 range_buys_allowed=range_buys_allowed,
                 range_fallback_active=range_fallback_active,
                 source_guard_allows_trading=source_guard_allows_trading,
+                runtime_block_reason=runtime_block_reason,
+                realized_pnl_today=round(realized_pnl_today, 8),
+                sell_backlog_count=sell_backlog["count"],
+                sell_backlog_oldest_minutes=round(
+                    sell_backlog["oldest_age_minutes"],
+                    2
+                ),
                 action_recommendation=action_recommendation,
                 action_policy_reason=action_policy.get("reason"),
                 contributor_count=sentiment_payload.get("contributor_count"),
@@ -3360,11 +3657,68 @@ def main():
                 ),
                 actions=actions or ["no_action"]
             )
+            write_status_snapshot({
+                "timestamp": cycle_id,
+                "operating_mode": operating_mode,
+                "grid_anchor": grid_anchor,
+                "configured_strategy_modes": configured_strategy_modes,
+                "strategy_modes": strategy_modes,
+                "price": price,
+                "execution_signal": execution_signal,
+                "signal_status": signal_status,
+                "action_recommendation": action_recommendation,
+                "runtime_block_reason": runtime_block_reason,
+                "realized_pnl_today": round(realized_pnl_today, 8),
+                "sell_backlog_count": sell_backlog["count"],
+                "sell_backlog_oldest_minutes": round(
+                    sell_backlog["oldest_age_minutes"],
+                    2
+                ),
+                "range_fallback_active": range_fallback_active,
+                "open_buy_count": len(state["open_buy_orders"]),
+                "open_sell_count": len(state["open_sell_orders"]),
+                "deployed_inventory_usd": round(current_inventory_usd(price), 8),
+                "inventory_buckets_usd": {
+                    bucket: round(value, 8)
+                    for bucket, value in inventory_usd_by_bucket(price).items()
+                },
+                "stats": {
+                    "buy_orders_placed": state["stats"]["buy_orders_placed"],
+                    "buy_orders_filled": state["stats"]["buy_orders_filled"],
+                    "sell_orders_placed": state["stats"]["sell_orders_placed"],
+                    "sell_orders_filled": state["stats"]["sell_orders_filled"],
+                    "realized_gross_pnl": round(
+                        state["stats"]["realized_gross_pnl"], 8
+                    ),
+                    "realized_estimated_net_pnl": round(
+                        state["stats"]["realized_estimated_net_pnl"], 8
+                    ),
+                },
+                "actions": actions or ["no_action"],
+            })
+            if state.get("consecutive_loop_errors", 0):
+                state["consecutive_loop_errors"] = 0
+                save_state(state)
 
             send_checkin(loop_count=loop_count, message="loop_complete")
             time.sleep(price_check_interval_seconds)
         except Exception as e:
+            state["consecutive_loop_errors"] = int(
+                state.get("consecutive_loop_errors", 0) or 0
+            ) + 1
+            save_state(state)
             log_event("LOOP_ERROR", message=str(e))
+            if (
+                max_consecutive_loop_errors > 0
+                and state["consecutive_loop_errors"] >= max_consecutive_loop_errors
+            ):
+                emit_alert(
+                    "loop_errors",
+                    "critical",
+                    "Loop errors exceeded configured threshold",
+                    consecutive_loop_errors=state["consecutive_loop_errors"],
+                    error=short_error_summary(e)
+                )
             console(f"Loop error: {e}")
             send_checkin(
                 status="error",

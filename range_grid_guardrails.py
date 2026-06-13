@@ -1,0 +1,214 @@
+from datetime import datetime, timezone
+
+
+VALID_OPERATING_MODES = {
+    "range_plus_llm",
+    "range_only",
+    "sell_only",
+    "observe_only",
+}
+
+VALID_GRID_MODE_TOKENS = {
+    "low",
+    "mean",
+    "median",
+    "high",
+    "llm",
+    "sentiment",
+    "llm_target",
+    "false",
+    "none",
+    "off",
+    "disabled",
+    "no",
+    "",
+}
+
+
+def parse_iso8601(value):
+    if not value:
+        return None
+
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def validate_strategy_config(strategy_config):
+    errors = []
+
+    if not isinstance(strategy_config, dict):
+        return ["strategy_config must be a JSON object"]
+
+    grid_anchor = str(strategy_config.get("grid_anchor", "low") or "").strip().lower()
+    invalid_tokens = [
+        token.strip().lower()
+        for token in grid_anchor.split(",")
+        if token.strip().lower() not in VALID_GRID_MODE_TOKENS
+    ]
+    if invalid_tokens:
+        errors.append(
+            f"grid_anchor contains unsupported modes: {', '.join(sorted(set(invalid_tokens)))}"
+        )
+
+    operating_mode = str(
+        strategy_config.get("operating_mode", "range_plus_llm") or ""
+    ).strip().lower()
+    if operating_mode not in VALID_OPERATING_MODES:
+        errors.append(
+            "operating_mode must be one of "
+            "range_plus_llm, range_only, sell_only, observe_only"
+        )
+
+    positive_numeric_fields = (
+        "range_window_hours",
+        "max_grid_size",
+        "profit_target_pct",
+        "entry_step_pct",
+        "round_trip_fee_pct",
+        "position_size_pct",
+        "min_buy_notional_usd",
+        "min_buy_volume_btc",
+        "price_check_interval_seconds",
+        "range_refresh_interval_minutes",
+        "max_open_sell_orders",
+        "max_inventory_usd",
+        "aging_step_minutes",
+        "high_anchor_buy_cooldown_minutes",
+        "max_open_high_anchor_orders",
+    )
+    for field in positive_numeric_fields:
+        value = strategy_config.get(field)
+        if value is None:
+            continue
+        try:
+            numeric = float(value)
+        except Exception:
+            errors.append(f"{field} must be numeric")
+            continue
+        if numeric <= 0:
+            errors.append(f"{field} must be > 0")
+
+    non_negative_numeric_fields = (
+        "execution_signal_threshold",
+        "llm_target_proximity_pct",
+        "aging_profit_reduction_pct",
+        "min_profit_target_pct",
+        "buy_after_sell_discount_pct",
+        "llm_buy_cooldown_minutes_after_sell",
+        "mean_reversion_min_opportunity",
+    )
+    for field in non_negative_numeric_fields:
+        value = strategy_config.get(field)
+        if value is None:
+            continue
+        try:
+            numeric = float(value)
+        except Exception:
+            errors.append(f"{field} must be numeric")
+            continue
+        if numeric < 0:
+            errors.append(f"{field} must be >= 0")
+
+    try:
+        profit_target_pct = float(strategy_config.get("profit_target_pct", 0.01))
+        min_profit_target_pct = float(
+            strategy_config.get("min_profit_target_pct", profit_target_pct)
+        )
+        if min_profit_target_pct > profit_target_pct:
+            errors.append("min_profit_target_pct cannot exceed profit_target_pct")
+    except Exception:
+        pass
+
+    try:
+        risk_floor = float(strategy_config.get("risk_multiplier_floor", 0.75))
+        risk_ceiling = float(strategy_config.get("risk_multiplier_ceiling", 1.15))
+        if risk_floor <= 0:
+            errors.append("risk_multiplier_floor must be > 0")
+        if risk_ceiling < risk_floor:
+            errors.append("risk_multiplier_ceiling must be >= risk_multiplier_floor")
+    except Exception:
+        errors.append("risk_multiplier_floor and risk_multiplier_ceiling must be numeric")
+
+    bucket_caps = strategy_config.get("max_inventory_usd_by_bucket")
+    if bucket_caps is not None:
+        if not isinstance(bucket_caps, dict):
+            errors.append("max_inventory_usd_by_bucket must be an object")
+        else:
+            for bucket, value in bucket_caps.items():
+                try:
+                    numeric = float(value)
+                except Exception:
+                    errors.append(f"max_inventory_usd_by_bucket.{bucket} must be numeric")
+                    continue
+                if numeric <= 0:
+                    errors.append(f"max_inventory_usd_by_bucket.{bucket} must be > 0")
+
+    return errors
+
+
+def summarize_sell_backlog(open_sell_orders, now=None):
+    now = now or datetime.now(timezone.utc)
+    backlog_count = 0
+    oldest_age_minutes = 0.0
+
+    for order in open_sell_orders.values():
+        backlog_count += 1
+        placed_at = parse_iso8601(order.get("placed_at")) if isinstance(order, dict) else None
+        if placed_at is None:
+            continue
+        age_minutes = max(0.0, (now - placed_at).total_seconds() / 60.0)
+        oldest_age_minutes = max(oldest_age_minutes, age_minutes)
+
+    return {
+        "count": backlog_count,
+        "oldest_age_minutes": oldest_age_minutes,
+    }
+
+
+def runtime_buy_block_reason(
+    *,
+    operating_mode,
+    realized_pnl_today,
+    max_daily_loss_usd,
+    sell_backlog_count,
+    sell_backlog_limit,
+    sell_backlog_oldest_minutes,
+    sell_backlog_minutes_limit,
+    consecutive_loop_errors,
+    max_consecutive_loop_errors,
+    consecutive_private_api_failures,
+    max_consecutive_private_api_failures,
+):
+    if operating_mode not in ("range_plus_llm", "range_only"):
+        return f"operating_mode_{operating_mode}"
+
+    if max_daily_loss_usd > 0 and realized_pnl_today <= -abs(max_daily_loss_usd):
+        return "max_daily_loss_usd"
+
+    if (
+        sell_backlog_limit > 0
+        and sell_backlog_count >= sell_backlog_limit
+    ):
+        return "sell_backlog_count"
+
+    if (
+        sell_backlog_minutes_limit > 0
+        and sell_backlog_oldest_minutes >= sell_backlog_minutes_limit
+    ):
+        return "sell_backlog_age_minutes"
+
+    if (
+        max_consecutive_loop_errors > 0
+        and consecutive_loop_errors >= max_consecutive_loop_errors
+    ):
+        return "consecutive_loop_errors"
+
+    if (
+        max_consecutive_private_api_failures > 0
+        and consecutive_private_api_failures >= max_consecutive_private_api_failures
+    ):
+        return "consecutive_private_api_failures"
+
+    return None

@@ -1,6 +1,7 @@
 {
   "range_window_hours": 24,
   "grid_anchor": "low,high",
+  "operating_mode": "range_plus_llm",
   "max_grid_size": 4,
   "profit_target_pct": 0.01,
   "entry_step_pct": 0.0045,
@@ -49,6 +50,12 @@
   "execution_signal_threshold": 0.0,
   "price_check_interval_seconds": 60,
   "range_refresh_interval_minutes": 15,
+  "reconcile_state_interval_minutes": 30,
+  "max_daily_loss_usd": 0,
+  "disable_new_buys_on_sell_backlog_count": 0,
+  "disable_new_buys_on_sell_backlog_minutes": 0,
+  "max_consecutive_loop_errors": 10,
+  "max_consecutive_private_api_failures": 10,
   "order_tracker_symbol": "BTCUSD",
   "order_tracker_timeout_seconds": 5,
   "order_tracker_checkin_timeout_seconds": 3
