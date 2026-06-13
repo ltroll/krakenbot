@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 
+import base64
 import hashlib
+import hmac
 import json
 import os
 import socket
+import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 from urllib.parse import urlparse
 
 import requests
@@ -32,6 +36,8 @@ STATE_FILE = (
 
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL", "https://api.kraken.com")
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
+KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY")
+KRAKEN_API_SECRET = os.getenv("KRAKEN_API_SECRET")
 KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
 KRAKEN_ORDERBOOK_URL = os.getenv("KRAKEN_ORDERBOOK_URL")
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
@@ -100,6 +106,66 @@ def fetch_public_json(url, params=None, timeout=10):
             "ok": True,
             "error": None,
             "payload": response.json(),
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "payload": None,
+        }
+
+
+def next_nonce():
+    return str(int(time.time() * 1000))
+
+
+def kraken_signature(endpoint, data):
+    postdata = urlencode(data)
+    encoded = (str(data["nonce"]) + postdata).encode()
+    message = endpoint.encode() + hashlib.sha256(encoded).digest()
+    mac = hmac.new(
+        base64.b64decode(KRAKEN_API_SECRET),
+        message,
+        hashlib.sha512
+    )
+    return base64.b64encode(mac.digest()).decode()
+
+
+def fetch_private_json(endpoint, data=None, timeout=10):
+    if not KRAKEN_API_KEY or not KRAKEN_API_SECRET:
+        return {
+            "ok": False,
+            "error": "missing_private_api_credentials",
+            "payload": None,
+        }
+
+    payload = dict(data or {})
+    payload["nonce"] = next_nonce()
+    headers = {
+        "API-Key": KRAKEN_API_KEY,
+        "API-Sign": kraken_signature(endpoint, payload)
+    }
+    url = KRAKEN_API_URL.rstrip("/") + endpoint
+
+    try:
+        response = requests.post(
+            url,
+            headers=headers,
+            data=payload,
+            timeout=timeout
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("error"):
+            return {
+                "ok": False,
+                "error": str(data["error"]),
+                "payload": data,
+            }
+        return {
+            "ok": True,
+            "error": None,
+            "payload": data,
         }
     except Exception as exc:
         return {
@@ -271,6 +337,17 @@ def normalize_sell_order(txid, order):
     }
 
 
+def buy_source_bucket(buy_source):
+    mapping = {
+        "llm_target": "llm_target",
+        "range_low": "range_low",
+        "range_mean": "range_mean",
+        "range_median": "range_median",
+        "range_high_band": "range_high_band"
+    }
+    return mapping.get(buy_source or "", "unknown")
+
+
 def state_snapshot():
     state_result = read_json_source(STATE_FILE, timeout=REQUEST_TIMEOUT)
     if not state_result["ok"] or not isinstance(state_result["payload"], dict):
@@ -307,6 +384,23 @@ def state_snapshot():
         (order["buy_price"] or order["price"] or 0.0) * (order["volume"] or 0.0)
         for order in open_sell_orders
     ), 8)
+    inventory_buckets_usd = {}
+    for order in open_buy_orders:
+        bucket = buy_source_bucket(order.get("buy_source"))
+        notional = (order.get("price") or 0.0) * (order.get("volume") or 0.0)
+        inventory_buckets_usd[bucket] = round(
+            inventory_buckets_usd.get(bucket, 0.0) + notional,
+            8
+        )
+    for order in open_sell_orders:
+        bucket = buy_source_bucket(order.get("buy_source"))
+        notional = (order.get("buy_price") or order.get("price") or 0.0) * (
+            order.get("volume") or 0.0
+        )
+        inventory_buckets_usd[bucket] = round(
+            inventory_buckets_usd.get(bucket, 0.0) + notional,
+            8
+        )
 
     return {
         "ok": True,
@@ -318,6 +412,7 @@ def state_snapshot():
             "open_buy_volume": open_buy_volume,
             "open_sell_volume": open_sell_volume,
             "deployed_inventory_usd": deployed_inventory_usd,
+            "inventory_buckets_usd": inventory_buckets_usd,
             "last_nonce": raw_state.get("last_nonce"),
             "private_api_backoff_until": raw_state.get("private_api_backoff_until"),
             "sell_insufficient_funds_backoff_until": raw_state.get(
@@ -366,6 +461,78 @@ def ticker_snapshot():
         "ok": result["ok"],
         "error": result["error"],
         "last_price": last_price,
+        "payload": result["payload"],
+    }
+
+
+def private_balance_snapshot():
+    result = fetch_private_json(
+        "/0/private/Balance",
+        timeout=REQUEST_TIMEOUT
+    )
+    balance_result = (
+        result["payload"].get("result", {})
+        if result["ok"] and isinstance(result.get("payload"), dict)
+        else {}
+    )
+    usd_balance = None
+    btc_balance = None
+    if isinstance(balance_result, dict):
+        for key in ("ZUSD", "USD"):
+            usd_balance = safe_float(balance_result.get(key))
+            if usd_balance is not None:
+                break
+        for key in ("XXBT", "XBT", "BTC"):
+            btc_balance = safe_float(balance_result.get(key))
+            if btc_balance is not None:
+                break
+
+    return {
+        "source": f"{KRAKEN_API_URL.rstrip('/')}/0/private/Balance",
+        "ok": result["ok"],
+        "error": result["error"],
+        "usd_balance": usd_balance,
+        "btc_balance": btc_balance,
+        "payload": result["payload"],
+    }
+
+
+def private_open_orders_snapshot():
+    result = fetch_private_json(
+        "/0/private/OpenOrders",
+        timeout=REQUEST_TIMEOUT
+    )
+    open_orders_result = (
+        result["payload"].get("result", {})
+        if result["ok"] and isinstance(result.get("payload"), dict)
+        else {}
+    )
+    open_orders = open_orders_result.get("open", {}) if isinstance(open_orders_result, dict) else {}
+    open_order_count = 0
+    reserved_sell_volume_btc = 0.0
+    reserved_buy_notional_usd = 0.0
+
+    if isinstance(open_orders, dict):
+        open_order_count = len(open_orders)
+        for order in open_orders.values():
+            if not isinstance(order, dict):
+                continue
+            descr = order.get("descr", {})
+            order_type = descr.get("type")
+            volume = safe_float(order.get("vol"))
+            price = safe_float(descr.get("price"))
+            if order_type == "sell" and volume is not None:
+                reserved_sell_volume_btc += volume
+            if order_type == "buy" and volume is not None and price is not None:
+                reserved_buy_notional_usd += volume * price
+
+    return {
+        "source": f"{KRAKEN_API_URL.rstrip('/')}/0/private/OpenOrders",
+        "ok": result["ok"],
+        "error": result["error"],
+        "open_order_count": open_order_count,
+        "reserved_sell_volume_btc": round(reserved_sell_volume_btc, 8),
+        "reserved_buy_notional_usd": round(reserved_buy_notional_usd, 8),
         "payload": result["payload"],
     }
 
@@ -459,6 +626,8 @@ def build_snapshot():
     sentiment = read_json_source(signal_source, timeout=REQUEST_TIMEOUT)
     ticker = ticker_snapshot()
     orderbook = orderbook_snapshot()
+    private_balance = private_balance_snapshot()
+    private_open_orders = private_open_orders_snapshot()
     strategy = strategy_profile_snapshot()
     state = state_snapshot()
 
@@ -475,6 +644,8 @@ def build_snapshot():
             "signal_source": signal_source,
             "ticker_source": ticker["source"],
             "orderbook_source": orderbook["source"],
+            "private_balance_source": private_balance["source"],
+            "private_open_orders_source": private_open_orders["source"],
             "strategy_profile_path": strategy["path"],
             "state_file_path": state["path"],
         },
@@ -517,6 +688,25 @@ def build_snapshot():
             "best_ask": orderbook["best_ask"],
             "payload": orderbook["payload"],
         },
+        "private_balance": {
+            "ok": private_balance["ok"],
+            "error": private_balance["error"],
+            "usd_balance": private_balance["usd_balance"],
+            "btc_balance": private_balance["btc_balance"],
+            "payload": private_balance["payload"],
+        },
+        "private_open_orders": {
+            "ok": private_open_orders["ok"],
+            "error": private_open_orders["error"],
+            "open_order_count": private_open_orders["open_order_count"],
+            "reserved_sell_volume_btc": (
+                private_open_orders["reserved_sell_volume_btc"]
+            ),
+            "reserved_buy_notional_usd": (
+                private_open_orders["reserved_buy_notional_usd"]
+            ),
+            "payload": private_open_orders["payload"],
+        },
         "strategy_profile": {
             "exists": strategy["exists"],
             "error": strategy["error"],
@@ -534,7 +724,13 @@ def build_snapshot():
     }
 
     errors = {}
-    for key in ("signal", "ticker", "orderbook"):
+    for key in (
+        "signal",
+        "ticker",
+        "orderbook",
+        "private_balance",
+        "private_open_orders"
+    ):
         error = snapshot[key]["error"]
         if error:
             errors[key] = error
@@ -573,6 +769,8 @@ def main():
         "signal_ok": snapshot["signal"]["ok"],
         "ticker_ok": snapshot["ticker"]["ok"],
         "orderbook_ok": snapshot["orderbook"]["ok"],
+        "private_balance_ok": snapshot["private_balance"]["ok"],
+        "private_open_orders_ok": snapshot["private_open_orders"]["ok"],
         "state_ok": snapshot["state"]["ok"],
     }))
 

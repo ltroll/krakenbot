@@ -175,6 +175,9 @@ def profile_bool(name, default):
 
 
 strategy_config = load_strategy_config()
+bucket_inventory_caps_config = strategy_config.get("max_inventory_usd_by_bucket", {})
+if not isinstance(bucket_inventory_caps_config, dict):
+    bucket_inventory_caps_config = {}
 
 order_tracker_url = (
     os.getenv("ORDER_TRACKER_URL")
@@ -1506,6 +1509,40 @@ def current_inventory_usd(current_price):
     return open_buy_notional + open_sell_notional
 
 
+def buy_source_bucket(buy_source):
+    mapping = {
+        "llm_target": "llm_target",
+        "range_low": "range_low",
+        "range_mean": "range_mean",
+        "range_median": "range_median",
+        "range_high_band": "range_high_band"
+    }
+    return mapping.get(buy_source or "", "unknown")
+
+
+def inventory_usd_by_bucket(current_price):
+    buckets = {}
+
+    for order in state["open_buy_orders"].values():
+        bucket = buy_source_bucket(order.get("buy_source"))
+        notional = (order.get("price") or current_price) * (order.get("volume") or 0)
+        buckets[bucket] = buckets.get(bucket, 0.0) + notional
+
+    for order in state["open_sell_orders"].values():
+        bucket = buy_source_bucket(order.get("buy_source"))
+        notional = (order.get("buy_price") or current_price) * (order.get("volume") or 0)
+        buckets[bucket] = buckets.get(bucket, 0.0) + notional
+
+    return buckets
+
+
+def bucket_inventory_cap_usd(bucket_name, effective_max_inventory_usd):
+    configured = positive_float(bucket_inventory_caps_config.get(bucket_name))
+    if configured is None:
+        return effective_max_inventory_usd
+    return min(configured, effective_max_inventory_usd)
+
+
 def reserved_buy_capital_usd():
     return sum(
         (order.get("price") or 0) * (order.get("volume") or 0)
@@ -1881,6 +1918,7 @@ def main():
             allow_range_fallback_without_sentiment
         ),
         range_fallback_execution_signal=range_fallback_execution_signal,
+        max_inventory_usd_by_bucket=bucket_inventory_caps_config,
         price_check_interval_seconds=price_check_interval_seconds,
         range_refresh_interval_minutes=range_refresh_interval_minutes,
         max_open_sell_orders=max_open_sell_orders,
@@ -2766,6 +2804,7 @@ def main():
                     llm_sell_cooldown_remaining_minutes(now)
                 )
                 deployed_inventory_usd = current_inventory_usd(price)
+                bucket_inventory_usd_map = inventory_usd_by_bucket(price)
                 high_anchor_order_count = high_anchor_open_order_count()
                 high_anchor_cooldown_remaining = (
                     high_anchor_cooldown_remaining_minutes(now)
@@ -2775,6 +2814,15 @@ def main():
                     level = candidate["level"]
                     active_sell_pct_override = candidate["sell_pct_override"]
                     buy_source = candidate["buy_source"]
+                    bucket_name = buy_source_bucket(buy_source)
+                    bucket_inventory_usd = bucket_inventory_usd_map.get(
+                        bucket_name,
+                        0.0
+                    )
+                    bucket_cap_usd = bucket_inventory_cap_usd(
+                        bucket_name,
+                        effective_max_inventory_usd
+                    )
                     flow_control = flow_adjustment(flow_pressure, buy_source)
                     key = str(level)
                     skip_reason = None
@@ -2866,6 +2914,9 @@ def main():
                     projected_inventory_usd = deployed_inventory_usd + (
                         level * volume
                     )
+                    projected_bucket_inventory_usd = (
+                        bucket_inventory_usd + (level * volume)
+                    )
 
                     if (
                         skip_reason is None
@@ -2878,6 +2929,12 @@ def main():
                         and projected_inventory_usd > effective_max_inventory_usd
                     ):
                         skip_reason = "max_inventory_usd"
+
+                    if (
+                        skip_reason is None
+                        and projected_bucket_inventory_usd > bucket_cap_usd
+                    ):
+                        skip_reason = "bucket_max_inventory_usd"
 
                     if skip_reason is None and volume < min_buy_volume_btc:
                         skip_reason = "below_min_volume"
@@ -2894,6 +2951,9 @@ def main():
                             reserved_buy_capital_usd=round(reserved_buy_usd, 8),
                             trade_notional_usd=round(trade_notional_usd, 8),
                             deployed_inventory_usd=deployed_inventory_usd,
+                            bucket_name=bucket_name,
+                            bucket_inventory_usd=round(bucket_inventory_usd, 8),
+                            bucket_inventory_cap_usd=round(bucket_cap_usd, 8),
                             high_anchor_order_count=high_anchor_order_count,
                             high_anchor_cooldown_remaining_minutes=round(
                                 high_anchor_cooldown_remaining,
@@ -2951,6 +3011,9 @@ def main():
                         flow_control_reason=flow_control["reason"],
                         mean_reversion_opportunity=mean_reversion_opportunity,
                         buy_source=buy_source,
+                        bucket_name=bucket_name,
+                        bucket_inventory_usd=round(bucket_inventory_usd, 8),
+                        bucket_inventory_cap_usd=round(bucket_cap_usd, 8),
                         high_anchor_order_count=high_anchor_order_count,
                         last_sell_price=last_sell_price,
                         sell_pct_override=active_sell_pct_override
@@ -3001,6 +3064,9 @@ def main():
                     save_state(state)
                     actions.append("buy_placed")
                     deployed_inventory_usd = projected_inventory_usd
+                    bucket_inventory_usd_map[bucket_name] = (
+                        projected_bucket_inventory_usd
+                    )
                     reserved_buy_usd += level * volume
                     available_usd = max(0.0, usd - reserved_buy_usd)
 
@@ -3193,6 +3259,10 @@ def main():
                     order.get("volume", 0) or 0
                     for order in state["open_sell_orders"].values()
                 ),
+                inventory_buckets_usd={
+                    bucket: round(value, 8)
+                    for bucket, value in inventory_usd_by_bucket(price).items()
+                },
                 buy_orders_placed=state["stats"]["buy_orders_placed"],
                 buy_orders_filled=state["stats"]["buy_orders_filled"],
                 sell_orders_placed=state["stats"]["sell_orders_placed"],
