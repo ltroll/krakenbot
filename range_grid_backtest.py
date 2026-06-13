@@ -169,6 +169,17 @@ def source_status_allows_trading(signal_status, source_status, require_fresh_sig
     return True, None
 
 
+def sentiment_buy_permissions(action_recommendation):
+    normalized = (action_recommendation or "neutral").strip().lower()
+    llm_buys_allowed = normalized == "bullish_allowed"
+    range_buys_allowed = normalized in ("bullish_allowed", "neutral")
+    return {
+        "llm_buys_allowed": llm_buys_allowed,
+        "range_buys_allowed": range_buys_allowed,
+        "any_buys_allowed": llm_buys_allowed or range_buys_allowed,
+    }
+
+
 def parse_strategy_modes(raw_value):
     if not raw_value:
         return []
@@ -312,7 +323,10 @@ def build_candidates(snapshot, price):
         require_fresh_signal,
         min_signal_status
     )
-    sentiment_allows_long = action_recommendation == "bullish_allowed"
+    buy_permissions = sentiment_buy_permissions(action_recommendation)
+    llm_buys_allowed = buy_permissions["llm_buys_allowed"]
+    range_buys_allowed = buy_permissions["range_buys_allowed"]
+    any_buys_allowed = buy_permissions["any_buys_allowed"]
 
     low, high, mean, median = derive_range_values(snapshot)
     strategy_modes = context.get("strategy_modes") or parse_strategy_modes(context.get("grid_anchor"))
@@ -327,7 +341,9 @@ def build_candidates(snapshot, price):
         "freshness_allows_trading": freshness_allows_trading,
         "freshness_block_reason": freshness_block_reason,
         "source_guard_allows_trading": bool(source_guard_allows_trading),
-        "sentiment_allows_long": sentiment_allows_long,
+        "llm_buys_allowed": llm_buys_allowed,
+        "range_buys_allowed": range_buys_allowed,
+        "any_buys_allowed": any_buys_allowed,
         "action_recommendation": action_recommendation,
         "low": low,
         "high": high,
@@ -347,7 +363,7 @@ def build_candidates(snapshot, price):
         and llm_target is not None
         and freshness_allows_trading
         and bool(source_guard_allows_trading)
-        and sentiment_allows_long
+        and llm_buys_allowed
         and mean_reversion_opportunity >= mean_reversion_min_opportunity
     )
     result["llm_buy_allowed"] = llm_buy_allowed
@@ -355,9 +371,9 @@ def build_candidates(snapshot, price):
     if not (
         freshness_allows_trading
         and bool(source_guard_allows_trading)
-        and sentiment_allows_long
         and strategy_modes
         and low and high
+        and any_buys_allowed
     ):
         result["hold_reason"] = (
             "buy_modes_disabled"
@@ -365,7 +381,7 @@ def build_candidates(snapshot, price):
             else freshness_block_reason
             or (
                 None
-                if sentiment_allows_long
+                if any_buys_allowed
                 else f"action_recommendation_{action_recommendation}"
             )
             or (
@@ -446,6 +462,11 @@ def evaluate_candidate(snapshot, candidate, price):
     state_info = state_summary(snapshot)
     state_data = state_payload(snapshot)
     signal = signal_payload(snapshot)
+    buy_permissions = sentiment_buy_permissions(
+        signal.get("action_recommendation") or "neutral"
+    )
+    llm_buys_allowed = buy_permissions["llm_buys_allowed"]
+    range_buys_allowed = buy_permissions["range_buys_allowed"]
 
     open_buy_orders = state_data.get("open_buy_orders") or []
     open_sell_orders = state_data.get("open_sell_orders") or []
@@ -486,6 +507,10 @@ def evaluate_candidate(snapshot, candidate, price):
         return False, "max_open_sell_orders"
     if deployed_inventory_usd >= max_inventory_usd:
         return False, "max_inventory_usd"
+    if buy_source == "llm_target" and not llm_buys_allowed:
+        return False, "sentiment_action_not_bullish_allowed"
+    if buy_source != "llm_target" and not range_buys_allowed:
+        return False, "sentiment_action_not_range_permitted"
 
     flow_control = flow_adjustment(config, flow_pressure, buy_source)
     if flow_control["block_buy"]:
