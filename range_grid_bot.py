@@ -99,6 +99,33 @@ def parse_strategy_modes(raw_value):
             normalized_modes.append(normalized_mode)
     return normalized_modes
 
+
+def normalize_operating_mode(raw_value):
+    normalized = str(raw_value or "range_plus_llm").strip().lower()
+    valid_modes = {
+        "range_plus_llm",
+        "range_only",
+        "sell_only",
+        "observe_only",
+    }
+    return normalized if normalized in valid_modes else "range_plus_llm"
+
+
+def apply_operating_mode_to_strategy_modes(base_modes, operating_mode):
+    if operating_mode in ("sell_only", "observe_only"):
+        return []
+    if operating_mode == "range_only":
+        return [mode for mode in base_modes if mode != "llm_target"]
+    return list(base_modes)
+
+
+def operating_mode_allows_sell_execution(operating_mode):
+    return operating_mode in ("range_plus_llm", "range_only", "sell_only")
+
+
+def operating_mode_allows_buy_execution(operating_mode):
+    return operating_mode in ("range_plus_llm", "range_only")
+
 def load_json_file(path):
     with open(path, encoding="utf-8") as f:
         return json.load(f)
@@ -322,7 +349,14 @@ range_fallback_execution_signal = profile_float(
     max(execution_signal_threshold, sentiment_defensive_threshold)
 )
 grid_anchor = strategy_config.get("grid_anchor", "low").strip().lower()
-strategy_modes = parse_strategy_modes(grid_anchor)
+operating_mode = normalize_operating_mode(
+    strategy_config.get("operating_mode", "range_plus_llm")
+)
+configured_strategy_modes = parse_strategy_modes(grid_anchor)
+strategy_modes = apply_operating_mode_to_strategy_modes(
+    configured_strategy_modes,
+    operating_mode
+)
 
 # ----------------------
 # KRAKEN INIT
@@ -1884,7 +1918,9 @@ def main():
         message="Range Grid Average bot starting",
         **instance_identity,
         config_file=CONFIG_FILE,
+        operating_mode=operating_mode,
         grid_anchor=grid_anchor,
+        configured_strategy_modes=configured_strategy_modes,
         strategy_modes=strategy_modes,
         range_window_hours=range_window_hours,
         max_grid_size=max_grid_size,
@@ -2107,6 +2143,9 @@ def main():
                 "SIGNAL_UPDATE",
                 execution_signal=execution_signal,
                 price=price,
+                operating_mode=operating_mode,
+                configured_strategy_modes=configured_strategy_modes,
+                strategy_modes=strategy_modes,
                 btc_sentiment=sentiment_payload.get("btc_sentiment"),
                 confidence=sentiment_payload.get("confidence"),
                 raw_btc_sentiment=sentiment_payload.get("raw_btc_sentiment"),
@@ -2275,6 +2314,20 @@ def main():
                     continue
 
                 if status == "open":
+                    if not operating_mode_allows_sell_execution(operating_mode):
+                        actions.append("sell_management_disabled")
+                        log_event(
+                            "SELL_REPRICE_SKIPPED",
+                            cycle_id=cycle_id,
+                            txid=txid,
+                            level=order.get("level"),
+                            buy_price=order.get("buy_price"),
+                            current_sell_price=order.get("sell_price"),
+                            operating_mode=operating_mode,
+                            reason="operating_mode_blocks_sell_management"
+                        )
+                        continue
+
                     buy_price = order.get("buy_price")
                     current_sell_price = order.get("sell_price")
                     sell_pct_override = order.get("sell_pct_override")
@@ -2586,6 +2639,29 @@ def main():
                         buy_source=buy_source,
                         match_reason=match_reason
                     )
+                    continue
+
+                if not operating_mode_allows_sell_execution(operating_mode):
+                    defer_reason = f"operating_mode_{operating_mode}"
+                    existing_reason = order.get("sell_failure_reason")
+                    retry_after = (
+                        now + timedelta(seconds=price_check_interval_seconds)
+                    ).isoformat()
+                    order["sell_retry_after"] = retry_after
+                    order["sell_failure_reason"] = defer_reason
+                    save_state(state)
+                    actions.append("sell_execution_disabled")
+                    if existing_reason != defer_reason:
+                        log_event(
+                            "SELL_EXECUTION_DEFERRED",
+                            cycle_id=cycle_id,
+                            level=level,
+                            txid=order.get("txid"),
+                            retry_after=retry_after,
+                            operating_mode=operating_mode,
+                            buy_source=buy_source,
+                            reason=defer_reason
+                        )
                     continue
 
                 sell_resp = kraken_call(
@@ -3094,6 +3170,7 @@ def main():
                     "TRADE_DECISION",
                     side="hold",
                     price=price,
+                    operating_mode=operating_mode,
                     execution_signal=execution_signal,
                     threshold=execution_signal_threshold,
                     llm_target_min_signal=llm_target_min_signal,
@@ -3129,7 +3206,13 @@ def main():
                     range_median=median,
                     sentiment_regime=regime["name"],
                     reason=(
-                        "buy_modes_disabled"
+                        (
+                            f"operating_mode_{operating_mode}"
+                            if not operating_mode_allows_buy_execution(
+                                operating_mode
+                            )
+                            else "buy_modes_disabled"
+                        )
                         if not strategy_modes
                         else
                         (
@@ -3159,6 +3242,7 @@ def main():
                 "CYCLE_SUMMARY",
                 cycle_id=cycle_id,
                 price=price,
+                operating_mode=operating_mode,
                 execution_signal=execution_signal,
                 threshold=execution_signal_threshold,
                 llm_target_min_signal=llm_target_min_signal,
@@ -3221,6 +3305,7 @@ def main():
                 effective_max_open_sell_orders=effective_max_open_sell_orders,
                 high_anchor_enabled=regime["allow_high_anchor"],
                 grid_anchor=grid_anchor,
+                configured_strategy_modes=configured_strategy_modes,
                 buy_source=(
                     "llm_target"
                     if llm_buy_allowed
