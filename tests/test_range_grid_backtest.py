@@ -158,7 +158,30 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "range_high_band": 2,
                     "range_low": 1,
                 },
-            }
+            },
+            "recent_replay_events": [
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "buy_source": "range_high_band",
+                    "price": 104.5,
+                    "level": 104.5,
+                    "status": "approved_gate_only",
+                },
+                {
+                    "captured_at": "2026-06-13T12:01:00+00:00",
+                    "buy_source": "range_high_band",
+                    "price": 104.4,
+                    "level": 104.4,
+                    "status": "approved_gate_only",
+                },
+                {
+                    "captured_at": "2026-06-13T12:02:00+00:00",
+                    "buy_source": "range_low",
+                    "price": 95.0,
+                    "level": 95.0,
+                    "status": "approved_gate_only",
+                },
+            ],
         }
         actual = {
             "buy_orders_placed": 1,
@@ -178,6 +201,25 @@ class RangeGridBacktestTests(unittest.TestCase):
             {"range_high_band": 1, "range_low": 1},
         )
         self.assertAlmostEqual(summary["placement_rate_vs_approved"], 0.3333, places=4)
+        self.assertEqual(
+            summary["recent_approved_but_not_placed"],
+            [
+                {
+                    "captured_at": "2026-06-13T12:01:00+00:00",
+                    "buy_source": "range_high_band",
+                    "price": 104.4,
+                    "level": 104.4,
+                    "status": "approved_but_not_placed",
+                },
+                {
+                    "captured_at": "2026-06-13T12:02:00+00:00",
+                    "buy_source": "range_low",
+                    "price": 95.0,
+                    "level": 95.0,
+                    "status": "approved_but_not_placed",
+                },
+            ],
+        )
 
 
 if __name__ == "__main__":

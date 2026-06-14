@@ -790,6 +790,26 @@ def summarize_missed_approved_opportunities(replay, actual):
         if total_approved > 0
         else None
     )
+    remaining_by_source = dict(missing_by_source)
+    recent_examples = []
+    for event in reversed(replay.get("recent_replay_events", [])):
+        if event.get("status") != "approved_gate_only":
+            continue
+        source = event.get("buy_source") or "unknown"
+        remaining = int(remaining_by_source.get(source, 0) or 0)
+        if remaining <= 0:
+            continue
+        recent_examples.append({
+            "captured_at": event.get("captured_at"),
+            "buy_source": source,
+            "price": event.get("price"),
+            "level": event.get("level"),
+            "status": "approved_but_not_placed",
+        })
+        remaining_by_source[source] = remaining - 1
+        if sum(remaining_by_source.values()) <= 0:
+            break
+    recent_examples.reverse()
 
     return {
         "approved_candidates": total_approved,
@@ -797,6 +817,7 @@ def summarize_missed_approved_opportunities(replay, actual):
         "approved_but_not_placed": total_missing,
         "approved_but_not_placed_by_source": missing_by_source,
         "placement_rate_vs_approved": placement_rate,
+        "recent_approved_but_not_placed": recent_examples[-BACKTEST_RECENT_LIMIT:],
         "notes": [
             "This is a gate-level comparison only.",
             "A missed approved opportunity means replay approved a buy candidate but no corresponding live BUY_ORDER_PLACED was seen in the reporting window.",
