@@ -535,10 +535,15 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
 def atomic_write(path, content):
     path = Path(path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o755)
+    except Exception:
+        pass
     with NamedTemporaryFile("w", delete=False, dir=str(path.parent), encoding="utf-8") as tmp:
         tmp.write(content)
         temp_name = tmp.name
     os.replace(temp_name, path)
+    os.chmod(path, 0o644)
 
 
 def build_dashboard(output_file=OUTPUT_FILE):
