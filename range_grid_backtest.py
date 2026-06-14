@@ -35,6 +35,9 @@ BACKTEST_ARCHIVE_DIR = os.getenv(
 )
 BACKTEST_WINDOW_HOURS = float(os.getenv("RANGE_GRID_BACKTEST_WINDOW_HOURS", "24"))
 BACKTEST_RECENT_LIMIT = int(os.getenv("RANGE_GRID_BACKTEST_RECENT_LIMIT", "25"))
+BACKTEST_POTENTIAL_MAX_HOLD_HOURS = float(
+    os.getenv("RANGE_GRID_BACKTEST_POTENTIAL_MAX_HOLD_HOURS", "24")
+)
 
 
 def now_utc():
@@ -216,6 +219,131 @@ def compute_grid(anchor, entry_step_pct, max_grid_size):
         ],
         reverse=True
     )
+
+
+def snapshot_price(snapshot):
+    price = safe_float((snapshot.get("ticker") or {}).get("last_price"))
+    if price is not None:
+        return price
+    signal = signal_payload(snapshot)
+    return safe_float(signal.get("btc_price"))
+
+
+def sell_backlog_oldest_minutes(snapshot):
+    open_sell_orders = (state_payload(snapshot).get("open_sell_orders") or [])
+    captured_at = snapshot_timestamp(snapshot)
+    if captured_at is None:
+        return 0.0
+
+    oldest = 0.0
+    for order in open_sell_orders:
+        if not isinstance(order, dict):
+            continue
+        placed_at = parse_iso8601(order.get("placed_at"))
+        if placed_at is None:
+            continue
+        age_minutes = max(0.0, (captured_at - placed_at).total_seconds() / 60.0)
+        oldest = max(oldest, age_minutes)
+    return round(oldest, 2)
+
+
+def approved_event_profit_target_pct(snapshot, event):
+    configured_profit_target = safe_float(
+        strategy_payload(snapshot).get("profit_target_pct")
+    ) or 0.0
+    if event.get("buy_source") == "range_high_band":
+        return safe_float(
+            strategy_payload(snapshot).get("high_anchor_profit_target_pct")
+        ) or configured_profit_target
+    return safe_float(event.get("sell_pct_override")) or configured_profit_target
+
+
+def infer_live_only_blockers(snapshot, event):
+    blockers = []
+    config = strategy_payload(snapshot)
+    state_info = state_summary(snapshot)
+    captured_at = snapshot_timestamp(snapshot)
+
+    operating_mode = str(
+        config.get("operating_mode", "range_plus_llm") or "range_plus_llm"
+    ).strip().lower()
+    if operating_mode not in ("range_plus_llm", "range_only"):
+        blockers.append(f"operating_mode_{operating_mode}")
+
+    backlog_limit = int(config.get("disable_new_buys_on_sell_backlog_count", 0) or 0)
+    open_sell_count = int(state_info.get("open_sell_count") or 0)
+    if backlog_limit > 0 and open_sell_count >= backlog_limit:
+        blockers.append("sell_backlog_count")
+
+    backlog_minutes_limit = float(
+        config.get("disable_new_buys_on_sell_backlog_minutes", 0) or 0
+    )
+    oldest_sell_age = sell_backlog_oldest_minutes(snapshot)
+    if backlog_minutes_limit > 0 and oldest_sell_age >= backlog_minutes_limit:
+        blockers.append("sell_backlog_age_minutes")
+
+    private_api_backoff_until = parse_iso8601(
+        state_info.get("private_api_backoff_until")
+    )
+    if (
+        captured_at is not None
+        and private_api_backoff_until is not None
+        and private_api_backoff_until > captured_at
+    ):
+        blockers.append("private_api_backoff_active")
+
+    insufficient_funds_backoff_until = parse_iso8601(
+        state_info.get("sell_insufficient_funds_backoff_until")
+    )
+    if (
+        captured_at is not None
+        and insufficient_funds_backoff_until is not None
+        and insufficient_funds_backoff_until > captured_at
+    ):
+        blockers.append("sell_insufficient_funds_backoff_active")
+
+    return blockers
+
+
+def simulate_missed_opportunity(snapshot, event, snapshots):
+    entry_time = parse_iso8601(event.get("captured_at"))
+    entry_price = safe_float(event.get("level")) or safe_float(event.get("price"))
+    if entry_time is None or entry_price is None or entry_price <= 0:
+        return None
+
+    hold_end = entry_time + timedelta(hours=BACKTEST_POTENTIAL_MAX_HOLD_HOURS)
+    target_profit_pct = approved_event_profit_target_pct(snapshot, event)
+    target_return_pct = target_profit_pct * 100.0
+    max_runup_pct = 0.0
+    max_drawdown_pct = 0.0
+    end_return_pct = None
+    take_profit_reached_at = None
+
+    for future_snapshot in snapshots:
+        future_time = snapshot_timestamp(future_snapshot)
+        if future_time is None or future_time <= entry_time:
+            continue
+        if future_time > hold_end:
+            break
+        future_price = snapshot_price(future_snapshot)
+        if future_price is None:
+            continue
+        return_pct = ((future_price - entry_price) / entry_price) * 100.0
+        max_runup_pct = max(max_runup_pct, return_pct)
+        max_drawdown_pct = min(max_drawdown_pct, return_pct)
+        end_return_pct = return_pct
+        if take_profit_reached_at is None and return_pct >= target_return_pct:
+            take_profit_reached_at = future_time.isoformat()
+
+    return {
+        "target_profit_pct": round(target_profit_pct * 100.0, 4),
+        "take_profit_reached": take_profit_reached_at is not None,
+        "take_profit_reached_at": take_profit_reached_at,
+        "max_runup_pct": round(max_runup_pct, 6),
+        "max_drawdown_pct": round(max_drawdown_pct, 6),
+        "end_return_pct": round(end_return_pct, 6) if end_return_pct is not None else None,
+        "hold_window_hours": BACKTEST_POTENTIAL_MAX_HOLD_HOURS,
+    }
 
 
 def compute_high_anchor_grid(high, price, entry_step_pct):
@@ -625,6 +753,7 @@ def replay_from_snapshots(snapshots):
     summary = empty_replay_summary()
     recent = []
     recent_approved = []
+    approved_events = []
     hold_reason_counts = Counter()
     blocked_reason_counts = Counter()
     candidate_counts_by_source = Counter()
@@ -671,11 +800,13 @@ def replay_from_snapshots(snapshots):
                     "price": price,
                     "buy_source": candidate["buy_source"],
                     "level": round(candidate["level"], 2),
+                    "sell_pct_override": candidate.get("sell_pct_override"),
                     "status": "approved_gate_only",
                     "reason": None,
                 }
                 recent.append(approved_event)
                 recent_approved.append(approved_event)
+                approved_events.append(approved_event)
             else:
                 blocked_reason_counts[reason] += 1
                 recent.append({
@@ -696,6 +827,7 @@ def replay_from_snapshots(snapshots):
         "summary": summary,
         "recent_replay_events": recent[-BACKTEST_RECENT_LIMIT:],
         "recent_approved_events": recent_approved[-BACKTEST_RECENT_LIMIT:],
+        "approved_events": approved_events,
         "replay_scope": "gate_only_no_private_balance_or_fill_simulation",
     }
 
@@ -776,7 +908,7 @@ def summarize_actual_trades(events):
     return summary
 
 
-def summarize_missed_approved_opportunities(replay, actual):
+def summarize_missed_approved_opportunities(replay, actual, snapshots=None):
     approved_by_source = replay["summary"].get("approved_counts_by_source", {})
     live_buys_by_source = actual.get("buy_orders_placed_by_source", {})
 
@@ -795,32 +927,142 @@ def summarize_missed_approved_opportunities(replay, actual):
         else None
     )
     remaining_by_source = dict(missing_by_source)
+    snapshot_by_timestamp = {}
+    for snapshot in snapshots or []:
+        captured_at = snapshot.get("captured_at")
+        if captured_at:
+            snapshot_by_timestamp[captured_at] = snapshot
+    approved_events = replay.get("approved_events") or []
+    blocker_counter = Counter()
+    potential_results = []
+    missed_examples = []
+    for event in approved_events:
+        source = event.get("buy_source") or "unknown"
+        if int(missing_by_source.get(source, 0) or 0) <= 0:
+            continue
+        snapshot = snapshot_by_timestamp.get(event.get("captured_at"))
+        blockers = infer_live_only_blockers(snapshot, event) if snapshot else []
+        for blocker in blockers:
+            blocker_counter[blocker] += 1
+        potential = (
+            simulate_missed_opportunity(snapshot, event, snapshots or [])
+            if snapshot
+            else None
+        )
+        if potential:
+            potential_results.append(potential)
+        missed_examples.append({
+            "captured_at": event.get("captured_at"),
+            "buy_source": source,
+            "price": event.get("price"),
+            "level": event.get("level"),
+            "status": "approved_but_not_placed",
+            "likely_live_blockers": blockers,
+            "potential": potential,
+        })
+
     recent_examples = []
-    approved_events = replay.get("recent_approved_events") or replay.get("recent_replay_events", [])
-    for event in reversed(approved_events):
+    recent_approved_events = (
+        replay.get("recent_approved_events") or replay.get("recent_replay_events", [])
+    )
+    for event in reversed(recent_approved_events):
         if event.get("status") != "approved_gate_only":
             continue
         source = event.get("buy_source") or "unknown"
         remaining = int(remaining_by_source.get(source, 0) or 0)
         if remaining <= 0:
             continue
+        snapshot = snapshot_by_timestamp.get(event.get("captured_at"))
+        blockers = infer_live_only_blockers(snapshot, event) if snapshot else []
+        potential = (
+            simulate_missed_opportunity(snapshot, event, snapshots or [])
+            if snapshot
+            else None
+        )
         recent_examples.append({
             "captured_at": event.get("captured_at"),
             "buy_source": source,
             "price": event.get("price"),
             "level": event.get("level"),
             "status": "approved_but_not_placed",
+            "likely_live_blockers": blockers,
+            "potential": potential,
         })
         remaining_by_source[source] = remaining - 1
         if sum(remaining_by_source.values()) <= 0:
             break
     recent_examples.reverse()
 
+    end_returns = [
+        result["end_return_pct"]
+        for result in potential_results
+        if result.get("end_return_pct") is not None
+    ]
+    max_runups = [
+        result["max_runup_pct"]
+        for result in potential_results
+        if result.get("max_runup_pct") is not None
+    ]
+    max_drawdowns = [
+        result["max_drawdown_pct"]
+        for result in potential_results
+        if result.get("max_drawdown_pct") is not None
+    ]
+    take_profit_count = sum(
+        1 for result in potential_results if result.get("take_profit_reached")
+    )
+    profitable_end_count = sum(1 for value in end_returns if value > 0)
+    potential_summary = {
+        "evaluated_count": len(potential_results),
+        "take_profit_reached_count": take_profit_count,
+        "take_profit_reached_rate": (
+            round(take_profit_count / len(potential_results), 4)
+            if potential_results
+            else None
+        ),
+        "profitable_at_window_end_count": profitable_end_count,
+        "profitable_at_window_end_rate": (
+            round(profitable_end_count / len(end_returns), 4)
+            if end_returns
+            else None
+        ),
+        "avg_end_return_pct": (
+            round(statistics.mean(end_returns), 6)
+            if end_returns
+            else None
+        ),
+        "median_end_return_pct": (
+            round(statistics.median(end_returns), 6)
+            if end_returns
+            else None
+        ),
+        "best_end_return_pct": max(end_returns) if end_returns else None,
+        "worst_end_return_pct": min(end_returns) if end_returns else None,
+        "avg_max_runup_pct": (
+            round(statistics.mean(max_runups), 6)
+            if max_runups
+            else None
+        ),
+        "avg_max_drawdown_pct": (
+            round(statistics.mean(max_drawdowns), 6)
+            if max_drawdowns
+            else None
+        ),
+        "assumptions": [
+            "Entry assumed at the approved replay level.",
+            f"Opportunity path measured over the next {BACKTEST_POTENTIAL_MAX_HOLD_HOURS:g} hours of captured snapshots.",
+            "Potential takes profit when the configured target is first reached; otherwise end_return_pct is marked to the end of the hold window.",
+            "This does not model exchange fills, fees, slippage, or stop-loss exits."
+        ],
+    }
+
     return {
         "approved_candidates": total_approved,
         "actual_buy_orders_placed": actual.get("buy_orders_placed", 0),
         "approved_but_not_placed": total_missing,
         "approved_but_not_placed_by_source": missing_by_source,
+        "likely_live_blockers": dict(blocker_counter.most_common()),
+        "potential_summary": potential_summary,
         "placement_rate_vs_approved": placement_rate,
         "recent_approved_but_not_placed": recent_examples[-BACKTEST_RECENT_LIMIT:],
         "notes": [
@@ -854,7 +1096,9 @@ def build_report():
 
     replay = replay_from_snapshots(snapshots)
     actual = summarize_actual_trades(events)
-    missed = summarize_missed_approved_opportunities(replay, actual)
+    missed = summarize_missed_approved_opportunities(replay, actual, snapshots)
+    replay_output = dict(replay)
+    replay_output.pop("approved_events", None)
 
     return {
         "timestamp": now.isoformat(),
@@ -864,7 +1108,7 @@ def build_report():
         "since": since_dt.isoformat(),
         "snapshot_count": len(snapshots),
         "trade_event_count": len(events),
-        "replay": replay,
+        "replay": replay_output,
         "actual_live": actual,
         "missed_opportunities": missed,
         "top_summary": {

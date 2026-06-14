@@ -13,6 +13,9 @@ def make_snapshot(
     action_recommendation="bullish_allowed",
     strategy_modes=None,
     target_prices=None,
+    strategy_overrides=None,
+    state_summary_overrides=None,
+    open_sell_orders=None,
 ):
     strategy_payload = {
         "grid_anchor": "low,high",
@@ -35,6 +38,8 @@ def make_snapshot(
         "max_inventory_usd": 750,
         "high_anchor_profit_target_pct": 0.006,
     }
+    if strategy_overrides:
+        strategy_payload.update(strategy_overrides)
 
     signal_payload = {
         "processed_at": captured_at,
@@ -67,16 +72,16 @@ def make_snapshot(
         "state": {
             "summary": {
                 "open_buy_count": 0,
-                "open_sell_count": 0,
+                "open_sell_count": len(open_sell_orders or []),
                 "open_buy_volume": 0.0,
                 "open_sell_volume": 0.0,
                 "deployed_inventory_usd": 0.0,
                 "last_sell_price": 120.0,
                 "last_llm_sell_at": None,
                 "last_high_anchor_buy_at": None,
-            },
+            } | (state_summary_overrides or {}),
             "open_buy_orders": [],
-            "open_sell_orders": [],
+            "open_sell_orders": open_sell_orders or [],
         },
     }
 
@@ -210,6 +215,8 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "price": 104.4,
                     "level": 104.4,
                     "status": "approved_but_not_placed",
+                    "likely_live_blockers": [],
+                    "potential": None,
                 },
                 {
                     "captured_at": "2026-06-13T12:02:00+00:00",
@@ -217,6 +224,8 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "price": 95.0,
                     "level": 95.0,
                     "status": "approved_but_not_placed",
+                    "likely_live_blockers": [],
+                    "potential": None,
                 },
             ],
         )
@@ -283,6 +292,8 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "price": 104.4,
                     "level": 104.4,
                     "status": "approved_but_not_placed",
+                    "likely_live_blockers": [],
+                    "potential": None,
                 },
                 {
                     "captured_at": "2026-06-13T12:02:00+00:00",
@@ -290,9 +301,60 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "price": 104.5,
                     "level": 104.5,
                     "status": "approved_but_not_placed",
+                    "likely_live_blockers": [],
+                    "potential": None,
                 },
             ],
         )
+
+    def test_missed_opportunities_include_blockers_and_potential_summary(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                104.5,
+                action_recommendation="watch_only",
+                strategy_modes=["high"],
+                strategy_overrides={
+                    "disable_new_buys_on_sell_backlog_count": 1,
+                    "operating_mode": "range_only",
+                },
+                open_sell_orders=[
+                    {
+                        "placed_at": "2026-06-13T00:00:00+00:00",
+                    }
+                ],
+            ),
+            make_snapshot(
+                "2026-06-13T12:10:00+00:00",
+                105.3,
+                action_recommendation="watch_only",
+                strategy_modes=["high"],
+            ),
+        ]
+
+        replay = backtest.replay_from_snapshots(snapshots)
+        actual = {
+            "buy_orders_placed": 0,
+            "buy_orders_placed_by_source": {},
+        }
+
+        summary = backtest.summarize_missed_approved_opportunities(
+            replay,
+            actual,
+            snapshots,
+        )
+
+        self.assertEqual(summary["approved_but_not_placed"], 1)
+        self.assertEqual(summary["likely_live_blockers"], {"sell_backlog_count": 1})
+        self.assertEqual(
+            summary["recent_approved_but_not_placed"][0]["likely_live_blockers"],
+            ["sell_backlog_count"],
+        )
+        self.assertTrue(
+            summary["recent_approved_but_not_placed"][0]["potential"]["take_profit_reached"]
+        )
+        self.assertEqual(summary["potential_summary"]["evaluated_count"], 1)
+        self.assertEqual(summary["potential_summary"]["take_profit_reached_count"], 1)
 
 
 if __name__ == "__main__":
