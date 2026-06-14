@@ -272,6 +272,29 @@ class LlmTargetBacktestTests(unittest.TestCase):
             places=2
         )
 
+    def test_profit_only_variant_holds_through_stop_loss(self):
+        snapshots = [
+            make_snapshot("2026-05-30T12:00:00+00:00", 101.0),
+            make_snapshot("2026-05-30T12:30:00+00:00", 100.0),
+            make_snapshot("2026-05-30T13:00:00+00:00", 99.4),
+        ]
+
+        stop_result = backtest.simulate_strategy("price_target_only", snapshots)
+        hold_result = backtest.simulate_strategy(
+            "price_target_only_tp_1_2_hold",
+            snapshots
+        )
+
+        self.assertEqual(stop_result["summary"]["stop_loss_count"], 1)
+        self.assertEqual(hold_result["summary"]["stop_loss_count"], 0)
+        self.assertEqual(hold_result["summary"]["trades"], 0)
+        self.assertEqual(hold_result["summary"]["open_position_count"], 1)
+        self.assertEqual(len(hold_result["open_positions"]), 1)
+        self.assertLess(
+            hold_result["summary"]["open_position_unrealized_net_pct"],
+            0
+        )
+
     def test_unfilled_approved_candidate_has_zero_fill_rate(self):
         snapshots = [
             make_snapshot("2026-05-30T12:00:00+00:00", 101.0),
@@ -374,10 +397,16 @@ class LlmTargetBacktestTests(unittest.TestCase):
             self.assertIn("strategy_headlines", report["top_summary"])
             self.assertIn("price_target_only_tp_0_8", report["strategies"])
             self.assertIn("price_target_only_tp_1_2", report["strategies"])
+            self.assertIn("price_target_only_tp_1_2_hold", report["strategies"])
             self.assertIn("target_quality_only", report["strategies"])
+            self.assertIn("target_quality_only_hold", report["strategies"])
             self.assertIn("sentiment_discount_with_quality", report["strategies"])
             self.assertIn(
                 "sentiment_discount_with_quality_tp_1_5",
+                report["strategies"]
+            )
+            self.assertIn(
+                "sentiment_discount_with_quality_tp_1_5_hold",
                 report["strategies"]
             )
             headline = report["top_summary"]["strategy_headlines"]["with_target_quality"]

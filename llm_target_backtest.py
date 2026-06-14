@@ -81,17 +81,37 @@ BACKTEST_STRATEGIES = {
         "base_strategy": "price_target_only",
         "profit_target_pct": 0.012,
     },
+    "price_target_only_tp_1_2_hold": {
+        "base_strategy": "price_target_only",
+        "profit_target_pct": 0.012,
+        "exit_mode": "profit_only",
+    },
     "price_target_only_tp_1_5": {
         "base_strategy": "price_target_only",
         "profit_target_pct": 0.015,
+    },
+    "price_target_only_tp_1_5_hold": {
+        "base_strategy": "price_target_only",
+        "profit_target_pct": 0.015,
+        "exit_mode": "profit_only",
     },
     "price_target_only_tp_2_0": {
         "base_strategy": "price_target_only",
         "profit_target_pct": 0.02,
     },
+    "price_target_only_tp_2_0_hold": {
+        "base_strategy": "price_target_only",
+        "profit_target_pct": 0.02,
+        "exit_mode": "profit_only",
+    },
     "target_quality_only": {
         "base_strategy": "with_target_quality",
         "ignore_sentiment": True,
+    },
+    "target_quality_only_hold": {
+        "base_strategy": "with_target_quality",
+        "ignore_sentiment": True,
+        "exit_mode": "profit_only",
     },
     "sentiment_discount_with_quality": {
         "base_strategy": "with_target_quality",
@@ -111,6 +131,12 @@ BACKTEST_STRATEGIES = {
         "base_strategy": "with_target_quality",
         "sentiment_discount": True,
         "profit_target_pct": 0.015,
+    },
+    "sentiment_discount_with_quality_tp_1_5_hold": {
+        "base_strategy": "with_target_quality",
+        "sentiment_discount": True,
+        "profit_target_pct": 0.015,
+        "exit_mode": "profit_only",
     },
 }
 
@@ -354,6 +380,14 @@ def strategy_uses_sentiment_discount(strategy_name):
 
 def strategy_ignores_sentiment(strategy_name):
     return bool(strategy_options(strategy_name).get("ignore_sentiment"))
+
+
+def strategy_exit_mode(strategy_name):
+    return strategy_options(strategy_name).get("exit_mode", "stop_loss")
+
+
+def strategy_uses_profit_only_exit(strategy_name):
+    return strategy_exit_mode(strategy_name) == "profit_only"
 
 
 def sentiment_discount_requirement_pct(snapshot, signal):
@@ -643,6 +677,10 @@ def empty_summary():
         "avg_fee_bps": None,
         "total_net_return_pct": None,
         "avg_hold_minutes": None,
+        "open_position_count": 0,
+        "open_position_unrealized_net_pct": None,
+        "open_position_max_drawdown_pct": None,
+        "open_position_max_runup_pct": None,
         "take_profit_count": 0,
         "stop_loss_count": 0,
         "timeout_count": 0,
@@ -668,8 +706,67 @@ def empty_summary():
     }
 
 
-def finalize_summary(summary, trades):
+def finalize_open_position(position, last_price, last_timestamp):
+    if position is None or last_price is None:
+        return None
+
+    high_water = max(position["high_water"], last_price)
+    low_water = min(position["low_water"], last_price)
+    gross_return_pct, net_return_pct, max_runup_pct, max_drawdown_pct = (
+        compute_trade_stats(
+            position["entry_price"],
+            last_price,
+            high_water,
+            low_water,
+            position["fee_bps"]
+        )
+    )
+    hold_minutes = None
+    if last_timestamp is not None:
+        hold_minutes = (
+            last_timestamp - position["filled_at"]
+        ).total_seconds() / 60.0
+
+    return {
+        "strategy": position["strategy"],
+        "decision_time": position["decision_time"].isoformat(),
+        "signal_timestamp": position["signal_timestamp"],
+        "decision_price": position["decision_price"],
+        "buy_target": position["buy_target"],
+        "filled_at": position["filled_at"].isoformat(),
+        "entry_price": position["entry_price"],
+        "mark_time": last_timestamp.isoformat() if last_timestamp else None,
+        "mark_price": round(last_price, 2),
+        "fee_bps": round(position["fee_bps"], 6),
+        "gross_return_pct": round(gross_return_pct, 6),
+        "unrealized_net_return_pct": round(net_return_pct, 6),
+        "max_runup_pct": round(max_runup_pct, 6),
+        "max_drawdown_pct": round(max_drawdown_pct, 6),
+        "hold_minutes": round(hold_minutes, 2) if hold_minutes is not None else None,
+        "execution_signal": position["execution_signal"],
+        "confidence": position["confidence"],
+        "contributor_count": position["contributor_count"],
+        "policy": position["policy"],
+    }
+
+
+def finalize_summary(summary, trades, open_positions=None):
     summary["trades"] = len(trades)
+    open_positions = open_positions or []
+    summary["open_position_count"] = len(open_positions)
+    if open_positions:
+        summary["open_position_unrealized_net_pct"] = round(
+            sum(position["unrealized_net_return_pct"] for position in open_positions),
+            6
+        )
+        summary["open_position_max_drawdown_pct"] = round(
+            min(position["max_drawdown_pct"] for position in open_positions),
+            6
+        )
+        summary["open_position_max_runup_pct"] = round(
+            max(position["max_runup_pct"] for position in open_positions),
+            6
+        )
     approved_candidates = summary["approved_candidates"]
     if approved_candidates > 0:
         summary["fill_rate_after_approval"] = round(
@@ -782,6 +879,8 @@ def simulate_strategy(strategy_name, snapshots):
     pending_entry = None
     cooldown_until = None
     last_sell_price = None
+    last_price = None
+    last_timestamp = None
 
     for snapshot in snapshots:
         timestamp = snapshot_timestamp(snapshot)
@@ -790,6 +889,9 @@ def simulate_strategy(strategy_name, snapshots):
 
         if timestamp is None:
             continue
+        last_timestamp = timestamp
+        if price is not None:
+            last_price = price
 
         if pending_entry is not None:
             if price is not None and price <= pending_entry["buy_target"]["buy_price"]:
@@ -820,11 +922,17 @@ def simulate_strategy(strategy_name, snapshots):
                 exit_reason = "take_profit"
                 exit_price = tp_price
                 summary["take_profit_count"] += 1
-            elif price <= sl_price:
+            elif (
+                not strategy_uses_profit_only_exit(strategy_name)
+                and price <= sl_price
+            ):
                 exit_reason = "stop_loss"
                 exit_price = sl_price
                 summary["stop_loss_count"] += 1
-            elif timestamp >= position["exit_deadline"]:
+            elif (
+                not strategy_uses_profit_only_exit(strategy_name)
+                and timestamp >= position["exit_deadline"]
+            ):
                 exit_reason = "timeout"
                 exit_price = price
                 summary["timeout_count"] += 1
@@ -987,10 +1095,15 @@ def simulate_strategy(strategy_name, snapshots):
 
     recent_decisions = recent_decisions[-BACKTEST_RECENT_LIMIT:]
     recent_trades = trades[-BACKTEST_RECENT_LIMIT:]
+    open_positions = []
+    open_position = finalize_open_position(position, last_price, last_timestamp)
+    if open_position is not None:
+        open_positions.append(open_position)
     return {
-        "summary": finalize_summary(summary, trades),
+        "summary": finalize_summary(summary, trades, open_positions),
         "recent_decisions": recent_decisions,
-        "recent_trades": recent_trades
+        "recent_trades": recent_trades,
+        "open_positions": open_positions
     }
 
 
@@ -1026,6 +1139,12 @@ def top_summary(strategies):
                 "raw_candidates": payload["summary"].get("raw_candidates"),
                 "approved_candidates": payload["summary"].get("approved_candidates"),
                 "trades": payload["summary"].get("trades"),
+                "open_position_count": payload["summary"].get(
+                    "open_position_count"
+                ),
+                "open_position_unrealized_net_pct": payload["summary"].get(
+                    "open_position_unrealized_net_pct"
+                ),
                 "win_rate": payload["summary"].get("win_rate"),
                 "total_net_return_pct": payload["summary"].get("total_net_return_pct"),
                 "no_target": payload["summary"].get("no_target"),
