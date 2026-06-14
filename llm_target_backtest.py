@@ -77,9 +77,40 @@ BACKTEST_STRATEGIES = {
         "base_strategy": "price_target_only",
         "profit_target_pct": 0.01,
     },
+    "price_target_only_tp_1_2": {
+        "base_strategy": "price_target_only",
+        "profit_target_pct": 0.012,
+    },
+    "price_target_only_tp_1_5": {
+        "base_strategy": "price_target_only",
+        "profit_target_pct": 0.015,
+    },
+    "price_target_only_tp_2_0": {
+        "base_strategy": "price_target_only",
+        "profit_target_pct": 0.02,
+    },
+    "target_quality_only": {
+        "base_strategy": "with_target_quality",
+        "ignore_sentiment": True,
+    },
     "sentiment_discount_with_quality": {
         "base_strategy": "with_target_quality",
         "sentiment_discount": True,
+    },
+    "sentiment_discount_with_quality_tp_1_0": {
+        "base_strategy": "with_target_quality",
+        "sentiment_discount": True,
+        "profit_target_pct": 0.01,
+    },
+    "sentiment_discount_with_quality_tp_1_2": {
+        "base_strategy": "with_target_quality",
+        "sentiment_discount": True,
+        "profit_target_pct": 0.012,
+    },
+    "sentiment_discount_with_quality_tp_1_5": {
+        "base_strategy": "with_target_quality",
+        "sentiment_discount": True,
+        "profit_target_pct": 0.015,
     },
 }
 
@@ -321,6 +352,10 @@ def strategy_uses_sentiment_discount(strategy_name):
     return bool(strategy_options(strategy_name).get("sentiment_discount"))
 
 
+def strategy_ignores_sentiment(strategy_name):
+    return bool(strategy_options(strategy_name).get("ignore_sentiment"))
+
+
 def sentiment_discount_requirement_pct(snapshot, signal):
     config = strategy_config(snapshot)
     recommendation = signal.get("action_recommendation")
@@ -452,7 +487,11 @@ def quality_decision(
                 "profit_target_pct": None
             }
 
-    elif not ignore_sentiment and action_recommendation != "bullish_allowed":
+    elif (
+        not ignore_sentiment
+        and not strategy_ignores_sentiment(strategy_name)
+        and action_recommendation != "bullish_allowed"
+    ):
         return {
             "allowed": False,
             "reason": "blocked",

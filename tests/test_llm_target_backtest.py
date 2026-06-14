@@ -233,6 +233,23 @@ class LlmTargetBacktestTests(unittest.TestCase):
         decision = result["recent_decisions"][0]
         self.assertTrue(decision["shadow_target_quality"]["allowed"])
 
+    def test_target_quality_only_ignores_sentiment_but_uses_quality(self):
+        snapshots = [
+            make_snapshot(
+                "2026-05-30T12:00:00+00:00",
+                101.0,
+                action_recommendation="watch_only"
+            ),
+            make_snapshot("2026-05-30T12:30:00+00:00", 100.0),
+            make_snapshot("2026-05-30T13:00:00+00:00", 100.8),
+        ]
+
+        result = backtest.simulate_strategy("target_quality_only", snapshots)
+
+        self.assertEqual(result["summary"]["approved_candidates"], 1)
+        self.assertEqual(result["summary"]["blocked_by_sentiment"], 0)
+        self.assertEqual(result["summary"]["trades"], 1)
+
     def test_price_target_variant_uses_larger_profit_target(self):
         snapshots = [
             make_snapshot("2026-05-30T12:00:00+00:00", 101.0),
@@ -356,7 +373,13 @@ class LlmTargetBacktestTests(unittest.TestCase):
             self.assertIsNotNone(report["top_summary"]["best_strategy"])
             self.assertIn("strategy_headlines", report["top_summary"])
             self.assertIn("price_target_only_tp_0_8", report["strategies"])
+            self.assertIn("price_target_only_tp_1_2", report["strategies"])
+            self.assertIn("target_quality_only", report["strategies"])
             self.assertIn("sentiment_discount_with_quality", report["strategies"])
+            self.assertIn(
+                "sentiment_discount_with_quality_tp_1_5",
+                report["strategies"]
+            )
             headline = report["top_summary"]["strategy_headlines"]["with_target_quality"]
             self.assertEqual(headline["not_filled"], 0)
             self.assertEqual(headline["terminal_rate_after_approval"], 1.0)
