@@ -124,6 +124,32 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(result["summary"]["approved_candidates"], 1)
         self.assertEqual(result["summary"]["approved_counts_by_source"]["llm_target"], 1)
 
+    def test_watch_only_allows_range_permissions(self):
+        permissions = backtest.sentiment_buy_permissions("watch_only")
+        self.assertFalse(permissions["llm_buys_allowed"])
+        self.assertTrue(permissions["range_buys_allowed"])
+        self.assertTrue(permissions["any_buys_allowed"])
+
+    def test_replay_allows_high_band_candidate_during_watch_only(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                104.5,
+                action_recommendation="watch_only",
+                strategy_modes=["high"],
+            )
+        ]
+
+        result = backtest.replay_from_snapshots(snapshots)
+
+        self.assertGreaterEqual(result["summary"]["raw_candidates"], 1)
+        self.assertGreaterEqual(result["summary"]["approved_candidates"], 1)
+        self.assertEqual(result["summary"]["hold_snapshots"], 0)
+
+    def test_watch_only_still_blocks_llm_permissions(self):
+        permissions = backtest.sentiment_buy_permissions("watch_only")
+        self.assertFalse(permissions["llm_buys_allowed"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -172,7 +172,11 @@ def source_status_allows_trading(signal_status, source_status, require_fresh_sig
 def sentiment_buy_permissions(action_recommendation):
     normalized = (action_recommendation or "neutral").strip().lower()
     llm_buys_allowed = normalized == "bullish_allowed"
-    range_buys_allowed = normalized in ("bullish_allowed", "neutral")
+    range_buys_allowed = normalized in (
+        "bullish_allowed",
+        "neutral",
+        "watch_only",
+    )
     return {
         "llm_buys_allowed": llm_buys_allowed,
         "range_buys_allowed": range_buys_allowed,
