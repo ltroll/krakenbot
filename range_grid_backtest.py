@@ -144,6 +144,16 @@ def strategy_context(snapshot):
     return context if isinstance(context, dict) else {}
 
 
+def runtime_status_payload(snapshot):
+    payload = snapshot.get("runtime_status") or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def runtime_status_summary(snapshot):
+    summary = runtime_status_payload(snapshot).get("summary")
+    return summary if isinstance(summary, dict) else {}
+
+
 def positive_or_default(value, default=None):
     numeric = safe_float(value)
     if numeric is None:
@@ -262,23 +272,38 @@ def infer_live_only_blockers(snapshot, event):
     blockers = []
     config = strategy_payload(snapshot)
     state_info = state_summary(snapshot)
+    runtime_status = runtime_status_summary(snapshot)
     captured_at = snapshot_timestamp(snapshot)
 
+    runtime_block_reason = runtime_status.get("runtime_block_reason")
+    if runtime_block_reason:
+        blockers.append(str(runtime_block_reason))
+
     operating_mode = str(
-        config.get("operating_mode", "range_plus_llm") or "range_plus_llm"
+        runtime_status.get("operating_mode")
+        or config.get("operating_mode", "range_plus_llm")
+        or "range_plus_llm"
     ).strip().lower()
     if operating_mode not in ("range_plus_llm", "range_only"):
         blockers.append(f"operating_mode_{operating_mode}")
 
     backlog_limit = int(config.get("disable_new_buys_on_sell_backlog_count", 0) or 0)
-    open_sell_count = int(state_info.get("open_sell_count") or 0)
+    open_sell_count = int(
+        runtime_status.get("open_sell_count")
+        or state_info.get("open_sell_count")
+        or 0
+    )
     if backlog_limit > 0 and open_sell_count >= backlog_limit:
         blockers.append("sell_backlog_count")
 
     backlog_minutes_limit = float(
         config.get("disable_new_buys_on_sell_backlog_minutes", 0) or 0
     )
-    oldest_sell_age = sell_backlog_oldest_minutes(snapshot)
+    oldest_sell_age = safe_float(
+        runtime_status.get("sell_backlog_oldest_minutes")
+    )
+    if oldest_sell_age is None:
+        oldest_sell_age = sell_backlog_oldest_minutes(snapshot)
     if backlog_minutes_limit > 0 and oldest_sell_age >= backlog_minutes_limit:
         blockers.append("sell_backlog_age_minutes")
 
@@ -302,7 +327,7 @@ def infer_live_only_blockers(snapshot, event):
     ):
         blockers.append("sell_insufficient_funds_backoff_active")
 
-    return blockers
+    return list(dict.fromkeys(blockers))
 
 
 def simulate_missed_opportunity(snapshot, event, snapshots):

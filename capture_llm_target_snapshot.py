@@ -125,6 +125,59 @@ def strategy_profile_snapshot():
     }
 
 
+def target_price_from_quality_target(target):
+    if not isinstance(target, dict):
+        return None
+
+    try:
+        buy_price = float(target.get("buy_price"))
+    except Exception:
+        return None
+    if buy_price <= 0:
+        return None
+
+    sell_pct = (
+        target.get("best_profit_target_pct")
+        if target.get("best_profit_target_pct") is not None else
+        target.get("sell_pct")
+    )
+    return {
+        "buy_price": buy_price,
+        "sell_pct": sell_pct,
+        "source": "target_quality"
+    }
+
+
+def derived_quality_target_prices(target_quality_payload):
+    if not isinstance(target_quality_payload, dict):
+        return []
+
+    targets = target_quality_payload.get("targets")
+    if not isinstance(targets, list):
+        return []
+
+    derived = []
+    seen = set()
+    for target in targets:
+        normalized = target_price_from_quality_target(target)
+        if normalized is None:
+            continue
+        key = round(normalized["buy_price"], 2)
+        if key in seen:
+            continue
+        seen.add(key)
+        derived.append(normalized)
+
+    return derived
+
+
+def target_count(payload, key):
+    if not isinstance(payload, dict):
+        return 0
+    targets = payload.get(key)
+    return len(targets) if isinstance(targets, list) else 0
+
+
 def fetch_public_json(url, params=None, timeout=10):
     try:
         response = requests.get(url, params=params, timeout=timeout)
@@ -271,6 +324,16 @@ def build_snapshot():
         TARGET_QUALITY_FILE,
         timeout=SNAPSHOT_REQUEST_TIMEOUT
     )
+    signal_target_count = target_count(signal_payload, "target_prices")
+    quality_target_count = target_count(target_quality["payload"], "targets")
+    derived_targets = []
+    if sentiment["ok"] and signal_target_count == 0:
+        derived_targets = derived_quality_target_prices(target_quality["payload"])
+        if derived_targets:
+            signal_payload = dict(signal_payload)
+            signal_payload["target_prices"] = derived_targets
+            signal_payload["target_prices_source"] = "target_quality"
+            signal_target_count = len(derived_targets)
     ticker = ticker_snapshot()
     orderbook = orderbook_snapshot()
     strategy = strategy_profile_snapshot()
@@ -283,6 +346,9 @@ def build_snapshot():
         "sources": {
             "signal_source": signal_source,
             "signal_asset_id": signal_asset_id,
+            "signal_target_count": signal_target_count,
+            "quality_target_count": quality_target_count,
+            "derived_signal_target_count": len(derived_targets),
             "target_quality_source": TARGET_QUALITY_FILE,
             "ticker_source": ticker["source"],
             "orderbook_source": orderbook["source"],

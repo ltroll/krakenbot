@@ -33,6 +33,10 @@ STATE_FILE = (
     or os.getenv("BOT_STATE_FILE")
     or "last_state.json"
 )
+STATUS_FILE = (
+    os.getenv("RANGE_GRID_STATUS_FILE")
+    or "range_grid_status.json"
+)
 
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL", "https://api.kraken.com")
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
@@ -437,6 +441,49 @@ def state_snapshot():
     }
 
 
+def status_snapshot():
+    status_result = read_json_source(STATUS_FILE, timeout=REQUEST_TIMEOUT)
+    if not status_result["ok"] or not isinstance(status_result["payload"], dict):
+        return {
+            "ok": status_result["ok"],
+            "error": status_result["error"],
+            "path": os.path.abspath(STATUS_FILE),
+            "summary": None,
+            "raw": status_result["payload"] if isinstance(status_result["payload"], dict) else None,
+        }
+
+    raw_status = status_result["payload"]
+    summary = {
+        "timestamp": raw_status.get("timestamp"),
+        "operating_mode": raw_status.get("operating_mode"),
+        "strategy_profile": raw_status.get("strategy_profile"),
+        "grid_anchor": raw_status.get("grid_anchor"),
+        "configured_strategy_modes": raw_status.get("configured_strategy_modes"),
+        "strategy_modes": raw_status.get("strategy_modes"),
+        "price": safe_float(raw_status.get("price")),
+        "execution_signal": safe_float(raw_status.get("execution_signal")),
+        "signal_status": raw_status.get("signal_status"),
+        "action_recommendation": raw_status.get("action_recommendation"),
+        "runtime_block_reason": raw_status.get("runtime_block_reason"),
+        "realized_pnl_today": safe_float(raw_status.get("realized_pnl_today")),
+        "sell_backlog_count": int(raw_status.get("sell_backlog_count") or 0),
+        "sell_backlog_oldest_minutes": safe_float(raw_status.get("sell_backlog_oldest_minutes")),
+        "range_fallback_active": bool(raw_status.get("range_fallback_active", False)),
+        "open_buy_count": int(raw_status.get("open_buy_count") or 0),
+        "open_sell_count": int(raw_status.get("open_sell_count") or 0),
+        "deployed_inventory_usd": safe_float(raw_status.get("deployed_inventory_usd")),
+        "inventory_buckets_usd": raw_status.get("inventory_buckets_usd"),
+        "actions": raw_status.get("actions"),
+    }
+    return {
+        "ok": True,
+        "error": None,
+        "path": os.path.abspath(STATUS_FILE),
+        "summary": summary,
+        "raw": None,
+    }
+
+
 def ticker_snapshot():
     if KRAKEN_TICKER_URL:
         result = fetch_public_json(KRAKEN_TICKER_URL, timeout=REQUEST_TIMEOUT)
@@ -630,6 +677,7 @@ def build_snapshot():
     private_open_orders = private_open_orders_snapshot()
     strategy = strategy_profile_snapshot()
     state = state_snapshot()
+    status = status_snapshot()
 
     strategy_payload = strategy["payload"] if isinstance(strategy["payload"], dict) else {}
     grid_anchor = str(strategy_payload.get("grid_anchor", "low")).strip().lower()
@@ -648,6 +696,7 @@ def build_snapshot():
             "private_open_orders_source": private_open_orders["source"],
             "strategy_profile_path": strategy["path"],
             "state_file_path": state["path"],
+            "status_file_path": status["path"],
         },
         "strategy_context": {
             "grid_anchor": grid_anchor,
@@ -721,6 +770,11 @@ def build_snapshot():
             "open_sell_orders": state["open_sell_orders"],
             "stats": state["stats"],
         },
+        "runtime_status": {
+            "ok": status["ok"],
+            "error": status["error"],
+            "summary": status["summary"],
+        },
     }
 
     errors = {}
@@ -738,6 +792,8 @@ def build_snapshot():
         errors["strategy_profile"] = strategy["error"]
     if state["error"]:
         errors["state"] = state["error"]
+    if status["error"]:
+        errors["runtime_status"] = status["error"]
     snapshot["errors"] = errors
 
     return snapshot
@@ -772,6 +828,7 @@ def main():
         "private_balance_ok": snapshot["private_balance"]["ok"],
         "private_open_orders_ok": snapshot["private_open_orders"]["ok"],
         "state_ok": snapshot["state"]["ok"],
+        "runtime_status_ok": snapshot["runtime_status"]["ok"],
     }))
 
 

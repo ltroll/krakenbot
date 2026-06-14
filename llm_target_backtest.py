@@ -59,6 +59,10 @@ BACKTEST_SENTIMENT_DISCOUNT_BEARISH_PCT = float(os.getenv(
     "LLM_TARGET_BACKTEST_SENTIMENT_DISCOUNT_BEARISH_PCT",
     "0.5"
 ))
+BACKTEST_DERIVE_TARGETS_FROM_QUALITY = os.getenv(
+    "LLM_TARGET_BACKTEST_DERIVE_TARGETS_FROM_QUALITY",
+    "true"
+).strip().lower() in ("1", "true", "yes", "on")
 
 
 BACKTEST_STRATEGIES = {
@@ -220,6 +224,67 @@ def quality_payload(snapshot):
     return payload if isinstance(payload, dict) else {}
 
 
+def target_price_from_quality_target(target):
+    if not isinstance(target, dict):
+        return None
+
+    buy_price = numeric_or_none(target.get("buy_price"))
+    if buy_price is None or buy_price <= 0:
+        return None
+
+    sell_pct = (
+        target.get("best_profit_target_pct")
+        if target.get("best_profit_target_pct") is not None else
+        target.get("sell_pct")
+    )
+
+    return {
+        "buy_price": buy_price,
+        "sell_pct": sell_pct,
+        "source": "target_quality"
+    }
+
+
+def derived_quality_target_prices(snapshot):
+    if not BACKTEST_DERIVE_TARGETS_FROM_QUALITY:
+        return []
+
+    quality = quality_payload(snapshot)
+    targets = quality.get("targets")
+    if not isinstance(targets, list):
+        return []
+
+    derived = []
+    seen = set()
+    for target in targets:
+        normalized = target_price_from_quality_target(target)
+        if normalized is None:
+            continue
+        key = round(normalized["buy_price"], 2)
+        if key in seen:
+            continue
+        seen.add(key)
+        derived.append(normalized)
+
+    return derived
+
+
+def signal_payload_with_target_fallback(snapshot):
+    signal = signal_payload(snapshot)
+    targets = signal.get("target_prices")
+    if isinstance(targets, list) and targets:
+        return signal, False
+
+    derived = derived_quality_target_prices(snapshot)
+    if not derived:
+        return signal, False
+
+    signal = dict(signal)
+    signal["target_prices"] = derived
+    signal["target_prices_source"] = "target_quality"
+    return signal, True
+
+
 def snapshot_timestamp(snapshot):
     return parse_iso8601(snapshot.get("captured_at"))
 
@@ -282,8 +347,8 @@ def sentiment_discount_requirement_pct(snapshot, signal):
     return None
 
 
-def select_target_candidate(snapshot, current_price, last_sell_price=None):
-    signal = signal_payload(snapshot)
+def select_target_candidate(snapshot, current_price, last_sell_price=None, signal=None):
+    signal = signal or signal_payload(snapshot)
     targets = signal.get("target_prices", [])
     if not isinstance(targets, list):
         return None
@@ -552,6 +617,8 @@ def empty_summary():
         "shadow_target_quality_approved": 0,
         "shadow_target_quality_rejected": 0,
         "shadow_target_quality_unavailable": 0,
+        "signal_target_snapshots": 0,
+        "quality_fallback_target_snapshots": 0,
         "missing_signal": 0,
         "missing_price": 0,
         "no_target": 0,
@@ -610,6 +677,64 @@ def finalize_summary(summary, trades):
     return summary
 
 
+def target_diagnostics(snapshots):
+    signal_snapshots = 0
+    signal_target_snapshots = 0
+    quality_target_snapshots = 0
+    fallback_target_snapshots = 0
+    signal_target_total = 0
+    quality_target_total = 0
+
+    for snapshot in snapshots:
+        signal = signal_payload(snapshot)
+        if signal:
+            signal_snapshots += 1
+        signal_targets = signal.get("target_prices")
+        signal_target_count = (
+            len(signal_targets)
+            if isinstance(signal_targets, list) else
+            0
+        )
+        if signal_target_count > 0:
+            signal_target_snapshots += 1
+            signal_target_total += signal_target_count
+
+        quality = quality_payload(snapshot)
+        quality_targets = quality.get("targets")
+        quality_target_count = (
+            len(quality_targets)
+            if isinstance(quality_targets, list) else
+            0
+        )
+        if quality_target_count > 0:
+            quality_target_snapshots += 1
+            quality_target_total += quality_target_count
+            if signal_target_count == 0 and derived_quality_target_prices(snapshot):
+                fallback_target_snapshots += 1
+
+    return {
+        "selected_signal_asset_id": SIGNAL_ASSET_ID,
+        "derive_targets_from_quality": BACKTEST_DERIVE_TARGETS_FROM_QUALITY,
+        "snapshots": len(snapshots),
+        "snapshots_with_signal": signal_snapshots,
+        "snapshots_with_signal_targets": signal_target_snapshots,
+        "snapshots_with_quality_targets": quality_target_snapshots,
+        "snapshots_with_quality_fallback_targets": fallback_target_snapshots,
+        "snapshots_without_targets": len(snapshots) - max(
+            signal_target_snapshots,
+            fallback_target_snapshots
+        ),
+        "avg_signal_target_count": round(
+            signal_target_total / signal_target_snapshots,
+            4
+        ) if signal_target_snapshots else 0.0,
+        "avg_quality_target_count": round(
+            quality_target_total / quality_target_snapshots,
+            4
+        ) if quality_target_snapshots else 0.0,
+    }
+
+
 def simulate_strategy(strategy_name, snapshots):
     summary = empty_summary()
     recent_decisions = []
@@ -622,7 +747,7 @@ def simulate_strategy(strategy_name, snapshots):
     for snapshot in snapshots:
         timestamp = snapshot_timestamp(snapshot)
         price = extract_price(snapshot)
-        signal = signal_payload(snapshot)
+        signal, target_fallback_used = signal_payload_with_target_fallback(snapshot)
 
         if timestamp is None:
             continue
@@ -721,7 +846,19 @@ def simulate_strategy(strategy_name, snapshots):
             summary["missing_signal"] += 1
             continue
 
-        candidate = select_target_candidate(snapshot, price, last_sell_price)
+        targets = signal.get("target_prices")
+        if isinstance(targets, list) and targets:
+            if target_fallback_used:
+                summary["quality_fallback_target_snapshots"] += 1
+            else:
+                summary["signal_target_snapshots"] += 1
+
+        candidate = select_target_candidate(
+            snapshot,
+            price,
+            last_sell_price,
+            signal=signal
+        )
         if candidate is None:
             summary["no_target"] += 1
             continue
@@ -854,6 +991,12 @@ def top_summary(strategies):
                 "total_net_return_pct": payload["summary"].get("total_net_return_pct"),
                 "no_target": payload["summary"].get("no_target"),
                 "not_filled": payload["summary"].get("not_filled"),
+                "signal_target_snapshots": payload["summary"].get(
+                    "signal_target_snapshots"
+                ),
+                "quality_fallback_target_snapshots": payload["summary"].get(
+                    "quality_fallback_target_snapshots"
+                ),
                 "fill_rate_after_approval": payload["summary"].get(
                     "fill_rate_after_approval"
                 ),
@@ -912,6 +1055,7 @@ def build_report():
                 None
             ),
         },
+        "target_diagnostics": target_diagnostics(snapshots),
         "since": since_dt.isoformat(),
         "snapshot_count": len(snapshots),
         "simulation": {

@@ -31,7 +31,11 @@ def make_snapshot(
     if strategy_overrides:
         strategy_payload.update(strategy_overrides)
 
-    targets = target_prices or [{"buy_price": 100.0, "sell_pct": 0.5}]
+    targets = (
+        target_prices
+        if target_prices is not None else
+        [{"buy_price": 100.0, "sell_pct": 0.5}]
+    )
     quality = quality_targets or [{
         "buy_price": 100.0,
         "matched_sample_count": 30,
@@ -172,6 +176,43 @@ class LlmTargetBacktestTests(unittest.TestCase):
         self.assertIsNone(result["summary"]["fill_rate_after_approval"])
         self.assertEqual(result["summary"]["blocked_by_target_quality"], 1)
 
+    def test_backtest_derives_missing_targets_from_quality_targets(self):
+        snapshots = [
+            make_snapshot(
+                "2026-05-30T12:00:00+00:00",
+                101.0,
+                target_prices=[]
+            ),
+            make_snapshot("2026-05-30T12:30:00+00:00", 100.0),
+            make_snapshot("2026-05-30T13:00:00+00:00", 100.8),
+        ]
+
+        result = backtest.simulate_strategy("with_target_quality", snapshots)
+
+        summary = result["summary"]
+        self.assertEqual(summary["raw_candidates"], 1)
+        self.assertEqual(summary["quality_fallback_target_snapshots"], 1)
+        self.assertEqual(summary["signal_target_snapshots"], 0)
+        self.assertEqual(summary["trades"], 1)
+
+    def test_target_diagnostics_counts_signal_and_quality_targets(self):
+        snapshots = [
+            make_snapshot(
+                "2026-05-30T12:00:00+00:00",
+                101.0,
+                target_prices=[]
+            ),
+            make_snapshot("2026-05-30T12:30:00+00:00", 100.0),
+        ]
+
+        diagnostics = backtest.target_diagnostics(snapshots)
+
+        self.assertEqual(diagnostics["snapshots"], 2)
+        self.assertEqual(diagnostics["snapshots_with_signal"], 2)
+        self.assertEqual(diagnostics["snapshots_with_signal_targets"], 1)
+        self.assertEqual(diagnostics["snapshots_with_quality_targets"], 2)
+        self.assertEqual(diagnostics["snapshots_with_quality_fallback_targets"], 1)
+
     def test_sentiment_block_records_shadow_target_quality(self):
         snapshots = [
             make_snapshot(
@@ -220,6 +261,7 @@ class LlmTargetBacktestTests(unittest.TestCase):
             make_snapshot("2026-05-30T17:00:00+00:00", 101.0),
         ]
         snapshots[1]["signal"]["payload"] = {}
+        snapshots[1]["target_quality"]["payload"]["targets"] = []
 
         result = backtest.simulate_strategy("price_target_only", snapshots)
 

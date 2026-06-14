@@ -16,6 +16,7 @@ def make_snapshot(
     strategy_overrides=None,
     state_summary_overrides=None,
     open_sell_orders=None,
+    runtime_status_overrides=None,
 ):
     strategy_payload = {
         "grid_anchor": "low,high",
@@ -82,6 +83,14 @@ def make_snapshot(
             } | (state_summary_overrides or {}),
             "open_buy_orders": [],
             "open_sell_orders": open_sell_orders or [],
+        },
+        "runtime_status": {
+            "summary": {
+                "operating_mode": strategy_payload.get("operating_mode", "range_plus_llm"),
+                "runtime_block_reason": None,
+                "open_sell_count": len(open_sell_orders or []),
+                "sell_backlog_oldest_minutes": None,
+            } | (runtime_status_overrides or {})
         },
     }
 
@@ -355,6 +364,45 @@ class RangeGridBacktestTests(unittest.TestCase):
         )
         self.assertEqual(summary["potential_summary"]["evaluated_count"], 1)
         self.assertEqual(summary["potential_summary"]["take_profit_reached_count"], 1)
+
+    def test_missed_opportunities_prefer_runtime_status_block_reason(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                104.5,
+                action_recommendation="watch_only",
+                strategy_modes=["high"],
+                runtime_status_overrides={
+                    "runtime_block_reason": "sell_backlog_count",
+                    "operating_mode": "range_only",
+                    "open_sell_count": 4,
+                    "sell_backlog_oldest_minutes": 500.0,
+                },
+            ),
+            make_snapshot(
+                "2026-06-13T12:10:00+00:00",
+                105.3,
+                action_recommendation="watch_only",
+                strategy_modes=["high"],
+            ),
+        ]
+        replay = backtest.replay_from_snapshots(snapshots)
+        actual = {
+            "buy_orders_placed": 0,
+            "buy_orders_placed_by_source": {},
+        }
+
+        summary = backtest.summarize_missed_approved_opportunities(
+            replay,
+            actual,
+            snapshots,
+        )
+
+        self.assertEqual(summary["likely_live_blockers"], {"sell_backlog_count": 1})
+        self.assertEqual(
+            summary["recent_approved_but_not_placed"][0]["likely_live_blockers"],
+            ["sell_backlog_count"],
+        )
 
 
 if __name__ == "__main__":
