@@ -19,6 +19,7 @@ class RangeGridDashboardTests(unittest.TestCase):
                 json.dump(
                     {
                         "timestamp": "2026-06-13T12:00:00+00:00",
+                        "strategy_profile": "range_grid_strategy_recovery_range_only.json",
                         "operating_mode": "range_plus_llm",
                         "price": 76543.2,
                         "execution_signal": 0.061,
@@ -103,6 +104,7 @@ class RangeGridDashboardTests(unittest.TestCase):
             self.assertIn("Range Grid Bot", html_text)
             self.assertIn("bullish_allowed", html_text)
             self.assertIn("76,543.20", html_text)
+            self.assertIn("range_grid_strategy_recovery_range_only.json", html_text)
             self.assertIn("Order tracker update failed", html_text)
             self.assertIn("250.55", html_text)
 

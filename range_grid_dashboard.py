@@ -274,6 +274,7 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
 
     runtime_rows = key_value_rows([
         ("Timestamp", status_timestamp or "--"),
+        ("Strategy File", (status or {}).get("strategy_profile", "--")),
         ("Strategy Modes", ", ".join((status or {}).get("strategy_modes") or []) or "--"),
         ("Configured Modes", ", ".join((status or {}).get("configured_strategy_modes") or []) or "--"),
         ("Grid Anchor", (status or {}).get("grid_anchor", "--")),

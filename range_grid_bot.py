@@ -3660,6 +3660,7 @@ def main():
             write_status_snapshot({
                 "timestamp": cycle_id,
                 "operating_mode": operating_mode,
+                "strategy_profile": STRATEGY_PROFILE,
                 "grid_anchor": grid_anchor,
                 "configured_strategy_modes": configured_strategy_modes,
                 "strategy_modes": strategy_modes,
