@@ -624,6 +624,7 @@ def empty_replay_summary():
 def replay_from_snapshots(snapshots):
     summary = empty_replay_summary()
     recent = []
+    recent_approved = []
     hold_reason_counts = Counter()
     blocked_reason_counts = Counter()
     candidate_counts_by_source = Counter()
@@ -665,14 +666,16 @@ def replay_from_snapshots(snapshots):
             if approved:
                 summary["approved_candidates"] += 1
                 approved_counts_by_source[candidate["buy_source"]] += 1
-                recent.append({
+                approved_event = {
                     "captured_at": snapshot.get("captured_at"),
                     "price": price,
                     "buy_source": candidate["buy_source"],
                     "level": round(candidate["level"], 2),
                     "status": "approved_gate_only",
                     "reason": None,
-                })
+                }
+                recent.append(approved_event)
+                recent_approved.append(approved_event)
             else:
                 blocked_reason_counts[reason] += 1
                 recent.append({
@@ -692,6 +695,7 @@ def replay_from_snapshots(snapshots):
     return {
         "summary": summary,
         "recent_replay_events": recent[-BACKTEST_RECENT_LIMIT:],
+        "recent_approved_events": recent_approved[-BACKTEST_RECENT_LIMIT:],
         "replay_scope": "gate_only_no_private_balance_or_fill_simulation",
     }
 
@@ -792,7 +796,8 @@ def summarize_missed_approved_opportunities(replay, actual):
     )
     remaining_by_source = dict(missing_by_source)
     recent_examples = []
-    for event in reversed(replay.get("recent_replay_events", [])):
+    approved_events = replay.get("recent_approved_events") or replay.get("recent_replay_events", [])
+    for event in reversed(approved_events):
         if event.get("status") != "approved_gate_only":
             continue
         source = event.get("buy_source") or "unknown"

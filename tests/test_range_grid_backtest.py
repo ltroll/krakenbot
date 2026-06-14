@@ -221,6 +221,79 @@ class RangeGridBacktestTests(unittest.TestCase):
             ],
         )
 
+    def test_missed_opportunities_uses_recent_approved_events_when_recent_window_has_only_holds(self):
+        replay = {
+            "summary": {
+                "approved_candidates": 2,
+                "approved_counts_by_source": {
+                    "range_high_band": 2,
+                },
+            },
+            "recent_replay_events": [
+                {
+                    "captured_at": "2026-06-13T12:10:00+00:00",
+                    "price": 106.0,
+                    "action_recommendation": "blocked",
+                    "hold_reason": "action_recommendation_blocked",
+                    "raw_candidate_count": 0,
+                },
+                {
+                    "captured_at": "2026-06-13T12:11:00+00:00",
+                    "price": 106.1,
+                    "action_recommendation": "blocked",
+                    "hold_reason": "action_recommendation_blocked",
+                    "raw_candidate_count": 0,
+                },
+            ],
+            "recent_approved_events": [
+                {
+                    "captured_at": "2026-06-13T12:01:00+00:00",
+                    "buy_source": "range_high_band",
+                    "price": 104.4,
+                    "level": 104.4,
+                    "status": "approved_gate_only",
+                    "reason": None,
+                },
+                {
+                    "captured_at": "2026-06-13T12:02:00+00:00",
+                    "buy_source": "range_high_band",
+                    "price": 104.5,
+                    "level": 104.5,
+                    "status": "approved_gate_only",
+                    "reason": None,
+                },
+            ],
+        }
+        actual = {
+            "buy_orders_placed": 0,
+            "buy_orders_placed_by_source": {},
+        }
+
+        summary = backtest.summarize_missed_approved_opportunities(
+            replay,
+            actual,
+        )
+
+        self.assertEqual(
+            summary["recent_approved_but_not_placed"],
+            [
+                {
+                    "captured_at": "2026-06-13T12:01:00+00:00",
+                    "buy_source": "range_high_band",
+                    "price": 104.4,
+                    "level": 104.4,
+                    "status": "approved_but_not_placed",
+                },
+                {
+                    "captured_at": "2026-06-13T12:02:00+00:00",
+                    "buy_source": "range_high_band",
+                    "price": 104.5,
+                    "level": 104.5,
+                    "status": "approved_but_not_placed",
+                },
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
