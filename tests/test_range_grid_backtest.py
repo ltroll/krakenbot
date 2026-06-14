@@ -150,6 +150,35 @@ class RangeGridBacktestTests(unittest.TestCase):
         permissions = backtest.sentiment_buy_permissions("watch_only")
         self.assertFalse(permissions["llm_buys_allowed"])
 
+    def test_missed_opportunities_reports_approved_but_not_placed(self):
+        replay = {
+            "summary": {
+                "approved_candidates": 3,
+                "approved_counts_by_source": {
+                    "range_high_band": 2,
+                    "range_low": 1,
+                },
+            }
+        }
+        actual = {
+            "buy_orders_placed": 1,
+            "buy_orders_placed_by_source": {
+                "range_high_band": 1,
+            }
+        }
+
+        summary = backtest.summarize_missed_approved_opportunities(
+            replay,
+            actual,
+        )
+
+        self.assertEqual(summary["approved_but_not_placed"], 2)
+        self.assertEqual(
+            summary["approved_but_not_placed_by_source"],
+            {"range_high_band": 1, "range_low": 1},
+        )
+        self.assertAlmostEqual(summary["placement_rate_vs_approved"], 0.3333, places=4)
+
 
 if __name__ == "__main__":
     unittest.main()

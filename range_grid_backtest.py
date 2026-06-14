@@ -707,11 +707,14 @@ def summarize_actual_trades(events):
         "sell_order_repriced": 0,
         "realized_gross_pnl": 0.0,
         "realized_estimated_net_pnl": 0.0,
+        "buy_orders_placed_by_source": {},
         "buy_filled_by_source": {},
         "sell_filled_by_source": {},
         "rejected_by_side": {},
         "recent_fills": [],
+        "recent_buy_orders": [],
     }
+    buy_orders_placed_by_source = Counter()
     buy_filled_by_source = Counter()
     sell_filled_by_source = Counter()
     rejected_by_side = Counter()
@@ -721,6 +724,13 @@ def summarize_actual_trades(events):
         name = event.get("event")
         if name == "BUY_ORDER_PLACED":
             summary["buy_orders_placed"] += 1
+            buy_orders_placed_by_source[event.get("buy_source") or "unknown"] += 1
+            summary["recent_buy_orders"].append({
+                "ts": event.get("ts"),
+                "buy_source": event.get("buy_source"),
+                "price": event.get("price"),
+                "volume": event.get("volume"),
+            })
         elif name == "BUY_ORDER_FILLED":
             summary["buy_orders_filled"] += 1
             buy_filled_by_source[event.get("buy_source") or "unknown"] += 1
@@ -748,6 +758,9 @@ def summarize_actual_trades(events):
         elif name == "SELL_ORDER_REPRICED":
             summary["sell_order_repriced"] += 1
 
+    summary["buy_orders_placed_by_source"] = dict(
+        buy_orders_placed_by_source.most_common()
+    )
     summary["buy_filled_by_source"] = dict(buy_filled_by_source.most_common())
     summary["sell_filled_by_source"] = dict(sell_filled_by_source.most_common())
     summary["rejected_by_side"] = dict(rejected_by_side.most_common())
@@ -755,7 +768,41 @@ def summarize_actual_trades(events):
     summary["realized_estimated_net_pnl"] = round(summary["realized_estimated_net_pnl"], 8)
     summary["average_hold_minutes"] = round(statistics.mean(hold_minutes), 2) if hold_minutes else None
     summary["recent_fills"] = summary["recent_fills"][-BACKTEST_RECENT_LIMIT:]
+    summary["recent_buy_orders"] = summary["recent_buy_orders"][-BACKTEST_RECENT_LIMIT:]
     return summary
+
+
+def summarize_missed_approved_opportunities(replay, actual):
+    approved_by_source = replay["summary"].get("approved_counts_by_source", {})
+    live_buys_by_source = actual.get("buy_orders_placed_by_source", {})
+
+    missing_by_source = {}
+    for source, approved_count in approved_by_source.items():
+        live_count = int(live_buys_by_source.get(source, 0) or 0)
+        missing_count = max(0, int(approved_count or 0) - live_count)
+        if missing_count:
+            missing_by_source[source] = missing_count
+
+    total_missing = sum(missing_by_source.values())
+    total_approved = int(replay["summary"].get("approved_candidates", 0) or 0)
+    placement_rate = (
+        round(actual.get("buy_orders_placed", 0) / total_approved, 4)
+        if total_approved > 0
+        else None
+    )
+
+    return {
+        "approved_candidates": total_approved,
+        "actual_buy_orders_placed": actual.get("buy_orders_placed", 0),
+        "approved_but_not_placed": total_missing,
+        "approved_but_not_placed_by_source": missing_by_source,
+        "placement_rate_vs_approved": placement_rate,
+        "notes": [
+            "This is a gate-level comparison only.",
+            "A missed approved opportunity means replay approved a buy candidate but no corresponding live BUY_ORDER_PLACED was seen in the reporting window.",
+            "This does not yet model exchange fills, private-balance constraints, or one-to-one candidate-to-order matching."
+        ],
+    }
 
 
 def build_report():
@@ -781,6 +828,7 @@ def build_report():
 
     replay = replay_from_snapshots(snapshots)
     actual = summarize_actual_trades(events)
+    missed = summarize_missed_approved_opportunities(replay, actual)
 
     return {
         "timestamp": now.isoformat(),
@@ -792,11 +840,14 @@ def build_report():
         "trade_event_count": len(events),
         "replay": replay,
         "actual_live": actual,
+        "missed_opportunities": missed,
         "top_summary": {
             "replay_scope": replay["replay_scope"],
             "approved_candidates": replay["summary"]["approved_candidates"],
             "raw_candidates": replay["summary"]["raw_candidates"],
             "actual_buy_orders_placed": actual["buy_orders_placed"],
+            "approved_but_not_placed": missed["approved_but_not_placed"],
+            "placement_rate_vs_approved": missed["placement_rate_vs_approved"],
             "actual_buy_orders_filled": actual["buy_orders_filled"],
             "actual_sell_orders_filled": actual["sell_orders_filled"],
             "actual_realized_estimated_net_pnl": actual["realized_estimated_net_pnl"],
