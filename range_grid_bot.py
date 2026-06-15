@@ -2327,6 +2327,7 @@ def main():
             cycle_id = now.isoformat()
             actions = []
             deduped_candidates = []
+            active_strategy_modes = list(strategy_modes)
 
             # Periodically resync tracked state against Kraken as source of truth.
             if maybe_periodic_state_reconcile(now, cycle_id):
@@ -2352,7 +2353,7 @@ def main():
 
             if sentiment_payload is None:
                 range_modes_enabled = any(
-                    mode != "llm_target" for mode in strategy_modes
+                    mode != "llm_target" for mode in active_strategy_modes
                 )
                 if (
                     allow_range_fallback_without_sentiment
@@ -2369,7 +2370,7 @@ def main():
                         cycle_id=cycle_id,
                         reason=fallback_reason,
                         fallback_execution_signal=range_fallback_execution_signal,
-                        strategy_modes=strategy_modes,
+                        strategy_modes=active_strategy_modes,
                         llm_buys_disabled=True
                     )
                 else:
@@ -2397,7 +2398,7 @@ def main():
                 price_regime.get("range_position_24h"),
                 None
             )
-            strategy_modes = select_dynamic_strategy_modes(
+            active_strategy_modes = select_dynamic_strategy_modes(
                 configured_strategy_modes,
                 operating_mode,
                 price_regime_range_position,
@@ -2449,7 +2450,7 @@ def main():
             range_buys_allowed = buy_permissions["range_buys_allowed"]
             base_any_buys_allowed = buy_permissions["any_buys_allowed"]
             range_modes_enabled = any(
-                mode != "llm_target" for mode in strategy_modes
+                mode != "llm_target" for mode in active_strategy_modes
             )
             daily_pnl_start = now.astimezone(timezone.utc).replace(
                 hour=0, minute=0, second=0, microsecond=0
@@ -2537,7 +2538,7 @@ def main():
                 price=price,
                 operating_mode=operating_mode,
                 configured_strategy_modes=configured_strategy_modes,
-                strategy_modes=strategy_modes,
+                strategy_modes=active_strategy_modes,
                 dynamic_anchor_mode=strategy_bool(
                     strategy_config,
                     "dynamic_anchor_mode",
@@ -3198,7 +3199,7 @@ def main():
                 )
 
             llm_buy_allowed = (
-                "llm_target" in strategy_modes
+                "llm_target" in active_strategy_modes
                 and low and high
                 and llm_target is not None
                 and llm_signal_gates_allow
@@ -3210,7 +3211,7 @@ def main():
             if (
                 range_signal_gates_allow
                 and effective_position_size_pct > 0
-                and strategy_modes
+                and active_strategy_modes
                 and low and high
                 and base_any_buys_allowed
             ):
@@ -3224,7 +3225,7 @@ def main():
                         }
                     ]
                 else:
-                    for strategy_mode in strategy_modes:
+                    for strategy_mode in active_strategy_modes:
                         if strategy_mode == "llm_target":
                             continue
                         if strategy_mode == "mean":
@@ -3342,7 +3343,7 @@ def main():
                         skip_reason = "max_inventory_usd"
                     elif (
                         buy_source == "llm_target"
-                        and "llm_target" not in strategy_modes
+                        and "llm_target" not in active_strategy_modes
                     ):
                         skip_reason = "llm_target_disabled_in_strategy"
                     elif (
@@ -3699,7 +3700,7 @@ def main():
                             )
                             else "buy_modes_disabled"
                         )
-                        if not strategy_modes
+                        if not active_strategy_modes
                         else
                         (
                             None
@@ -3801,9 +3802,9 @@ def main():
                 buy_source=(
                     "llm_target"
                     if llm_buy_allowed
-                    else ",".join(strategy_modes) or "disabled"
+                    else ",".join(active_strategy_modes) or "disabled"
                 ),
-                strategy_modes=strategy_modes,
+                strategy_modes=active_strategy_modes,
                 grid_levels=(
                     [
                         round(candidate["level"], PRICE_DECIMALS)
@@ -3812,7 +3813,7 @@ def main():
                     if (
                         range_signal_gates_allow
                         and base_any_buys_allowed
-                        and strategy_modes
+                        and active_strategy_modes
                         and low
                         and high
                     )
@@ -3858,7 +3859,7 @@ def main():
                 "strategy_profile": STRATEGY_PROFILE,
                 "grid_anchor": grid_anchor,
                 "configured_strategy_modes": configured_strategy_modes,
-                "strategy_modes": strategy_modes,
+                "strategy_modes": active_strategy_modes,
                 "dynamic_anchor_mode": strategy_bool(
                     strategy_config,
                     "dynamic_anchor_mode",
