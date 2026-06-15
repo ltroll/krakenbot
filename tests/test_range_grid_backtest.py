@@ -164,6 +164,58 @@ class RangeGridBacktestTests(unittest.TestCase):
         permissions = backtest.sentiment_buy_permissions("watch_only")
         self.assertFalse(permissions["llm_buys_allowed"])
 
+    def test_confidence_liquidity_block_can_allow_range_only_override(self):
+        permissions = backtest.sentiment_buy_permissions(
+            "blocked",
+            {
+                "reason": "Elevated liquidity risk 0.450 requires confidence >= 0.600 and 12 contributors.",
+                "max_liquidity_risk": 0.8,
+            },
+            operating_mode="range_only",
+            allow_range_buy_on_confidence_block=True,
+        )
+        self.assertFalse(permissions["llm_buys_allowed"])
+        self.assertTrue(permissions["range_buys_allowed"])
+        self.assertTrue(permissions["any_buys_allowed"])
+
+    def test_confidence_liquidity_block_does_not_override_without_flag(self):
+        permissions = backtest.sentiment_buy_permissions(
+            "blocked",
+            {
+                "reason": "Elevated liquidity risk 0.450 requires confidence >= 0.600 and 12 contributors.",
+                "max_liquidity_risk": 0.8,
+            },
+            operating_mode="range_only",
+            allow_range_buy_on_confidence_block=False,
+        )
+        self.assertFalse(permissions["llm_buys_allowed"])
+        self.assertFalse(permissions["range_buys_allowed"])
+        self.assertFalse(permissions["any_buys_allowed"])
+
+    def test_replay_allows_range_only_override_on_confidence_liquidity_block(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                104.5,
+                action_recommendation="blocked",
+                strategy_modes=["high"],
+                strategy_overrides={
+                    "operating_mode": "range_only",
+                    "allow_range_buy_on_confidence_block": True,
+                },
+            )
+        ]
+        snapshots[0]["signal"]["payload"]["action_policy"] = {
+            "reason": "Elevated liquidity risk 0.450 requires confidence >= 0.600 and 12 contributors.",
+            "max_liquidity_risk": 0.8,
+        }
+
+        result = backtest.replay_from_snapshots(snapshots)
+
+        self.assertGreaterEqual(result["summary"]["raw_candidates"], 1)
+        self.assertGreaterEqual(result["summary"]["approved_candidates"], 1)
+        self.assertEqual(result["summary"]["hold_snapshots"], 0)
+
     def test_missed_opportunities_reports_approved_but_not_placed(self):
         replay = {
             "summary": {

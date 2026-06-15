@@ -182,7 +182,25 @@ def source_status_allows_trading(signal_status, source_status, require_fresh_sig
     return True, None
 
 
-def sentiment_buy_permissions(action_recommendation):
+def is_liquidity_confidence_block(action_recommendation, action_policy):
+    normalized = (action_recommendation or "neutral").strip().lower()
+    if normalized != "blocked" or not isinstance(action_policy, dict):
+        return False
+
+    reason = str(action_policy.get("reason") or "").lower()
+    if "liquidity risk" in reason and "confidence" in reason:
+        return True
+
+    return action_policy.get("max_liquidity_risk") is not None and "confidence" in reason
+
+
+def sentiment_buy_permissions(
+    action_recommendation,
+    action_policy=None,
+    *,
+    operating_mode=None,
+    allow_range_buy_on_confidence_block=False
+):
     normalized = (action_recommendation or "neutral").strip().lower()
     llm_buys_allowed = normalized == "bullish_allowed"
     range_buys_allowed = normalized in (
@@ -190,6 +208,13 @@ def sentiment_buy_permissions(action_recommendation):
         "neutral",
         "watch_only",
     )
+    if (
+        not range_buys_allowed
+        and allow_range_buy_on_confidence_block
+        and operating_mode == "range_only"
+        and is_liquidity_confidence_block(action_recommendation, action_policy)
+    ):
+        range_buys_allowed = True
     return {
         "llm_buys_allowed": llm_buys_allowed,
         "range_buys_allowed": range_buys_allowed,
@@ -474,13 +499,26 @@ def build_candidates(snapshot, price):
         source_guard_allows_trading = True
     require_fresh_signal = bool(config.get("require_fresh_signal", True))
     min_signal_status = config.get("min_signal_status", "fresh")
+    operating_mode = str(
+        config.get("operating_mode", "range_plus_llm") or "range_plus_llm"
+    ).strip().lower()
+    allow_range_buy_on_confidence_block = bool(
+        config.get("allow_range_buy_on_confidence_block", False)
+    )
     freshness_allows_trading, freshness_block_reason = source_status_allows_trading(
         signal_status,
         source_status,
         require_fresh_signal,
         min_signal_status
     )
-    buy_permissions = sentiment_buy_permissions(action_recommendation)
+    buy_permissions = sentiment_buy_permissions(
+        action_recommendation,
+        signal.get("action_policy"),
+        operating_mode=operating_mode,
+        allow_range_buy_on_confidence_block=(
+            allow_range_buy_on_confidence_block
+        ),
+    )
     llm_buys_allowed = buy_permissions["llm_buys_allowed"]
     range_buys_allowed = buy_permissions["range_buys_allowed"]
     base_any_buys_allowed = buy_permissions["any_buys_allowed"]
@@ -642,7 +680,14 @@ def evaluate_candidate(snapshot, candidate, price):
     state_data = state_payload(snapshot)
     signal = signal_payload(snapshot)
     buy_permissions = sentiment_buy_permissions(
-        signal.get("action_recommendation") or "neutral"
+        signal.get("action_recommendation") or "neutral",
+        signal.get("action_policy"),
+        operating_mode=str(
+            config.get("operating_mode", "range_plus_llm") or "range_plus_llm"
+        ).strip().lower(),
+        allow_range_buy_on_confidence_block=bool(
+            config.get("allow_range_buy_on_confidence_block", False)
+        ),
     )
     llm_buys_allowed = buy_permissions["llm_buys_allowed"]
     range_buys_allowed = buy_permissions["range_buys_allowed"]

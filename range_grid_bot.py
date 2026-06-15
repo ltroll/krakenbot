@@ -1655,7 +1655,25 @@ def source_status_allows_trading(signal_status, source_status):
     return True, None
 
 
-def sentiment_buy_permissions(action_recommendation):
+def is_liquidity_confidence_block(action_recommendation, action_policy):
+    normalized = (action_recommendation or "neutral").strip().lower()
+    if normalized != "blocked" or not isinstance(action_policy, dict):
+        return False
+
+    reason = str(action_policy.get("reason") or "").lower()
+    if "liquidity risk" in reason and "confidence" in reason:
+        return True
+
+    return action_policy.get("max_liquidity_risk") is not None and "confidence" in reason
+
+
+def sentiment_buy_permissions(
+    action_recommendation,
+    action_policy=None,
+    *,
+    operating_mode=None,
+    allow_range_buy_on_confidence_block=False
+):
     normalized = (action_recommendation or "neutral").strip().lower()
     llm_buys_allowed = normalized == "bullish_allowed"
     range_buys_allowed = normalized in (
@@ -1663,6 +1681,13 @@ def sentiment_buy_permissions(action_recommendation):
         "neutral",
         "watch_only"
     )
+    if (
+        not range_buys_allowed
+        and allow_range_buy_on_confidence_block
+        and operating_mode == "range_only"
+        and is_liquidity_confidence_block(action_recommendation, action_policy)
+    ):
+        range_buys_allowed = True
     return {
         "llm_buys_allowed": llm_buys_allowed,
         "range_buys_allowed": range_buys_allowed,
@@ -2323,7 +2348,18 @@ def main():
                 sentiment_payload.get("action_recommendation") or "neutral"
             )
             action_policy = sentiment_payload.get("action_policy", {})
-            buy_permissions = sentiment_buy_permissions(action_recommendation)
+            allow_range_buy_on_confidence_block = profile_bool(
+                "allow_range_buy_on_confidence_block",
+                False
+            )
+            buy_permissions = sentiment_buy_permissions(
+                action_recommendation,
+                action_policy,
+                operating_mode=operating_mode,
+                allow_range_buy_on_confidence_block=(
+                    allow_range_buy_on_confidence_block
+                )
+            )
             llm_buys_allowed = buy_permissions["llm_buys_allowed"]
             range_buys_allowed = buy_permissions["range_buys_allowed"]
             base_any_buys_allowed = buy_permissions["any_buys_allowed"]

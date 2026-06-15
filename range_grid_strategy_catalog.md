@@ -4,7 +4,7 @@
   Normal operations. Uses `range_plus_llm` and keeps backlog guardrails enabled.
 
 - `range_grid_strategy_recovery_range_only.json`
-  Recovery mode for long-held underwater sells. Uses `range_only` and disables backlog buy blocking so the bot can keep working the range.
+  Recovery mode for long-held underwater sells. Uses `range_only`, disables backlog buy blocking, and allows range buys to continue through liquidity/confidence-only sentiment blocks so the bot can keep working the range during testing.
 
 - `range_grid_strategy_sell_only.json`
   Inventory-management mode. No new buys, but existing sells remain active and managed.
