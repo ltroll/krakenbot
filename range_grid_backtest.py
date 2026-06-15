@@ -246,6 +246,75 @@ def parse_strategy_modes(raw_value):
     return normalized_modes
 
 
+def strategy_bool(config, key, default=False):
+    value = config.get(key, default)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def strategy_float(config, key, default):
+    try:
+        value = config.get(key, default)
+        if value is None:
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def apply_operating_mode_to_strategy_modes(base_modes, operating_mode):
+    if operating_mode in ("sell_only", "observe_only"):
+        return []
+    if operating_mode == "range_only":
+        return [mode for mode in base_modes if mode != "llm_target"]
+    return list(base_modes)
+
+
+def select_dynamic_strategy_modes(base_modes, operating_mode, range_position, config):
+    active_modes = apply_operating_mode_to_strategy_modes(base_modes, operating_mode)
+    if not active_modes:
+        return []
+
+    llm_enabled = "llm_target" in active_modes
+    range_modes = [mode for mode in active_modes if mode != "llm_target"]
+    if not range_modes:
+        return active_modes
+
+    if (
+        not strategy_bool(config, "dynamic_anchor_mode", False)
+        or range_position is None
+    ):
+        return active_modes
+
+    low_band_max = strategy_float(config, "dynamic_anchor_low_band_max", 0.35)
+    high_band_min = strategy_float(config, "dynamic_anchor_high_band_min", 0.75)
+    midpoint_split = strategy_float(config, "dynamic_anchor_midpoint_split", 0.5)
+    mid_mode = str(config.get("dynamic_anchor_mid_mode", "median") or "median").strip().lower()
+    alt_mid_mode = "mean" if mid_mode == "median" else "median"
+
+    if range_position <= low_band_max:
+        preferred_modes = ["low", mid_mode, alt_mid_mode, "high"]
+    elif range_position >= high_band_min:
+        preferred_modes = ["high", mid_mode, alt_mid_mode, "low"]
+    else:
+        if mid_mode in range_modes or alt_mid_mode in range_modes:
+            preferred_modes = [mid_mode, alt_mid_mode, "low", "high"]
+        elif range_position >= midpoint_split:
+            preferred_modes = ["high", "low", mid_mode, alt_mid_mode]
+        else:
+            preferred_modes = ["low", "high", mid_mode, alt_mid_mode]
+
+    selected_range_mode = next(
+        (mode for mode in preferred_modes if mode in range_modes),
+        range_modes[0],
+    )
+    selected_modes = [selected_range_mode]
+    if llm_enabled:
+        selected_modes.insert(0, "llm_target")
+    return selected_modes
+
+
 def compute_grid(anchor, entry_step_pct, max_grid_size):
     return sorted(
         [
@@ -524,7 +593,16 @@ def build_candidates(snapshot, price):
     base_any_buys_allowed = buy_permissions["any_buys_allowed"]
 
     low, high, mean, median = derive_range_values(snapshot)
-    strategy_modes = context.get("strategy_modes") or parse_strategy_modes(context.get("grid_anchor"))
+    base_strategy_modes = (
+        context.get("strategy_modes")
+        or parse_strategy_modes(context.get("grid_anchor"))
+    )
+    strategy_modes = select_dynamic_strategy_modes(
+        base_strategy_modes,
+        str(config.get("operating_mode", "range_plus_llm") or "range_plus_llm").strip().lower(),
+        safe_float(signal.get("price_regime", {}).get("range_position_24h")),
+        config,
+    )
     range_modes_enabled = any(mode != "llm_target" for mode in strategy_modes)
     allow_range_fallback_without_sentiment = bool(
         config.get("allow_range_fallback_without_sentiment", True)

@@ -135,6 +135,81 @@ def apply_operating_mode_to_strategy_modes(base_modes, operating_mode):
     return list(base_modes)
 
 
+def strategy_bool(config, key, default=False):
+    value = config.get(key, default)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def strategy_float(config, key, default):
+    try:
+        value = config.get(key, default)
+        if value is None:
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def select_dynamic_strategy_modes(base_modes, operating_mode, range_position, strategy_config):
+    active_modes = apply_operating_mode_to_strategy_modes(base_modes, operating_mode)
+    if not active_modes:
+        return []
+
+    llm_enabled = "llm_target" in active_modes
+    range_modes = [mode for mode in active_modes if mode != "llm_target"]
+    if not range_modes:
+        return active_modes
+
+    if (
+        not strategy_bool(strategy_config, "dynamic_anchor_mode", False)
+        or range_position is None
+    ):
+        return active_modes
+
+    low_band_max = strategy_float(
+        strategy_config,
+        "dynamic_anchor_low_band_max",
+        0.35,
+    )
+    high_band_min = strategy_float(
+        strategy_config,
+        "dynamic_anchor_high_band_min",
+        0.75,
+    )
+    midpoint_split = strategy_float(
+        strategy_config,
+        "dynamic_anchor_midpoint_split",
+        0.5,
+    )
+    mid_mode = str(
+        strategy_config.get("dynamic_anchor_mid_mode", "median") or "median"
+    ).strip().lower()
+    alt_mid_mode = "mean" if mid_mode == "median" else "median"
+
+    if range_position <= low_band_max:
+        preferred_modes = ["low", mid_mode, alt_mid_mode, "high"]
+    elif range_position >= high_band_min:
+        preferred_modes = ["high", mid_mode, alt_mid_mode, "low"]
+    else:
+        if mid_mode in range_modes or alt_mid_mode in range_modes:
+            preferred_modes = [mid_mode, alt_mid_mode, "low", "high"]
+        elif range_position >= midpoint_split:
+            preferred_modes = ["high", "low", mid_mode, alt_mid_mode]
+        else:
+            preferred_modes = ["low", "high", mid_mode, alt_mid_mode]
+
+    selected_range_mode = next(
+        (mode for mode in preferred_modes if mode in range_modes),
+        range_modes[0],
+    )
+    selected_modes = [selected_range_mode]
+    if llm_enabled:
+        selected_modes.insert(0, "llm_target")
+    return selected_modes
+
+
 def operating_mode_allows_sell_execution(operating_mode):
     return operating_mode in ("range_plus_llm", "range_only", "sell_only")
 
@@ -2318,6 +2393,16 @@ def main():
             price_regime = sentiment_payload.get("price_regime", {})
             trend_snapshot = sentiment_payload.get("trend_snapshot", {})
             kraken_flow = sentiment_payload.get("kraken_flow", {})
+            price_regime_range_position = numeric_or_default(
+                price_regime.get("range_position_24h"),
+                None
+            )
+            strategy_modes = select_dynamic_strategy_modes(
+                configured_strategy_modes,
+                operating_mode,
+                price_regime_range_position,
+                strategy_config
+            )
             flow_pressure = numeric_or_default(
                 sentiment_payload.get("flow_pressure"),
                 None
@@ -2453,6 +2538,11 @@ def main():
                 operating_mode=operating_mode,
                 configured_strategy_modes=configured_strategy_modes,
                 strategy_modes=strategy_modes,
+                dynamic_anchor_mode=strategy_bool(
+                    strategy_config,
+                    "dynamic_anchor_mode",
+                    False
+                ),
                 btc_sentiment=sentiment_payload.get("btc_sentiment"),
                 confidence=sentiment_payload.get("confidence"),
                 raw_btc_sentiment=sentiment_payload.get("raw_btc_sentiment"),
@@ -2485,7 +2575,7 @@ def main():
                 smoothed_risk_multiplier=smoothed_risk_multiplier,
                 flow_pressure=flow_pressure,
                 mean_reversion_opportunity=mean_reversion_opportunity,
-                price_regime_range_position=price_regime.get("range_position_24h"),
+                price_regime_range_position=price_regime_range_position,
                 price_regime_volatility_pct=price_regime.get(
                     "realized_volatility_24h_pct"
                 ),
@@ -3135,6 +3225,8 @@ def main():
                     ]
                 else:
                     for strategy_mode in strategy_modes:
+                        if strategy_mode == "llm_target":
+                            continue
                         if strategy_mode == "mean":
                             grid = compute_grid(low, high, mean)
                             sell_pct_override = None
@@ -3626,9 +3718,7 @@ def main():
                         or "signal_below_threshold_or_range_unavailable"
                     ),
                     cycle_id=cycle_id,
-                    price_regime_range_position=price_regime.get(
-                        "range_position_24h"
-                    ),
+                    price_regime_range_position=price_regime_range_position,
                     price_regime_volatility_pct=price_regime.get(
                         "realized_volatility_24h_pct"
                     )
@@ -3680,9 +3770,7 @@ def main():
                 range_mean=mean,
                 range_median=median,
                 price_regime_timestamp=price_regime.get("timestamp"),
-                price_regime_range_position=price_regime.get(
-                    "range_position_24h"
-                ),
+                price_regime_range_position=price_regime_range_position,
                 price_regime_volatility_pct=price_regime.get(
                     "realized_volatility_24h_pct"
                 ),
@@ -3771,6 +3859,12 @@ def main():
                 "grid_anchor": grid_anchor,
                 "configured_strategy_modes": configured_strategy_modes,
                 "strategy_modes": strategy_modes,
+                "dynamic_anchor_mode": strategy_bool(
+                    strategy_config,
+                    "dynamic_anchor_mode",
+                    False
+                ),
+                "price_regime_range_position": price_regime_range_position,
                 "price": price,
                 "execution_signal": execution_signal,
                 "signal_status": signal_status,

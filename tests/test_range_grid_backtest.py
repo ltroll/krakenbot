@@ -160,6 +160,60 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertGreaterEqual(result["summary"]["approved_candidates"], 1)
         self.assertEqual(result["summary"]["hold_snapshots"], 0)
 
+    def test_dynamic_anchor_selects_high_in_upper_range(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                104.5,
+                action_recommendation="watch_only",
+                strategy_modes=["low", "high"],
+                strategy_overrides={
+                    "operating_mode": "range_only",
+                    "dynamic_anchor_mode": True,
+                    "dynamic_anchor_high_band_min": 0.75,
+                    "dynamic_anchor_low_band_max": 0.35,
+                    "dynamic_anchor_midpoint_split": 0.5,
+                },
+            )
+        ]
+        snapshots[0]["signal"]["payload"]["price_regime"]["range_position_24h"] = 0.82
+
+        result = backtest.replay_from_snapshots(snapshots)
+
+        self.assertEqual(
+            result["summary"]["candidate_counts_by_source"].get("range_high_band"),
+            1,
+        )
+        self.assertEqual(result["summary"]["candidate_counts_by_source"].get("range_low"), None)
+
+    def test_dynamic_anchor_falls_back_to_low_in_mid_range_when_only_low_high_configured(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                96.0,
+                action_recommendation="watch_only",
+                strategy_modes=["low", "high"],
+                strategy_overrides={
+                    "operating_mode": "range_only",
+                    "dynamic_anchor_mode": True,
+                    "dynamic_anchor_high_band_min": 0.75,
+                    "dynamic_anchor_low_band_max": 0.35,
+                    "dynamic_anchor_midpoint_split": 0.5,
+                },
+            )
+        ]
+        snapshots[0]["signal"]["payload"]["price_regime"]["range_position_24h"] = 0.45
+
+        result = backtest.replay_from_snapshots(snapshots)
+
+        self.assertEqual(
+            result["summary"]["candidate_counts_by_source"].get("range_low"),
+            2,
+        )
+        self.assertIsNone(
+            result["summary"]["candidate_counts_by_source"].get("range_high_band")
+        )
+
     def test_watch_only_still_blocks_llm_permissions(self):
         permissions = backtest.sentiment_buy_permissions("watch_only")
         self.assertFalse(permissions["llm_buys_allowed"])
