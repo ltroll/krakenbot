@@ -308,6 +308,11 @@ order_tracker_url = (
     or os.getenv("EXTERNAL_ORDER_TRACKER_URL")
 )
 order_tracker_user_agent = os.getenv("ORDER_TRACKER_USER_AGENT")
+order_owner_tag_source = (
+    os.getenv("ORDER_OWNER_TAG_SOURCE")
+    or order_tracker_user_agent
+    or socket.gethostname()
+)
 order_tracker_symbol = (
     os.getenv("ORDER_TRACKER_SYMBOL")
     or profile_str("order_tracker_symbol", KRAKEN_PAIR)
@@ -619,6 +624,19 @@ def key_fingerprint(value):
     return f"sha256:{digest}"
 
 
+def kraken_userref_for_value(value):
+    normalized = str(value or "").strip()
+    if not normalized:
+        normalized = socket.gethostname()
+
+    digest = hashlib.sha256(normalized.encode("utf-8")).digest()
+    userref = int.from_bytes(digest[:8], "big") % 2147483646
+    return userref + 1
+
+
+BOT_ORDER_USERREF = kraken_userref_for_value(order_owner_tag_source)
+
+
 def runtime_identity():
     return {
         "pid": os.getpid(),
@@ -628,6 +646,8 @@ def runtime_identity():
         "log_file": os.path.abspath(LOG_FILE),
         "strategy_profile": STRATEGY_PROFILE,
         "api_key_fingerprint": key_fingerprint(KRAKEN_API_KEY),
+        "order_owner_tag_source": order_owner_tag_source,
+        "order_owner_userref": BOT_ORDER_USERREF,
     }
 
 
@@ -1450,7 +1470,8 @@ def place_buy(price, volume):
         "type": "buy",
         "ordertype": "limit",
         "price": str(round(price, PRICE_DECIMALS)),
-        "volume": str(round(volume, VOLUME_DECIMALS))
+        "volume": str(round(volume, VOLUME_DECIMALS)),
+        "userref": str(BOT_ORDER_USERREF),
     })
 
 
@@ -1460,7 +1481,8 @@ def place_sell(price, volume):
         "type": "sell",
         "ordertype": "limit",
         "price": str(round(price, PRICE_DECIMALS)),
-        "volume": str(round(volume, VOLUME_DECIMALS))
+        "volume": str(round(volume, VOLUME_DECIMALS)),
+        "userref": str(BOT_ORDER_USERREF),
     })
 
 
@@ -1889,6 +1911,8 @@ def kraken_reserved_sell_volume(open_orders_result):
     for order in open_orders.values():
         if not isinstance(order, dict):
             continue
+        if not kraken_order_belongs_to_this_bot(order):
+            continue
 
         descr = order.get("descr", {})
         if not isinstance(descr, dict):
@@ -1932,9 +1956,34 @@ def kraken_pair_matches(pair):
     )
 
 
+def kraken_order_userref(order):
+    if not isinstance(order, dict):
+        return None
+
+    candidates = [order.get("userref")]
+    descr = order.get("descr")
+    if isinstance(descr, dict):
+        candidates.append(descr.get("userref"))
+
+    for value in candidates:
+        try:
+            if value is None or value == "":
+                continue
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+
+    return None
+
+
+def kraken_order_belongs_to_this_bot(order):
+    return kraken_order_userref(order) == BOT_ORDER_USERREF
+
+
 def startup_reconcile_state():
     open_order_txids = set()
     kraken_open_orders = {}
+    own_kraken_open_orders = {}
     state_changed = False
 
     open_orders_resp = safe_kraken_private(
@@ -1943,7 +1992,12 @@ def startup_reconcile_state():
     )
     if open_orders_resp and "result" in open_orders_resp:
         kraken_open_orders = open_orders_resp["result"].get("open", {}) or {}
-        open_order_txids = set(kraken_open_orders.keys())
+        own_kraken_open_orders = {
+            txid: order
+            for txid, order in kraken_open_orders.items()
+            if kraken_order_belongs_to_this_bot(order)
+        }
+        open_order_txids = set(own_kraken_open_orders.keys())
     else:
         log_event(
             "STARTUP_RECONCILE_SKIPPED",
@@ -2027,7 +2081,7 @@ def startup_reconcile_state():
             if txid
         ]
     )
-    for txid, order in kraken_open_orders.items():
+    for txid, order in own_kraken_open_orders.items():
         if txid in tracked_known_txids:
             continue
         if not isinstance(order, dict):
@@ -2051,6 +2105,19 @@ def startup_reconcile_state():
             volume_executed=positive_float(order.get("vol_exec"))
         )
 
+    foreign_open_order_count = max(
+        0,
+        len(kraken_open_orders) - len(own_kraken_open_orders)
+    )
+    if foreign_open_order_count:
+        log_event(
+            "STARTUP_RECONCILE_FOREIGN_KRAKEN_ORDERS",
+            foreign_open_order_count=foreign_open_order_count,
+            tracked_open_order_count=len(own_kraken_open_orders),
+            order_owner_userref=BOT_ORDER_USERREF,
+            order_owner_tag_source=order_owner_tag_source
+        )
+
     if state_changed:
         save_state(state)
 
@@ -2059,6 +2126,8 @@ def startup_reconcile_state():
         tracked_open_buy_count=len(state["open_buy_orders"]),
         tracked_open_sell_count=len(state["open_sell_orders"]),
         kraken_open_order_count=len(kraken_open_orders),
+        kraken_owned_open_order_count=len(own_kraken_open_orders),
+        kraken_foreign_open_order_count=foreign_open_order_count,
         state_changed=state_changed
     )
 
