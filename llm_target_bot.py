@@ -234,6 +234,26 @@ MAX_CONSECUTIVE_LOSING_SELLS = int(env_or_profile(
     "max_consecutive_losing_sells",
     0
 ))
+ORDER_TRACKER_URL = (
+    os.getenv("ORDER_TRACKER_URL")
+    or os.getenv("EXTERNAL_ORDER_TRACKER_URL")
+)
+ORDER_TRACKER_USER_AGENT = os.getenv("ORDER_TRACKER_USER_AGENT")
+ORDER_TRACKER_SYMBOL = env_or_profile(
+    "ORDER_TRACKER_SYMBOL",
+    "order_tracker_symbol",
+    KRAKEN_PAIR
+)
+ORDER_TRACKER_TIMEOUT = float(env_or_profile(
+    "ORDER_TRACKER_TIMEOUT_SECONDS",
+    "order_tracker_timeout_seconds",
+    5
+))
+ORDER_TRACKER_CHECKIN_TIMEOUT = float(env_or_profile(
+    "ORDER_TRACKER_CHECKIN_TIMEOUT_SECONDS",
+    "order_tracker_checkin_timeout_seconds",
+    min(ORDER_TRACKER_TIMEOUT, 5)
+))
 
 
 def log_event(event, message="", **kwargs):
@@ -262,6 +282,123 @@ def log_and_console(event, message="", **kwargs):
     console(f"{event}: {message}" if message else event)
 
 
+def positive_float(value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def tracker_value(value, fallback=None):
+    return positive_float(value) or positive_float(fallback)
+
+
+def notify_order_tracker(
+    trade_id,
+    side,
+    price,
+    quantity,
+    order_id=None,
+    fee=None,
+    timestamp=None,
+    notes=None,
+    status=None
+):
+    if not ORDER_TRACKER_URL or not ORDER_TRACKER_USER_AGENT:
+        return
+
+    price = positive_float(price)
+    quantity = positive_float(quantity)
+    if not trade_id or side not in ("buy", "sell") or price is None or quantity is None:
+        log_event(
+            "ORDER_TRACKER_SKIPPED",
+            reason="missing_required_fields",
+            trade_id=trade_id,
+            side=side,
+            price=price,
+            quantity=quantity,
+            order_id=order_id
+        )
+        return
+
+    payload = {
+        "trade_id": str(trade_id),
+        "side": side,
+        "price": str(price),
+        "quantity": str(quantity)
+    }
+    optional_fields = {
+        "symbol": ORDER_TRACKER_SYMBOL,
+        "order_id": order_id,
+        "fee": positive_float(fee),
+        "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
+        "notes": notes,
+        "status": status
+    }
+    payload.update(
+        {
+            key: str(value)
+            for key, value in optional_fields.items()
+            if value is not None and value != ""
+        }
+    )
+
+    try:
+        response = requests.post(
+            ORDER_TRACKER_URL,
+            data=payload,
+            headers={"User-Agent": ORDER_TRACKER_USER_AGENT},
+            timeout=ORDER_TRACKER_TIMEOUT
+        )
+        response.raise_for_status()
+        log_event(
+            "ORDER_TRACKER_UPDATED",
+            trade_id=trade_id,
+            side=side,
+            order_id=order_id,
+            status=status,
+            status_code=response.status_code
+        )
+    except Exception as exc:
+        log_event(
+            "ORDER_TRACKER_ERROR",
+            message=str(exc),
+            trade_id=trade_id,
+            side=side,
+            order_id=order_id,
+            status=status
+        )
+
+
+def short_error_summary(error):
+    return str(error).replace("\n", " ")[:200]
+
+
+def send_checkin(status="ok", loop_count=None, message="loop_complete"):
+    if not ORDER_TRACKER_URL or not ORDER_TRACKER_USER_AGENT:
+        return
+
+    payload = {
+        "action": "checkin",
+        "status": status,
+        "message": message
+    }
+    if loop_count is not None:
+        payload["loop_count"] = str(loop_count)
+
+    try:
+        response = requests.post(
+            ORDER_TRACKER_URL,
+            data=payload,
+            headers={"User-Agent": ORDER_TRACKER_USER_AGENT},
+            timeout=ORDER_TRACKER_CHECKIN_TIMEOUT
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        log_event("ORDER_TRACKER_CHECKIN_ERROR", message=str(exc), status=status)
+
+
 def load_state():
     default = {
         "open_buy_orders": {},
@@ -281,7 +418,8 @@ def load_state():
             "buy_orders_placed": 0,
             "buy_orders_filled": 0,
             "sell_orders_placed": 0,
-            "sell_orders_filled": 0
+            "sell_orders_filled": 0,
+            "errors": 0
         }
     }
     if not os.path.exists(STATE_FILE):
@@ -784,6 +922,16 @@ def process_open_buy_orders(cycle_id):
                 volume=fill["volume"],
                 price=fill["price"]
             )
+            notify_order_tracker(
+                trade_id=order.get("trade_id") or txid,
+                side="buy",
+                price=tracker_value(fill.get("price"), order.get("price")),
+                quantity=tracker_value(fill.get("volume"), order.get("volume")),
+                order_id=txid,
+                fee=fill.get("fee"),
+                timestamp=cycle_id,
+                status="closed"
+            )
             profit_pct = order.get("target_profit_pct", TARGET_PROFIT_PCT)
             sell_price = sell_target_price(fill["price"], profit_pct)
             sell_result = place_limit_sell(sell_price, fill["volume"])
@@ -796,7 +944,8 @@ def process_open_buy_orders(cycle_id):
                     "sell_price": sell_price,
                     "volume": fill["volume"],
                     "placed_at": cycle_id,
-                    "target_profit_pct": profit_pct
+                    "target_profit_pct": profit_pct,
+                    "trade_id": order.get("trade_id") or txid
                 }
                 state["stats"]["sell_orders_placed"] += 1
                 save_state(state)
@@ -811,6 +960,15 @@ def process_open_buy_orders(cycle_id):
                     buy_price=fill["price"],
                     target_profit_pct=profit_pct
                 )
+                notify_order_tracker(
+                    trade_id=order.get("trade_id") or txid,
+                    side="sell",
+                    price=sell_price,
+                    quantity=fill["volume"],
+                    order_id=sell_txid,
+                    timestamp=cycle_id,
+                    notes="profit_sell_submitted"
+                )
         elif order_status in ("canceled", "expired"):
             del state["open_buy_orders"][txid]
             save_state(state)
@@ -819,6 +977,16 @@ def process_open_buy_orders(cycle_id):
                 message=f"BUY order {order_status}",
                 cycle_id=cycle_id,
                 txid=txid
+            )
+            notify_order_tracker(
+                trade_id=order.get("trade_id") or txid,
+                side="buy",
+                price=order.get("price"),
+                quantity=order.get("volume"),
+                order_id=txid,
+                timestamp=cycle_id,
+                notes=f"order_status={order_status}",
+                status=order_status
             )
 
 
@@ -853,6 +1021,17 @@ def process_open_sell_orders(cycle_id):
                     "consecutive_losing_sells"
                 )
             )
+            notify_order_tracker(
+                trade_id=order.get("trade_id") or order.get("buy_txid") or txid,
+                side="sell",
+                price=tracker_value(fill.get("price"), order.get("sell_price")),
+                quantity=tracker_value(fill.get("volume"), order.get("volume")),
+                order_id=txid,
+                fee=fill.get("fee"),
+                timestamp=cycle_id,
+                notes=f"realized_pnl_usd={realized_pnl_usd:.8f}",
+                status="closed"
+            )
         elif order_status in ("canceled", "expired"):
             del state["open_sell_orders"][txid]
             save_state(state)
@@ -861,6 +1040,16 @@ def process_open_sell_orders(cycle_id):
                 message=f"SELL order {order_status}",
                 cycle_id=cycle_id,
                 txid=txid
+            )
+            notify_order_tracker(
+                trade_id=order.get("trade_id") or order.get("buy_txid") or txid,
+                side="sell",
+                price=order.get("sell_price"),
+                quantity=order.get("volume"),
+                order_id=txid,
+                timestamp=cycle_id,
+                notes=f"order_status={order_status}",
+                status=order_status
             )
 
 
@@ -1069,7 +1258,8 @@ def run_cycle():
             "volume": volume,
             "price": target_price,
             "placed_at": cycle_id,
-            "target_profit_pct": target_profit_pct
+            "target_profit_pct": target_profit_pct,
+            "trade_id": txid
         }
         state["stats"]["buy_orders_placed"] += 1
         save_state(state)
@@ -1083,6 +1273,15 @@ def run_cycle():
             price=target_price,
             target_profit_pct=target_profit_pct,
             quality_reason=quality["quality_reason"]
+        )
+        notify_order_tracker(
+            trade_id=txid,
+            side="buy",
+            price=target_price,
+            quantity=volume,
+            order_id=txid,
+            timestamp=cycle_id,
+            notes="target_limit_buy_submitted"
         )
 
     if placed_orders <= 0:
@@ -1140,15 +1339,32 @@ def main():
         ),
         kill_switch_file=KILL_SWITCH_FILE,
         max_daily_realized_loss_usd=MAX_DAILY_REALIZED_LOSS_USD,
-        max_consecutive_losing_sells=MAX_CONSECUTIVE_LOSING_SELLS
+        max_consecutive_losing_sells=MAX_CONSECUTIVE_LOSING_SELLS,
+        order_tracker_configured=bool(
+            ORDER_TRACKER_URL and ORDER_TRACKER_USER_AGENT
+        ),
+        order_tracker_symbol=ORDER_TRACKER_SYMBOL,
+        order_tracker_timeout_seconds=ORDER_TRACKER_TIMEOUT,
+        order_tracker_checkin_timeout_seconds=ORDER_TRACKER_CHECKIN_TIMEOUT
     )
 
     while True:
         try:
             run_cycle()
+            send_checkin(
+                loop_count=state.get("stats", {}).get("cycles"),
+                message="loop_complete"
+            )
         except Exception as exc:
+            state["stats"]["errors"] = int(state["stats"].get("errors") or 0) + 1
+            save_state(state)
             log_event("LOOP_ERROR", message=str(exc))
             console(f"LOOP_ERROR: {exc}")
+            send_checkin(
+                status="error",
+                loop_count=state.get("stats", {}).get("cycles"),
+                message=short_error_summary(exc)
+            )
         time.sleep(PRICE_CHECK_INTERVAL_SECONDS)
 
 
