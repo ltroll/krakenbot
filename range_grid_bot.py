@@ -3301,6 +3301,73 @@ def main():
 
                     if skip_reason is not None:
                         log_event(
+                            "BUY_CANDIDATE_SKIPPED",
+                            cycle_id=cycle_id,
+                            level=round(level, PRICE_DECIMALS),
+                            market_price=price,
+                            execution_signal=execution_signal,
+                            action_recommendation=action_recommendation,
+                            action_policy_reason=action_policy.get("reason"),
+                            signal_status=signal_status,
+                            freshness_allows_trading=freshness_allows_trading,
+                            freshness_block_reason=freshness_block_reason,
+                            source_guard_allows_trading=source_guard_allows_trading,
+                            llm_signal_gates_allow=llm_signal_gates_allow,
+                            range_signal_gates_allow=range_signal_gates_allow,
+                            range_fallback_active=range_fallback_active,
+                            llm_buys_allowed=llm_buys_allowed,
+                            range_buys_allowed=range_buys_allowed,
+                            operating_mode=operating_mode,
+                            runtime_block_reason=runtime_block_reason,
+                            buy_source=buy_source,
+                            bucket_name=bucket_name,
+                            high_anchor_order_count=high_anchor_order_count,
+                            high_anchor_cooldown_remaining_minutes=round(
+                                high_anchor_cooldown_remaining,
+                                2
+                            ),
+                            llm_sell_cooldown_remaining_minutes=round(
+                                llm_sell_cooldown_remaining,
+                                2
+                            ),
+                            open_buy_count=len(state["open_buy_orders"]),
+                            open_sell_count=len(state["open_sell_orders"]),
+                            usd_balance=usd,
+                            available_usd_balance=round(available_usd, 8),
+                            reserved_buy_capital_usd=round(reserved_buy_usd, 8),
+                            trade_notional_usd=round(trade_notional_usd, 8),
+                            deployed_inventory_usd=deployed_inventory_usd,
+                            projected_inventory_usd=round(
+                                projected_inventory_usd,
+                                8
+                            ),
+                            bucket_inventory_usd=round(bucket_inventory_usd, 8),
+                            projected_bucket_inventory_usd=round(
+                                projected_bucket_inventory_usd,
+                                8
+                            ),
+                            bucket_inventory_cap_usd=round(bucket_cap_usd, 8),
+                            effective_position_size_pct=(
+                                effective_position_size_pct
+                            ),
+                            effective_max_inventory_usd=(
+                                effective_max_inventory_usd
+                            ),
+                            effective_max_open_sell_orders=(
+                                effective_max_open_sell_orders
+                            ),
+                            smoothed_risk_multiplier=smoothed_risk_multiplier,
+                            flow_pressure=flow_pressure,
+                            flow_control_reason=flow_control["reason"],
+                            mean_reversion_opportunity=(
+                                mean_reversion_opportunity
+                            ),
+                            last_sell_price=last_sell_price,
+                            candidate_volume_btc=round(volume, VOLUME_DECIMALS),
+                            candidate_sell_pct_override=active_sell_pct_override,
+                            reason=skip_reason
+                        )
+                        log_event(
                             "GRID_LEVEL_EVAL",
                             cycle_id=cycle_id,
                             level=round(level, PRICE_DECIMALS),
