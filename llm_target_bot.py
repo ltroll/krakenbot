@@ -219,6 +219,11 @@ TARGET_QUALITY_ALLOWED_RECOMMENDATIONS = {
     )).split(",")
     if value.strip()
 }
+DERIVE_TARGETS_FROM_QUALITY = str(env_or_profile(
+    "LLM_TARGET_DERIVE_TARGETS_FROM_QUALITY",
+    "derive_targets_from_quality",
+    True
+)).strip().lower() in ("1", "true", "yes", "on")
 KILL_SWITCH_FILE = env_or_profile(
     "LLM_TARGET_KILL_SWITCH_FILE",
     "kill_switch_file",
@@ -633,6 +638,67 @@ def fill_values(order, fallback_volume=None, fallback_price=None):
     }
 
 
+def target_price_from_quality_target(target):
+    if not isinstance(target, dict):
+        return None
+
+    try:
+        buy_price = float(target.get("buy_price"))
+    except Exception:
+        return None
+    if buy_price <= 0:
+        return None
+
+    sell_pct = (
+        target.get("best_profit_target_pct")
+        if target.get("best_profit_target_pct") is not None else
+        target.get("sell_pct")
+    )
+    return {
+        "buy_price": buy_price,
+        "sell_pct": sell_pct,
+        "source": "target_quality"
+    }
+
+
+def derived_quality_target_prices(target_quality_payload):
+    if not isinstance(target_quality_payload, dict):
+        return []
+
+    targets = target_quality_payload.get("targets")
+    if not isinstance(targets, list):
+        return []
+
+    derived = []
+    seen = set()
+    for target in targets:
+        normalized = target_price_from_quality_target(target)
+        if normalized is None:
+            continue
+        key = round(normalized["buy_price"], 2)
+        if key in seen:
+            continue
+        seen.add(key)
+        derived.append(normalized)
+    return derived
+
+
+def add_quality_target_fallback(signal, quality_snapshot):
+    targets = signal.get("target_prices")
+    if isinstance(targets, list) and targets:
+        return False
+    if not DERIVE_TARGETS_FROM_QUALITY or not quality_snapshot.get("available"):
+        return False
+
+    derived_targets = derived_quality_target_prices(quality_snapshot.get("payload"))
+    if not derived_targets:
+        return False
+
+    signal["target_prices"] = derived_targets
+    signal["target_prices_source"] = "target_quality"
+    return True
+
+
 def place_limit_buy(price, volume):
     if DRY_RUN:
         return {"result": {"txid": [f"dry_buy_{int(time.time())}"]}}
@@ -761,10 +827,26 @@ def normalize_signal(signal):
 
 
 def signal_age_minutes(signal, now):
-    processed_at = parse_iso8601(signal.get("processed_at"))
+    freshness = signal.get("freshness")
+    freshness_processed_at = None
+    if isinstance(freshness, dict):
+        freshness_processed_at = freshness.get("processed_at")
+    processed_at = parse_iso8601(signal.get("processed_at") or freshness_processed_at)
     if processed_at is None:
         return None
     return (now - processed_at).total_seconds() / 60.0
+
+
+def signal_stale_after_minutes(signal):
+    freshness = signal.get("freshness")
+    freshness_stale_after = None
+    if isinstance(freshness, dict):
+        freshness_stale_after = positive_float(freshness.get("stale_after_minutes"))
+
+    if freshness_stale_after is None:
+        return MAX_SIGNAL_AGE_MINUTES
+
+    return min(freshness_stale_after, MAX_SIGNAL_AGE_MINUTES)
 
 
 def source_status_allows_trading(source_status):
@@ -782,8 +864,13 @@ def source_status_allows_trading(source_status):
 
 def signal_gate_failure(signal, now):
     age_minutes = signal_age_minutes(signal, now)
-    if age_minutes is not None and age_minutes > MAX_SIGNAL_AGE_MINUTES:
-        return {"reason": "signal_too_old", "signal_age_minutes": age_minutes}
+    stale_after_minutes = signal_stale_after_minutes(signal)
+    if age_minutes is not None and age_minutes > stale_after_minutes:
+        return {
+            "reason": "signal_too_old",
+            "signal_age_minutes": age_minutes,
+            "signal_stale_after_minutes": stale_after_minutes
+        }
 
     freshness_ok, freshness_reason = source_status_allows_trading(
         signal.get("source_status")
@@ -1113,6 +1200,7 @@ def run_cycle():
         bot_action_allowed=sentiment.get("bot_action_allowed"),
         signal_status=sentiment.get("signal_status"),
         processed_at=sentiment.get("processed_at"),
+        freshness=sentiment.get("freshness"),
         llm_target_count=len(sentiment.get("target_prices", []))
     )
 
@@ -1173,17 +1261,28 @@ def run_cycle():
     if PREVENT_BUY_ABOVE_LAST_SELL and last_sell_price is not None:
         max_rebuy_price = float(last_sell_price) * (1 - BUY_AFTER_SELL_DISCOUNT_PCT)
 
-    orders = target_limit_orders(sentiment, price, trade_value, max_rebuy_price)
-    if not orders:
-        skip_cycle("no_target_limit_orders", cycle_id, price=price)
-        return
-
     quality_snapshot = load_target_quality_snapshot(
         TARGET_QUALITY_FILE,
         TARGET_QUALITY_MAX_AGE_MINUTES,
         now=now,
         timeout=REQUEST_TIMEOUT
     ) if TARGET_QUALITY_ENABLED else {"available": False, "reason": "target_quality_disabled", "targets": []}
+    used_quality_target_fallback = add_quality_target_fallback(
+        sentiment,
+        quality_snapshot
+    )
+
+    orders = target_limit_orders(sentiment, price, trade_value, max_rebuy_price)
+    if not orders:
+        skip_cycle(
+            "no_target_limit_orders",
+            cycle_id,
+            price=price,
+            target_prices_source=sentiment.get("target_prices_source"),
+            target_quality_available=quality_snapshot.get("available"),
+            target_quality_reason=quality_snapshot.get("reason")
+        )
+        return
 
     min_volume = get_min_order_volume()
     placed_orders = 0
@@ -1272,7 +1371,8 @@ def run_cycle():
             volume=volume,
             price=target_price,
             target_profit_pct=target_profit_pct,
-            quality_reason=quality["quality_reason"]
+            quality_reason=quality["quality_reason"],
+            target_prices_source=sentiment.get("target_prices_source")
         )
         notify_order_tracker(
             trade_id=txid,
@@ -1300,7 +1400,9 @@ def run_cycle():
         deployed_inventory_usd=current_inventory_usd(price),
         action_recommendation=action_recommendation,
         target_quality_enabled=TARGET_QUALITY_ENABLED,
-        target_quality_fail_closed=TARGET_QUALITY_FAIL_CLOSED
+        target_quality_fail_closed=TARGET_QUALITY_FAIL_CLOSED,
+        target_prices_source=sentiment.get("target_prices_source"),
+        used_quality_target_fallback=used_quality_target_fallback
     )
 
 
@@ -1327,6 +1429,7 @@ def main():
         max_inventory_usd=MAX_INVENTORY_USD,
         target_quality_file=TARGET_QUALITY_FILE,
         target_quality_enabled=TARGET_QUALITY_ENABLED,
+        derive_targets_from_quality=DERIVE_TARGETS_FROM_QUALITY,
         target_quality_fail_closed=TARGET_QUALITY_FAIL_CLOSED,
         target_quality_max_age_minutes=TARGET_QUALITY_MAX_AGE_MINUTES,
         target_quality_min_samples=TARGET_QUALITY_MIN_SAMPLES,

@@ -8,6 +8,13 @@ def make_multi_asset_signal():
         "schema_version": "multi-asset-sentiment-v1",
         "single_asset_schema_version": "web-sentiment-v2",
         "processed_at": "2026-06-12T14:40:14+00:00",
+        "freshness": {
+            "processed_at": "2026-06-12T14:40:14+00:00",
+            "fresh_for_minutes": 10,
+            "warn_after_minutes": 12,
+            "stale_after_minutes": 20,
+            "engine_health_stale_after_minutes": 10,
+        },
         "assets": {
             "BTC": {
                 "asset_id": "BTC",
@@ -33,6 +40,14 @@ def make_multi_asset_signal():
                     "price_high": 63806.0,
                     "price_low": 62312.0,
                     "price_return_24h_pct": 1.3577,
+                },
+                "asset_price_record": {
+                    "price_usd": 63682.0,
+                    "source": "coingecko_simple_price",
+                },
+                "asset_pipeline": {
+                    "asset_price_source_status": "fresh",
+                    "asset_price_regime_source_status": "fresh",
                 },
             },
             "ETH": {
@@ -67,6 +82,15 @@ class SignalNormalizerTests(unittest.TestCase):
         self.assertEqual(normalized["price_regime"]["range_position_24h"], 0.917)
         self.assertEqual(normalized["price_regime"]["price_high_24h"], 63806.0)
         self.assertEqual(normalized["price_regime"]["return_24h_pct"], 1.3577)
+        self.assertEqual(normalized["freshness"]["stale_after_minutes"], 20)
+        self.assertEqual(
+            normalized["asset_price_record"]["source"],
+            "coingecko_simple_price"
+        )
+        self.assertEqual(
+            normalized["asset_pipeline"]["asset_price_source_status"],
+            "fresh"
+        )
         self.assertEqual(normalized["target_prices"], [])
 
 

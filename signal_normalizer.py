@@ -136,6 +136,8 @@ def normalize_signal_payload(signal, asset_id=None, pair=None):
         "flow_pressure": signal.get("flow_pressure"),
         "market_interpretation": signal.get("market_interpretation"),
         "signal_utility": signal.get("signal_utility"),
+        "asset_price_record": signal.get("asset_price_record"),
+        "asset_pipeline": signal.get("asset_pipeline"),
         "raw_btc_sentiment": signal.get(
             "raw_btc_sentiment",
             signal.get("asset_sentiment")
