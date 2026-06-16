@@ -510,6 +510,64 @@ class RangeGridBacktestTests(unittest.TestCase):
             ["sell_backlog_count"],
         )
 
+    def test_missed_opportunities_include_runtime_execution_blockers(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                104.5,
+                action_recommendation="watch_only",
+                strategy_modes=["high"],
+                strategy_overrides={
+                    "operating_mode": "range_only",
+                },
+                runtime_status_overrides={
+                    "operating_mode": "range_only",
+                    "effective_position_size_pct": 0.0,
+                    "effective_max_inventory_usd": 0.0,
+                    "effective_max_open_sell_orders": 1,
+                    "open_sell_count": 1,
+                    "high_anchor_enabled": False,
+                },
+            ),
+            make_snapshot(
+                "2026-06-13T12:10:00+00:00",
+                105.3,
+                action_recommendation="watch_only",
+                strategy_modes=["high"],
+            ),
+        ]
+
+        replay = backtest.replay_from_snapshots(snapshots)
+        actual = {
+            "buy_orders_placed": 0,
+            "buy_orders_placed_by_source": {},
+        }
+
+        summary = backtest.summarize_missed_approved_opportunities(
+            replay,
+            actual,
+            snapshots,
+        )
+
+        self.assertEqual(
+            summary["likely_live_blockers"],
+            {
+                "effective_position_size_pct_zero": 1,
+                "effective_max_inventory_usd_zero": 1,
+                "effective_max_open_sell_orders": 1,
+                "high_anchor_disabled": 1,
+            },
+        )
+        self.assertEqual(
+            summary["recent_approved_but_not_placed"][0]["likely_live_blockers"],
+            [
+                "effective_position_size_pct_zero",
+                "effective_max_inventory_usd_zero",
+                "effective_max_open_sell_orders",
+                "high_anchor_disabled",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

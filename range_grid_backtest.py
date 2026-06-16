@@ -401,6 +401,44 @@ def infer_live_only_blockers(snapshot, event):
     if backlog_minutes_limit > 0 and oldest_sell_age >= backlog_minutes_limit:
         blockers.append("sell_backlog_age_minutes")
 
+    effective_position_size_pct = safe_float(
+        runtime_status.get("effective_position_size_pct")
+    )
+    if effective_position_size_pct is not None and effective_position_size_pct <= 0:
+        blockers.append("effective_position_size_pct_zero")
+
+    effective_max_inventory_usd = safe_float(
+        runtime_status.get("effective_max_inventory_usd")
+    )
+    if (
+        effective_max_inventory_usd is not None
+        and effective_max_inventory_usd <= 0
+    ):
+        blockers.append("effective_max_inventory_usd_zero")
+
+    effective_max_open_sell_orders = runtime_status.get(
+        "effective_max_open_sell_orders"
+    )
+    try:
+        if effective_max_open_sell_orders is not None:
+            effective_max_open_sell_orders = int(effective_max_open_sell_orders)
+    except Exception:
+        effective_max_open_sell_orders = None
+
+    if (
+        effective_max_open_sell_orders is not None
+        and open_sell_count >= effective_max_open_sell_orders
+    ):
+        blockers.append("effective_max_open_sell_orders")
+
+    buy_source = str(event.get("buy_source") or "")
+    high_anchor_enabled = runtime_status.get("high_anchor_enabled")
+    if (
+        buy_source == "range_high_band"
+        and high_anchor_enabled is False
+    ):
+        blockers.append("high_anchor_disabled")
+
     private_api_backoff_until = parse_iso8601(
         state_info.get("private_api_backoff_until")
     )
