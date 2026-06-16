@@ -22,6 +22,7 @@ DEFAULT_REPORT_DIR = "/var/www/html/bot/backtesting_reports"
 DEFAULT_BACKTEST_DIR = "/home/ben/sentiment_engine"
 DEFAULT_POLICY_OUTPUT = "/var/www/html/bot/bot_policy_backtest.json"
 DEFAULT_REPLAY_OUTPUT = "/var/www/html/bot/bot_replay_backtest.json"
+DEFAULT_FORWARD_OUTPUT = "/var/www/html/bot/signal_forward_backtest.json"
 DEFAULT_HOURS = 24
 ISO_PREFIX_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\S+)")
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -147,6 +148,24 @@ def parse_args() -> argparse.Namespace:
         "--replay-url",
         default=env_value("BOT_REPLAY_BACKTEST_URL", default=""),
         help="Optional URL to read the replay backtest JSON from for the report.",
+    )
+    parser.add_argument(
+        "--forward-output",
+        default=env_value(
+            "SIGNAL_FORWARD_BACKTEST_OUTPUT_FILE",
+            "BOT_SIGNAL_FORWARD_BACKTEST_OUTPUT_FILE",
+            default=DEFAULT_FORWARD_OUTPUT,
+        ),
+        help=f"Signal forward-return backtest JSON output path. Default: {DEFAULT_FORWARD_OUTPUT}",
+    )
+    parser.add_argument(
+        "--forward-url",
+        default=env_value(
+            "SIGNAL_FORWARD_BACKTEST_URL",
+            "BOT_SIGNAL_FORWARD_BACKTEST_URL",
+            default="",
+        ),
+        help="Optional URL to read the signal forward-return backtest JSON from for the report.",
     )
     parser.add_argument(
         "--log-file",
@@ -756,6 +775,171 @@ def render_backtest_summary(title: str, source: str, payload: Optional[dict[str,
     return lines
 
 
+def bucket_label(name: str) -> str:
+    return {
+        "abs_signal_lt_0.02": "abs(signal) < 0.02",
+        "abs_signal_0.02_to_0.05": "0.02 <= abs(signal) < 0.05",
+        "abs_signal_0.05_to_0.10": "0.05 <= abs(signal) < 0.10",
+        "abs_signal_gte_0.10": "abs(signal) >= 0.10",
+    }.get(name, name)
+
+
+def is_strong_bucket(name: str) -> bool:
+    return name in {"abs_signal_0.05_to_0.10", "abs_signal_gte_0.10"}
+
+
+def pct_delta_text(value: float) -> str:
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value:.4f}%"
+
+
+def render_forward_signal_analysis(source: str, payload: Optional[dict[str, Any]]) -> list[str]:
+    lines = ["## Signal Forward Analysis", "", f"JSON: `{source}`"]
+    if not payload:
+        lines.extend(["", "No signal forward-return JSON was available.", ""])
+        return lines
+
+    results = payload.get("results")
+    if not isinstance(results, dict) or not results:
+        lines.extend(["", "No forward-return horizon results found.", ""])
+        return lines
+
+    lines.extend(
+        [
+            f"timestamp: `{payload.get('timestamp', 'n/a')}`",
+            f"since: `{payload.get('since', 'n/a')}`",
+            f"signals tested: `{payload.get('signal_count', 'n/a')}`",
+            "",
+        ]
+    )
+
+    warnings: list[str] = []
+    contrarian_rows: list[tuple[str, str, int, float, Optional[float]]] = []
+    thin_rows: list[tuple[str, str, str, int]] = []
+
+    for horizon, horizon_payload in sorted(
+        results.items(),
+        key=lambda item: float(item[0]) if str(item[0]).replace(".", "", 1).isdigit() else 0.0,
+    ):
+        if not isinstance(horizon_payload, dict):
+            continue
+        signed_buckets = horizon_payload.get("signed_buckets")
+        if not isinstance(signed_buckets, dict):
+            continue
+        for bucket_name, signed in signed_buckets.items():
+            if not isinstance(signed, dict):
+                continue
+            negative = signed.get("negative")
+            if isinstance(negative, dict):
+                count = negative.get("count")
+                avg_return = negative.get("avg_forward_return_pct")
+                accuracy = negative.get("directional_accuracy")
+                if (
+                    is_strong_bucket(bucket_name)
+                    and isinstance(count, int)
+                    and count >= 30
+                    and isinstance(avg_return, (int, float))
+                    and avg_return > 0
+                ):
+                    contrarian_rows.append(
+                        (
+                            str(horizon),
+                            bucket_label(bucket_name),
+                            count,
+                            float(avg_return),
+                            float(accuracy) if isinstance(accuracy, (int, float)) else None,
+                        )
+                    )
+            for side in ("positive", "negative"):
+                side_payload = signed.get(side)
+                if not isinstance(side_payload, dict):
+                    continue
+                count = side_payload.get("count")
+                if is_strong_bucket(bucket_name) and isinstance(count, int) and count < 30:
+                    thin_rows.append((str(horizon), bucket_label(bucket_name), side, count))
+
+    if contrarian_rows:
+        warnings.append(
+            "Strong negative signals are currently behaving like contrarian/bounce markers, not bearish trade triggers."
+        )
+    if thin_rows:
+        warnings.append(
+            "Some strong-signal buckets have thin sample sizes; avoid tuning production gates from those buckets alone."
+        )
+    if not warnings:
+        warnings.append("No strong signal inversion or sample-size issue detected.")
+
+    lines.extend(["### Findings", ""])
+    lines.extend(f"- {warning}" for warning in warnings)
+    lines.append("")
+
+    lines.extend(
+        [
+            "### Horizon Summary",
+            "",
+            "| horizon | samples | avg forward return | directional accuracy | avg abs signal | avg confidence |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for horizon, horizon_payload in sorted(
+        results.items(),
+        key=lambda item: float(item[0]) if str(item[0]).replace(".", "", 1).isdigit() else 0.0,
+    ):
+        if not isinstance(horizon_payload, dict):
+            continue
+        summary = horizon_payload.get("summary")
+        if not isinstance(summary, dict):
+            continue
+        accuracy = summary.get("directional_accuracy")
+        accuracy_text = f"{accuracy * 100:.1f}%" if isinstance(accuracy, (int, float)) else "n/a"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    f"{horizon}h",
+                    fmt_count(summary.get("count")),
+                    fmt_pct(summary.get("avg_forward_return_pct")),
+                    accuracy_text,
+                    fmt_count(summary.get("avg_abs_signal")),
+                    fmt_count(summary.get("avg_confidence")),
+                ]
+            )
+            + " |"
+        )
+    lines.append("")
+
+    if contrarian_rows:
+        lines.extend(
+            [
+                "### Contrarian Warnings",
+                "",
+                "| horizon | bucket | negative samples | avg forward return after negative signal | directional accuracy |",
+                "| --- | --- | ---: | ---: | ---: |",
+            ]
+        )
+        for horizon, bucket, count, avg_return, accuracy in contrarian_rows:
+            accuracy_text = f"{accuracy * 100:.1f}%" if accuracy is not None else "n/a"
+            lines.append(
+                f"| {horizon}h | {bucket} | {count} | {pct_delta_text(avg_return)} | {accuracy_text} |"
+            )
+        lines.append("")
+
+    if thin_rows:
+        lines.extend(
+            [
+                "### Thin Sample Warnings",
+                "",
+                "| horizon | bucket | side | samples |",
+                "| --- | --- | --- | ---: |",
+            ]
+        )
+        for horizon, bucket, side, count in thin_rows:
+            lines.append(f"| {horizon}h | {bucket} | {side} | {count} |")
+        lines.append("")
+
+    return lines
+
+
 def render_command(run: BacktestRun) -> list[str]:
     status = "error" if run.error else str(run.returncode)
     lines = [
@@ -812,6 +996,11 @@ def write_report(args: argparse.Namespace, runs: list[BacktestRun]) -> Path:
         Path(args.replay_output),
         args.timeout_seconds,
     )
+    forward_json, forward_source = load_json_source(
+        args.forward_url,
+        Path(args.forward_output),
+        args.timeout_seconds,
+    )
     metrics = current_metrics(
         now.date().isoformat(),
         policy_json,
@@ -854,6 +1043,7 @@ def write_report(args: argparse.Namespace, runs: list[BacktestRun]) -> Path:
     )
     report.extend(render_backtest_summary("Policy Backtest", policy_source, policy_json))
     report.extend(render_backtest_summary("Replay Backtest", replay_source, replay_json))
+    report.extend(render_forward_signal_analysis(forward_source, forward_json))
 
     report.extend(["## Backtest Commands", ""])
     for run in runs:
