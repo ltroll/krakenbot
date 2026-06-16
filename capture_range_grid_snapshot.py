@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 import requests
 from dotenv import load_dotenv
+from signal_normalizer import normalize_signal_payload
 
 
 ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -687,6 +688,11 @@ def build_snapshot():
     captured_at = now_utc().isoformat()
     signal_source = SIGNAL_FILE or LLM_SIGNAL_URL
     sentiment = read_json_source(signal_source, timeout=REQUEST_TIMEOUT)
+    normalized_sentiment_payload = (
+        normalize_signal_payload(sentiment["payload"], pair=KRAKEN_PAIR)
+        if sentiment["ok"]
+        else None
+    )
     ticker = ticker_snapshot()
     orderbook = orderbook_snapshot()
     private_balance = private_balance_snapshot()
@@ -738,7 +744,8 @@ def build_snapshot():
         "signal": {
             "ok": sentiment["ok"],
             "error": sentiment["error"],
-            "payload": sentiment["payload"],
+            "payload": normalized_sentiment_payload,
+            "raw_payload": sentiment["payload"],
         },
         "ticker": {
             "ok": ticker["ok"],

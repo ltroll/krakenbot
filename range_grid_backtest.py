@@ -7,6 +7,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
+from signal_normalizer import normalize_signal_payload
 
 
 ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -120,8 +121,13 @@ def snapshot_timestamp(snapshot):
 
 
 def signal_payload(snapshot):
-    payload = (snapshot.get("signal") or {}).get("payload")
-    return payload if isinstance(payload, dict) else {}
+    signal = snapshot.get("signal") or {}
+    payload = signal.get("payload")
+    if not isinstance(payload, dict):
+        payload = signal.get("raw_payload")
+    if not isinstance(payload, dict):
+        return {}
+    return normalize_signal_payload(payload)
 
 
 def state_payload(snapshot):

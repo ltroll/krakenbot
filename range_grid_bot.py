@@ -25,6 +25,7 @@ from range_grid_guardrails import (
     summarize_sell_backlog,
     validate_strategy_config,
 )
+from signal_normalizer import normalize_signal_payload
 
 load_dotenv()
 
@@ -1210,75 +1211,27 @@ def get_sentiment():
         data = r.json()
 
         if isinstance(data, dict):
-            target_prices = data.get("target_prices", [])
-            if not isinstance(target_prices, list):
-                target_prices = []
-
-            return {
-                "schema_version": data.get("schema_version"),
-                "execution_signal": data.get("execution_signal", 0),
-                "target_prices": target_prices,
-                "risk_multiplier": data.get("risk_multiplier"),
-                "smoothed_risk_multiplier": data.get("smoothed_risk_multiplier"),
-                "btc_sentiment": data.get("btc_sentiment"),
-                "regulatory_risk": data.get("regulatory_risk"),
-                "macro_tightening_bias": data.get("macro_tightening_bias"),
-                "confidence": data.get("confidence"),
-                "direction_bias": data.get("direction_bias"),
-                "raw_btc_sentiment": data.get("raw_btc_sentiment"),
-                "raw_regulatory_risk": data.get("raw_regulatory_risk"),
-                "raw_macro_tightening_bias": data.get("raw_macro_tightening_bias"),
-                "raw_confidence": data.get("raw_confidence"),
-                "raw_direction_bias": data.get("raw_direction_bias"),
-                "btc_price": data.get("btc_price"),
-                "fear_greed_index": data.get("fear_greed_index"),
-                "flow_pressure": data.get("flow_pressure"),
-                "mean_reversion_opportunity": data.get(
-                    "mean_reversion_opportunity"
-                ),
-                "signal_status": data.get("signal_status"),
-                "source_status": (
-                    data.get("source_status")
-                    if isinstance(data.get("source_status"), dict)
-                    else {}
-                ),
-                "action_recommendation": data.get("action_recommendation"),
-                "action_policy": (
-                    data.get("action_policy")
-                    if isinstance(data.get("action_policy"), dict)
-                    else {}
-                ),
-                "contributor_count": data.get("contributor_count"),
-                "active_observation_count": data.get(
-                    "active_observation_count"
-                ),
-                "bot_action_allowed": data.get("bot_action_allowed"),
-                "action_reason": (
-                    (
-                        data.get("action_policy", {}).get("reason")
-                        if isinstance(data.get("action_policy"), dict)
-                        else None
-                    )
-                    or data.get("reason")
-                ),
-                "source": data.get("source"),
-                "processed_at": data.get("processed_at"),
-                "price_regime": (
-                    data.get("price_regime")
-                    if isinstance(data.get("price_regime"), dict)
-                    else {}
-                ),
-                "trend_snapshot": (
-                    data.get("trend_snapshot")
-                    if isinstance(data.get("trend_snapshot"), dict)
-                    else {}
-                ),
-                "kraken_flow": (
-                    data.get("kraken_flow")
-                    if isinstance(data.get("kraken_flow"), dict)
-                    else {}
+            normalized = normalize_signal_payload(data, pair=KRAKEN_PAIR)
+            normalized["action_reason"] = (
+                (
+                    normalized.get("action_policy", {}).get("reason")
+                    if isinstance(normalized.get("action_policy"), dict)
+                    else None
                 )
-            }
+                or normalized.get("reason")
+            )
+            normalized["source"] = data.get("source")
+            normalized["trend_snapshot"] = (
+                normalized.get("trend_snapshot")
+                if isinstance(normalized.get("trend_snapshot"), dict)
+                else {}
+            )
+            normalized["kraken_flow"] = (
+                normalized.get("kraken_flow")
+                if isinstance(normalized.get("kraken_flow"), dict)
+                else {}
+            )
+            return normalized
 
         return {
             "schema_version": None,

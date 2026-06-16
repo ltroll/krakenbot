@@ -138,6 +138,55 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(result["summary"]["approved_candidates"], 1)
         self.assertEqual(result["summary"]["approved_counts_by_source"]["llm_target"], 1)
 
+    def test_replay_accepts_multi_asset_signal_payload(self):
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            104.5,
+            action_recommendation="watch_only",
+            strategy_modes=["high"],
+        )
+        snapshot["signal"]["payload"] = {
+            "schema_version": "multi-asset-sentiment-v1",
+            "single_asset_schema_version": "web-sentiment-v2",
+            "processed_at": "2026-06-13T12:00:00+00:00",
+            "freshness": {
+                "fresh_for_minutes": 10,
+                "warn_after_minutes": 12,
+                "stale_after_minutes": 20,
+            },
+            "assets": {
+                "BTC": {
+                    "asset_id": "BTC",
+                    "asset": {"symbol": "BTC", "name": "Bitcoin"},
+                    "processed_at": "2026-06-13T12:00:00+00:00",
+                    "asset_price": 104.5,
+                    "execution_signal": 0.02,
+                    "confidence": 0.5,
+                    "action_recommendation": "watch_only",
+                    "bot_action_allowed": True,
+                    "signal_status": "fresh",
+                    "source_status": {
+                        "asset_price": {"status": "fresh"},
+                        "asset_price_regime": {"status": "fresh"},
+                    },
+                    "asset_price_regime": {
+                        "price_low": 95.0,
+                        "price_high": 105.0,
+                        "price_mean": 100.0,
+                        "price_median": 99.5,
+                        "range_position": 0.95,
+                    },
+                    "mean_reversion_opportunity": 0.5,
+                }
+            },
+        }
+
+        result = backtest.replay_from_snapshots([snapshot])
+
+        self.assertGreaterEqual(result["summary"]["raw_candidates"], 1)
+        self.assertGreaterEqual(result["summary"]["approved_candidates"], 1)
+        self.assertEqual(result["summary"]["hold_snapshots"], 0)
+
     def test_watch_only_allows_range_permissions(self):
         permissions = backtest.sentiment_buy_permissions("watch_only")
         self.assertFalse(permissions["llm_buys_allowed"])
