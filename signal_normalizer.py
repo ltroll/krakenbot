@@ -38,6 +38,7 @@ def select_asset_signal(signal, asset_id=None, pair=None):
 
     result = dict(selected)
     result.setdefault("processed_at", signal.get("processed_at"))
+    result.setdefault("freshness", signal.get("freshness"))
     result.setdefault("schema_version", signal.get("single_asset_schema_version"))
     result.setdefault("multi_asset_schema_version", signal.get("schema_version"))
     result.setdefault("asset_id", selected_asset_id)
@@ -150,6 +151,9 @@ def normalize_signal_payload(signal, asset_id=None, pair=None):
         "active_observation_count": signal.get("active_observation_count"),
         "reason": signal.get("reason"),
         "processed_at": signal.get("processed_at"),
+        "freshness": signal.get("freshness")
+        if isinstance(signal.get("freshness"), dict)
+        else {},
         "schema_version": signal.get("schema_version"),
         "multi_asset_schema_version": signal.get("multi_asset_schema_version"),
         "price_regime": price_regime,

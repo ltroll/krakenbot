@@ -1706,6 +1706,7 @@ def select_asset_signal(signal):
     if isinstance(selected, dict):
         result = dict(selected)
         result.setdefault("processed_at", signal.get("processed_at"))
+        result.setdefault("freshness", signal.get("freshness"))
         result.setdefault("schema_version", signal.get("single_asset_schema_version"))
         return result
 
@@ -1816,6 +1817,9 @@ def normalize_signal(signal):
         "contributor_count": signal.get("contributor_count"),
         "reason": signal.get("reason"),
         "processed_at": signal.get("processed_at"),
+        "freshness": signal.get("freshness")
+        if isinstance(signal.get("freshness"), dict)
+        else {},
         "price_regime": price_regime,
         "kraken_flow": kraken_flow,
         "source_status": source_status,
@@ -2226,11 +2230,47 @@ def clamp(value, lower, upper):
 
 
 def signal_age_minutes(sentiment, now):
-    processed_at = parse_iso8601(sentiment.get("processed_at"))
+    freshness = sentiment.get("freshness")
+    freshness_processed_at = (
+        freshness.get("processed_at")
+        if isinstance(freshness, dict)
+        else None
+    )
+    processed_at = parse_iso8601(sentiment.get("processed_at") or freshness_processed_at)
     if processed_at is None:
         return None
 
     return (now - processed_at).total_seconds() / 60
+
+
+def freshness_contract(sentiment):
+    freshness = sentiment.get("freshness")
+    return freshness if isinstance(freshness, dict) else {}
+
+
+def freshness_minutes(sentiment, key):
+    value = freshness_contract(sentiment).get(key)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def signal_freshness_state(sentiment, now):
+    age_minutes = signal_age_minutes(sentiment, now)
+    if age_minutes is None:
+        return "unknown"
+
+    stale_after = freshness_minutes(sentiment, "stale_after_minutes")
+    warn_after = freshness_minutes(sentiment, "warn_after_minutes")
+    fresh_for = freshness_minutes(sentiment, "fresh_for_minutes")
+
+    if stale_after is not None and age_minutes > stale_after:
+        return "stale"
+    if warn_after is not None and age_minutes > warn_after:
+        return "warn"
+    if fresh_for is not None and age_minutes <= fresh_for:
+        return "fresh"
+    return "fresh"
 
 
 def signal_gate_failure(sentiment, now):
@@ -2238,12 +2278,27 @@ def signal_gate_failure(sentiment, now):
         return None
 
     signal_status = sentiment.get("signal_status")
-    if signal_status and signal_status != "fresh":
+    age_minutes = signal_age_minutes(sentiment, now)
+    freshness_state = signal_freshness_state(sentiment, now)
+    contract = freshness_contract(sentiment)
+    if (
+        signal_status
+        and signal_status != "fresh"
+        and not contract
+    ):
         return {
             "reason": "signal_not_fresh",
             "signal_status": signal_status,
             "bot_action_allowed": sentiment.get("bot_action_allowed"),
             "source_status_result": signal_status
+        }
+    if freshness_state == "stale":
+        return {
+            "reason": "signal_too_old",
+            "signal_status": signal_status,
+            "bot_action_allowed": sentiment.get("bot_action_allowed"),
+            "signal_age_minutes": age_minutes,
+            "source_status_result": "freshness_contract:stale"
         }
 
     if (
@@ -2257,8 +2312,9 @@ def signal_gate_failure(sentiment, now):
             "source_status_result": sentiment.get("reason")
         }
 
-    age_minutes = signal_age_minutes(sentiment, now)
     if (
+        not contract
+        and
         MAX_SIGNAL_AGE_MINUTES > 0
         and age_minutes is not None
         and age_minutes > MAX_SIGNAL_AGE_MINUTES
@@ -2275,7 +2331,10 @@ def signal_gate_failure(sentiment, now):
         status = source_status.get(source, {})
         if not isinstance(status, dict):
             continue
-        if status.get("status") not in (None, "fresh", "not_configured"):
+        if (
+            status.get("status") not in (None, "fresh", "not_configured")
+            and not contract
+        ):
             return {
                 "reason": "critical_source_not_fresh",
                 "signal_status": signal_status,
@@ -2746,6 +2805,10 @@ def run_cycle():
         risk_multiplier=risk_multiplier,
         effective_risk_multiplier=effective_multiplier,
         signal_status=sentiment.get("signal_status"),
+        signal_freshness_state=signal_freshness_state(sentiment, now),
+        freshness_fresh_for_minutes=freshness_minutes(sentiment, "fresh_for_minutes"),
+        freshness_warn_after_minutes=freshness_minutes(sentiment, "warn_after_minutes"),
+        freshness_stale_after_minutes=freshness_minutes(sentiment, "stale_after_minutes"),
         bot_action_allowed=sentiment.get("bot_action_allowed"),
         action_recommendation=action_recommendation,
         action_policy_reason=action_policy_reason,

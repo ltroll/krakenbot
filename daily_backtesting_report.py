@@ -375,18 +375,21 @@ def collect_log_lines(log_file: Path, since: datetime) -> LogSummary:
             if event == "TRADE_DECISION":
                 decision_reasons[str(payload.get("reason") or "unknown")] += 1
             if event == "SIGNAL_UPDATE":
-                status = str(payload.get("signal_status") or "unknown")
+                raw_status = str(payload.get("signal_status") or "unknown")
+                freshness_state = str(payload.get("signal_freshness_state") or "")
+                status = freshness_state or raw_status
                 signal_statuses[status] += 1
                 age = number_value(payload.get("signal_age_minutes"))
                 if age is not None:
                     signal_ages.append(age)
-                if status not in ("fresh", "unknown"):
+                if status not in ("fresh", "warn", "unknown"):
                     current_stale_streak += 1
                     longest_stale_streak = max(longest_stale_streak, current_stale_streak)
                     stale_records.append(
                         {
                             "ts": payload.get("ts"),
                             "status": status,
+                            "raw_status": raw_status,
                             "age": age,
                             "processed_at": payload.get("processed_at"),
                         }
@@ -653,8 +656,8 @@ def render_signal_freshness_summary(log_summary: LogSummary) -> list[str]:
     if stale_count:
         lines.extend(
             [
-                f"- First stale event: `{first_stale.get('ts', 'n/a')}` status=`{first_stale.get('status', 'n/a')}` age={fmt_minutes(first_stale.get('age'))}",
-                f"- Last stale event: `{last_stale.get('ts', 'n/a')}` status=`{last_stale.get('status', 'n/a')}` age={fmt_minutes(last_stale.get('age'))}",
+                f"- First stale event: `{first_stale.get('ts', 'n/a')}` status=`{first_stale.get('status', 'n/a')}` raw_status=`{first_stale.get('raw_status', 'n/a')}` age={fmt_minutes(first_stale.get('age'))}",
+                f"- Last stale event: `{last_stale.get('ts', 'n/a')}` status=`{last_stale.get('status', 'n/a')}` raw_status=`{last_stale.get('raw_status', 'n/a')}` age={fmt_minutes(last_stale.get('age'))}",
             ]
         )
     lines.append("")
