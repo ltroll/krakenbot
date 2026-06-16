@@ -47,6 +47,10 @@ class LogSummary:
     decision_reasons: Counter[str]
     trade_events: Counter[str]
     signal_statuses: Counter[str]
+    signal_ages: list[float]
+    stale_records: list[dict[str, Any]]
+    longest_stale_streak: int
+    contrarian_candidates: Counter[str]
 
 
 @dataclass
@@ -338,9 +342,24 @@ def collect_log_lines(log_file: Path, since: datetime) -> LogSummary:
     decision_reasons: Counter[str] = Counter()
     trade_events: Counter[str] = Counter()
     signal_statuses: Counter[str] = Counter()
+    signal_ages: list[float] = []
+    stale_records: list[dict[str, Any]] = []
+    contrarian_candidates: Counter[str] = Counter()
+    current_stale_streak = 0
+    longest_stale_streak = 0
 
     if not log_file.exists():
-        return LogSummary(lines, event_counts, decision_reasons, trade_events, signal_statuses)
+        return LogSummary(
+            lines,
+            event_counts,
+            decision_reasons,
+            trade_events,
+            signal_statuses,
+            signal_ages,
+            stale_records,
+            longest_stale_streak,
+            contrarian_candidates,
+        )
 
     with log_file.open("r", encoding="utf-8", errors="replace") as handle:
         for raw_line in handle:
@@ -356,7 +375,49 @@ def collect_log_lines(log_file: Path, since: datetime) -> LogSummary:
             if event == "TRADE_DECISION":
                 decision_reasons[str(payload.get("reason") or "unknown")] += 1
             if event == "SIGNAL_UPDATE":
-                signal_statuses[str(payload.get("signal_status") or "unknown")] += 1
+                status = str(payload.get("signal_status") or "unknown")
+                signal_statuses[status] += 1
+                age = number_value(payload.get("signal_age_minutes"))
+                if age is not None:
+                    signal_ages.append(age)
+                if status not in ("fresh", "unknown"):
+                    current_stale_streak += 1
+                    longest_stale_streak = max(longest_stale_streak, current_stale_streak)
+                    stale_records.append(
+                        {
+                            "ts": payload.get("ts"),
+                            "status": status,
+                            "age": age,
+                            "processed_at": payload.get("processed_at"),
+                        }
+                    )
+                else:
+                    current_stale_streak = 0
+                if str(payload.get("action_recommendation") or "") == "watch_only":
+                    execution_signal = number_value(payload.get("execution_signal"))
+                    liquidity_risk = number_value(payload.get("liquidity_risk"))
+                    confidence = number_value(payload.get("confidence"))
+                    range_position = number_value(payload.get("range_position_24h"))
+                    contrarian_candidates["watch_only_signals"] += 1
+                    if execution_signal is not None and execution_signal < 0:
+                        contrarian_candidates["negative_watch_only"] += 1
+                    if status == "fresh":
+                        contrarian_candidates["fresh_watch_only"] += 1
+                    if liquidity_risk is not None and liquidity_risk <= 0.45:
+                        contrarian_candidates["liquidity_acceptable"] += 1
+                    if confidence is not None and confidence >= 0.45:
+                        contrarian_candidates["confidence_acceptable"] += 1
+                    if range_position is not None and range_position <= 0.35:
+                        contrarian_candidates["low_range_position"] += 1
+                    if (
+                        execution_signal is not None
+                        and execution_signal < 0
+                        and status == "fresh"
+                        and (liquidity_risk is None or liquidity_risk <= 0.45)
+                        and (confidence is None or confidence >= 0.45)
+                        and (range_position is None or range_position <= 0.35)
+                    ):
+                        contrarian_candidates["contrarian_buy_watch_candidates"] += 1
             if event in {
                 "BUY_LIMIT_ORDER_PLACED",
                 "SELL_LIMIT_ORDER_PLACED",
@@ -367,7 +428,17 @@ def collect_log_lines(log_file: Path, since: datetime) -> LogSummary:
             }:
                 trade_events[event] += 1
 
-    return LogSummary(lines, event_counts, decision_reasons, trade_events, signal_statuses)
+    return LogSummary(
+        lines,
+        event_counts,
+        decision_reasons,
+        trade_events,
+        signal_statuses,
+        signal_ages,
+        stale_records,
+        longest_stale_streak,
+        contrarian_candidates,
+    )
 
 
 def load_json_path(path: Path) -> Optional[dict[str, Any]]:
@@ -407,9 +478,20 @@ def fmt_count(value: Any) -> str:
     return "n/a"
 
 
+def fmt_minutes(value: Any) -> str:
+    if isinstance(value, (int, float)):
+        return f"{value:.2f} min"
+    return "n/a"
+
+
 def number_value(value: Any) -> Optional[float]:
     if isinstance(value, (int, float)):
         return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
     return None
 
 
@@ -540,20 +622,61 @@ def render_health_summary(
     ]
 
 
+def render_signal_freshness_summary(log_summary: LogSummary) -> list[str]:
+    stale_count = len(log_summary.stale_records)
+    if not log_summary.signal_ages and not stale_count:
+        return [
+            "## Signal Freshness",
+            "",
+            "No signal freshness data was available in the bot log window.",
+            "",
+        ]
+
+    avg_age = (
+        sum(log_summary.signal_ages) / len(log_summary.signal_ages)
+        if log_summary.signal_ages
+        else None
+    )
+    max_age = max(log_summary.signal_ages) if log_summary.signal_ages else None
+    first_stale = log_summary.stale_records[0] if stale_count else {}
+    last_stale = log_summary.stale_records[-1] if stale_count else {}
+
+    lines = [
+        "## Signal Freshness",
+        "",
+        f"- Signal updates with age data: {len(log_summary.signal_ages)}",
+        f"- Stale/non-fresh signal updates: {stale_count}",
+        f"- Avg signal age: {fmt_minutes(avg_age)}",
+        f"- Max signal age: {fmt_minutes(max_age)}",
+        f"- Longest stale streak: {log_summary.longest_stale_streak}",
+    ]
+    if stale_count:
+        lines.extend(
+            [
+                f"- First stale event: `{first_stale.get('ts', 'n/a')}` status=`{first_stale.get('status', 'n/a')}` age={fmt_minutes(first_stale.get('age'))}",
+                f"- Last stale event: `{last_stale.get('ts', 'n/a')}` status=`{last_stale.get('status', 'n/a')}` age={fmt_minutes(last_stale.get('age'))}",
+            ]
+        )
+    lines.append("")
+    return lines
+
+
 def render_verdict(metrics: ReportMetrics) -> list[str]:
     notes: list[str] = []
-    verdict = "PASS"
+    trading_verdict = "PASS"
+    health_verdict = "PASS"
+    tuning_verdict = "PASS"
     live = metrics.live_trade_events
     replay_trades = metrics.replay_sentiment_trades
     price_return = metrics.replay_price_only_return_pct
     policy_return = metrics.policy_sentiment_return_pct
 
     if metrics.error_events:
-        verdict = "WARN"
+        health_verdict = "WARN"
         notes.append(f"{metrics.error_events} health/error events were logged.")
 
     if metrics.replay_sentiment_trades is None and metrics.policy_sentiment_trades is None:
-        verdict = "WARN"
+        trading_verdict = "WARN"
         notes.append("Backtest summaries were unavailable or could not be parsed.")
 
     if replay_trades is not None:
@@ -563,12 +686,12 @@ def render_verdict(metrics: ReportMetrics) -> list[str]:
             else:
                 notes.append("Live bot matched replay: no sentiment-policy trades expected.")
         elif live == 0 and replay_trades > 0:
-            verdict = "WARN"
+            trading_verdict = "WARN"
             notes.append(
                 "Replay expected sentiment-policy trades, but live bot logged no trade events."
             )
         elif live > 0 and replay_trades == 0:
-            verdict = "WARN"
+            trading_verdict = "WARN"
             notes.append(
                 "Live bot logged trade events while replay expected no sentiment-policy trades."
             )
@@ -576,17 +699,31 @@ def render_verdict(metrics: ReportMetrics) -> list[str]:
             notes.append("Live bot and replay both showed trading activity.")
 
     if isinstance(policy_return, (int, float)) and policy_return < 0:
+        tuning_verdict = "WATCH"
         notes.append("Policy backtest trade outcome was negative.")
     if isinstance(price_return, (int, float)) and price_return < 0:
+        tuning_verdict = "WATCH"
         notes.append("Price-target replay baseline was negative.")
+    if (
+        isinstance(price_return, (int, float))
+        and price_return > 0
+        and replay_trades == 0
+        and live == 0
+    ):
+        tuning_verdict = "WATCH"
+        notes.append("No-trade policy had positive price-target opportunity cost.")
 
     if not notes:
         notes.append("No obvious mismatch or health issue detected.")
 
+    overall = "WARN" if "WARN" in (trading_verdict, health_verdict) else tuning_verdict
     return [
         "## Verdict",
         "",
-        f"Verdict: **{verdict}**",
+        f"Overall Verdict: **{overall}**",
+        f"Trading Verdict: **{trading_verdict}**",
+        f"Health Verdict: **{health_verdict}**",
+        f"Tuning Verdict: **{tuning_verdict}**",
         "",
         *[f"- {note}" for note in notes],
         "",
@@ -724,6 +861,64 @@ def render_rolling_summary(
     return lines
 
 
+def render_live_vs_backtest(metrics: ReportMetrics) -> list[str]:
+    lines = [
+        "## Live Vs Backtest",
+        "",
+        f"- Live trade events: {metrics.live_trade_events}",
+        f"- Replay sentiment-policy trades: {fmt_count(metrics.replay_sentiment_trades)}",
+        f"- Policy backtest sentiment trades: {fmt_count(metrics.policy_sentiment_trades)}",
+        f"- Replay price-target-only return: {fmt_pct(metrics.replay_price_only_return_pct)}",
+        "",
+        "### Safety And Opportunity",
+        "",
+    ]
+
+    price_return = metrics.replay_price_only_return_pct
+    policy_return = metrics.policy_sentiment_return_pct
+    replay_trades = metrics.replay_sentiment_trades
+
+    if replay_trades is None:
+        lines.append("- Safety result: replay sentiment-policy trade count was unavailable.")
+    elif metrics.live_trade_events == 0 and replay_trades == 0:
+        lines.append("- Safety result: live bot matched replay by staying out of sentiment-policy trades.")
+    elif metrics.live_trade_events == 0 and isinstance(replay_trades, (int, float)) and replay_trades > 0:
+        lines.append("- Safety result: live bot skipped trades that replay expected.")
+    elif metrics.live_trade_events > 0 and replay_trades == 0:
+        lines.append("- Safety result: live bot traded while replay expected no sentiment-policy trades.")
+    else:
+        lines.append("- Safety result: live and replay both showed trading activity.")
+
+    if isinstance(policy_return, (int, float)) and policy_return < 0 and metrics.live_trade_events == 0:
+        lines.append(f"- Avoided policy loss: live bot avoided a policy backtest outcome of {fmt_pct(policy_return)}.")
+    if isinstance(price_return, (int, float)) and price_return > 0 and metrics.live_trade_events == 0:
+        lines.append(f"- Opportunity cost: price-target replay was positive at {fmt_pct(price_return)} while live stayed flat.")
+    elif isinstance(price_return, (int, float)) and price_return < 0 and metrics.live_trade_events == 0:
+        lines.append(f"- Avoided baseline loss: price-target replay was negative at {fmt_pct(price_return)}.")
+
+    lines.append("")
+    return lines
+
+
+def render_contrarian_candidate_summary(log_summary: LogSummary) -> list[str]:
+    candidates = log_summary.contrarian_candidates
+    lines = [
+        "## Contrarian Candidate Tracking",
+        "",
+        "This is a watch-list diagnostic only; it does not imply the bot should trade these setups.",
+        "",
+        f"- Watch-only signal updates: {candidates.get('watch_only_signals', 0)}",
+        f"- Negative watch-only signal updates: {candidates.get('negative_watch_only', 0)}",
+        f"- Fresh watch-only signal updates: {candidates.get('fresh_watch_only', 0)}",
+        f"- Liquidity acceptable watch-only updates: {candidates.get('liquidity_acceptable', 0)}",
+        f"- Confidence acceptable watch-only updates: {candidates.get('confidence_acceptable', 0)}",
+        f"- Low range-position watch-only updates: {candidates.get('low_range_position', 0)}",
+        f"- Contrarian buy watch candidates: {candidates.get('contrarian_buy_watch_candidates', 0)}",
+        "",
+    ]
+    return lines
+
+
 def render_backtest_summary(title: str, source: str, payload: Optional[dict[str, Any]]) -> list[str]:
     lines = [f"### {title}", "", f"JSON: `{source}`"]
     if not payload:
@@ -804,10 +999,17 @@ def render_forward_signal_analysis(source: str, payload: Optional[dict[str, Any]
         lines.extend(["", "No forward-return horizon results found.", ""])
         return lines
 
+    timestamp = parse_timestamp(payload.get("timestamp"))
+    since = parse_timestamp(payload.get("since"))
+    forward_window_hours = None
+    if timestamp and since:
+        forward_window_hours = (timestamp - since).total_seconds() / 3600
+
     lines.extend(
         [
             f"timestamp: `{payload.get('timestamp', 'n/a')}`",
             f"since: `{payload.get('since', 'n/a')}`",
+            f"forward window hours: `{forward_window_hours:.1f}`" if forward_window_hours is not None else "forward window hours: `n/a`",
             f"signals tested: `{payload.get('signal_count', 'n/a')}`",
             "",
         ]
@@ -1023,18 +1225,10 @@ def write_report(args: argparse.Namespace, runs: list[BacktestRun]) -> Path:
             log_summary.signal_statuses,
         )
     )
+    report.extend(render_signal_freshness_summary(log_summary))
     report.extend(render_rolling_summary(report_dir, report_path, metrics))
-    report.extend(
-        [
-            "## Live Vs Backtest",
-            "",
-            f"- Live trade events: {metrics.live_trade_events}",
-            f"- Replay sentiment-policy trades: {fmt_count(metrics.replay_sentiment_trades)}",
-            f"- Policy backtest sentiment trades: {fmt_count(metrics.policy_sentiment_trades)}",
-            f"- Replay price-target-only return: {fmt_pct(metrics.replay_price_only_return_pct)}",
-            "",
-        ]
-    )
+    report.extend(render_live_vs_backtest(metrics))
+    report.extend(render_contrarian_candidate_summary(log_summary))
     report.extend(
         [
         "## Backtest Summaries",
