@@ -3940,6 +3940,12 @@ def main():
                 "signal_status": signal_status,
                 "action_recommendation": action_recommendation,
                 "runtime_block_reason": runtime_block_reason,
+                "effective_position_size_pct": effective_position_size_pct,
+                "effective_max_inventory_usd": effective_max_inventory_usd,
+                "effective_max_open_sell_orders": (
+                    effective_max_open_sell_orders
+                ),
+                "high_anchor_enabled": regime["allow_high_anchor"],
                 "realized_pnl_today": round(realized_pnl_today, 8),
                 "sell_backlog_count": sell_backlog["count"],
                 "sell_backlog_oldest_minutes": round(

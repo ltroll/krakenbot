@@ -460,11 +460,27 @@ def status_snapshot():
         "grid_anchor": raw_status.get("grid_anchor"),
         "configured_strategy_modes": raw_status.get("configured_strategy_modes"),
         "strategy_modes": raw_status.get("strategy_modes"),
+        "dynamic_anchor_mode": raw_status.get("dynamic_anchor_mode"),
+        "price_regime_range_position": safe_float(
+            raw_status.get("price_regime_range_position")
+        ),
         "price": safe_float(raw_status.get("price")),
         "execution_signal": safe_float(raw_status.get("execution_signal")),
         "signal_status": raw_status.get("signal_status"),
         "action_recommendation": raw_status.get("action_recommendation"),
         "runtime_block_reason": raw_status.get("runtime_block_reason"),
+        "effective_position_size_pct": safe_float(
+            raw_status.get("effective_position_size_pct")
+        ),
+        "effective_max_inventory_usd": safe_float(
+            raw_status.get("effective_max_inventory_usd")
+        ),
+        "effective_max_open_sell_orders": (
+            int(raw_status.get("effective_max_open_sell_orders"))
+            if raw_status.get("effective_max_open_sell_orders") is not None
+            else None
+        ),
+        "high_anchor_enabled": raw_status.get("high_anchor_enabled"),
         "realized_pnl_today": safe_float(raw_status.get("realized_pnl_today")),
         "sell_backlog_count": int(raw_status.get("sell_backlog_count") or 0),
         "sell_backlog_oldest_minutes": safe_float(raw_status.get("sell_backlog_oldest_minutes")),
