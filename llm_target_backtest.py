@@ -362,6 +362,16 @@ def effective_fee_bps(snapshot=None):
     return round_trip_fee_pct * 10000.0
 
 
+def report_fee_bps(snapshots):
+    if BACKTEST_FEE_BPS > 0:
+        return BACKTEST_FEE_BPS
+    for snapshot in snapshots:
+        fee_bps = effective_fee_bps(snapshot)
+        if fee_bps is not None:
+            return round(fee_bps, 6)
+    return BACKTEST_FEE_BPS
+
+
 def strategy_options(strategy_name):
     return BACKTEST_STRATEGIES.get(strategy_name, {})
 
@@ -676,6 +686,7 @@ def empty_summary():
         "avg_net_return_pct": None,
         "avg_fee_bps": None,
         "total_net_return_pct": None,
+        "marked_to_market_net_return_pct": None,
         "avg_hold_minutes": None,
         "open_position_count": 0,
         "open_position_unrealized_net_pct": None,
@@ -765,6 +776,15 @@ def finalize_summary(summary, trades, open_positions=None):
         )
         summary["open_position_max_runup_pct"] = round(
             max(position["max_runup_pct"] for position in open_positions),
+            6
+        )
+    completed_net = sum(trade["net_return_pct"] for trade in trades)
+    open_net = sum(
+        position["unrealized_net_return_pct"] for position in open_positions
+    )
+    if trades or open_positions:
+        summary["marked_to_market_net_return_pct"] = round(
+            completed_net + open_net,
             6
         )
     approved_candidates = summary["approved_candidates"]
@@ -1124,12 +1144,23 @@ def top_summary(strategies):
     best_strategy_reason = "No strategy produced any completed trades in this window."
     if best_score[0] > 0:
         best_strategy = best_name
+        marked_to_market_net = best_summary.get("marked_to_market_net_return_pct")
         best_strategy_reason = (
             f"Best completed-trade result by total net return over the window: "
             f"{best_summary['total_net_return_pct']}% across {best_summary['trades']} trades."
         )
+        if (
+            best_summary.get("open_position_count", 0) > 0
+            and marked_to_market_net is not None
+        ):
+            best_strategy_reason += (
+                f" Marked-to-market including open positions: "
+                f"{marked_to_market_net}%."
+            )
         if best_summary["total_net_return_pct"] < 0:
             best_strategy_reason += " No-trade outperformed all completed-trade strategies."
+        elif marked_to_market_net is not None and marked_to_market_net < 0:
+            best_strategy_reason += " Open exposure made no-trade better on a marked-to-market basis."
 
     return {
         "best_strategy": best_strategy,
@@ -1147,6 +1178,9 @@ def top_summary(strategies):
                 ),
                 "win_rate": payload["summary"].get("win_rate"),
                 "total_net_return_pct": payload["summary"].get("total_net_return_pct"),
+                "marked_to_market_net_return_pct": payload["summary"].get(
+                    "marked_to_market_net_return_pct"
+                ),
                 "no_target": payload["summary"].get("no_target"),
                 "not_filled": payload["summary"].get("not_filled"),
                 "signal_target_snapshots": payload["summary"].get(
@@ -1224,7 +1258,7 @@ def build_report():
             "stop_loss_pct": BACKTEST_STOP_LOSS_PCT,
             "max_hold_hours": BACKTEST_MAX_HOLD_HOURS,
             "cooldown_minutes": BACKTEST_COOLDOWN_MINUTES,
-            "fee_bps": BACKTEST_FEE_BPS,
+            "fee_bps": report_fee_bps(snapshots),
             "fee_source": (
                 "LLM_TARGET_BACKTEST_FEE_BPS"
                 if BACKTEST_FEE_BPS > 0 else

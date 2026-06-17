@@ -363,6 +363,29 @@ class LlmTargetBacktestTests(unittest.TestCase):
         self.assertEqual(summary["best_strategy"], "price_target_only")
         self.assertIn("No-trade outperformed", summary["best_strategy_reason"])
 
+    def test_best_result_mentions_negative_open_exposure(self):
+        strategies = {
+            "target_quality_only_hold": {
+                "summary": {
+                    **backtest.empty_summary(),
+                    "trades": 1,
+                    "win_rate": 1.0,
+                    "total_net_return_pct": 0.18,
+                    "open_position_count": 1,
+                    "open_position_unrealized_net_pct": -0.97,
+                    "marked_to_market_net_return_pct": -0.79,
+                }
+            },
+        }
+
+        summary = backtest.top_summary(strategies)
+        headline = summary["strategy_headlines"]["target_quality_only_hold"]
+
+        self.assertEqual(summary["best_strategy"], "target_quality_only_hold")
+        self.assertIn("Marked-to-market", summary["best_strategy_reason"])
+        self.assertIn("Open exposure made no-trade better", summary["best_strategy_reason"])
+        self.assertEqual(headline["marked_to_market_net_return_pct"], -0.79)
+
     def test_build_report_and_write_report(self):
         snapshots = [
             make_snapshot("2026-05-30T12:00:00+00:00", 101.0),
@@ -412,6 +435,7 @@ class LlmTargetBacktestTests(unittest.TestCase):
             headline = report["top_summary"]["strategy_headlines"]["with_target_quality"]
             self.assertEqual(headline["not_filled"], 0)
             self.assertEqual(headline["terminal_rate_after_approval"], 1.0)
+            self.assertEqual(report["simulation"]["fee_bps"], 32.0)
             self.assertEqual(len(report["snapshot_files"]), 1)
             self.assertIsNone(report["snapshot_diagnostics"]["empty_window_reason"])
 
