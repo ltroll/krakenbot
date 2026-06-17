@@ -935,6 +935,9 @@ def empty_replay_summary():
         "approved_candidates": 0,
         "unknown_balance_candidates": 0,
         "hold_reason_counts": {},
+        "hold_action_recommendation_counts": {},
+        "hold_action_policy_reason_counts": {},
+        "hold_signal_status_counts": {},
         "blocked_reason_counts": {},
         "candidate_counts_by_source": {},
         "approved_counts_by_source": {},
@@ -947,6 +950,9 @@ def replay_from_snapshots(snapshots):
     recent_approved = []
     approved_events = []
     hold_reason_counts = Counter()
+    hold_action_recommendation_counts = Counter()
+    hold_action_policy_reason_counts = Counter()
+    hold_signal_status_counts = Counter()
     blocked_reason_counts = Counter()
     candidate_counts_by_source = Counter()
     approved_counts_by_source = Counter()
@@ -971,10 +977,23 @@ def replay_from_snapshots(snapshots):
         if built["hold_reason"] is not None:
             summary["hold_snapshots"] += 1
             hold_reason_counts[built["hold_reason"]] += 1
+            action_recommendation = built.get("action_recommendation") or "unknown"
+            hold_action_recommendation_counts[action_recommendation] += 1
+            signal_status = signal.get("signal_status") or "unknown"
+            hold_signal_status_counts[signal_status] += 1
+            action_policy = signal.get("action_policy")
+            if isinstance(action_policy, dict):
+                action_policy_reason = action_policy.get("reason")
+            else:
+                action_policy_reason = None
+            if action_policy_reason:
+                hold_action_policy_reason_counts[str(action_policy_reason)] += 1
             recent.append({
                 "captured_at": snapshot.get("captured_at"),
                 "price": price,
-                "action_recommendation": built["action_recommendation"],
+                "action_recommendation": action_recommendation,
+                "action_policy_reason": action_policy_reason,
+                "signal_status": signal_status,
                 "hold_reason": built["hold_reason"],
                 "raw_candidate_count": len(built["raw_candidates"]),
             })
@@ -1011,6 +1030,15 @@ def replay_from_snapshots(snapshots):
                 })
 
     summary["hold_reason_counts"] = dict(hold_reason_counts.most_common())
+    summary["hold_action_recommendation_counts"] = dict(
+        hold_action_recommendation_counts.most_common()
+    )
+    summary["hold_action_policy_reason_counts"] = dict(
+        hold_action_policy_reason_counts.most_common()
+    )
+    summary["hold_signal_status_counts"] = dict(
+        hold_signal_status_counts.most_common()
+    )
     summary["blocked_reason_counts"] = dict(blocked_reason_counts.most_common())
     summary["candidate_counts_by_source"] = dict(candidate_counts_by_source.most_common())
     summary["approved_counts_by_source"] = dict(approved_counts_by_source.most_common())

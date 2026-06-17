@@ -122,12 +122,31 @@ class RangeGridBacktestTests(unittest.TestCase):
 
     def test_replay_blocks_when_sentiment_not_bullish(self):
         snapshots = [make_snapshot("2026-06-13T12:00:00+00:00", 100.0, action_recommendation="blocked")]
+        snapshots[0]["signal"]["payload"]["action_policy"] = {
+            "reason": "Bearish actions disabled for this asset."
+        }
 
         result = backtest.replay_from_snapshots(snapshots)
 
         self.assertEqual(result["summary"]["approved_candidates"], 0)
         self.assertEqual(result["summary"]["hold_snapshots"], 1)
         self.assertIn("action_recommendation_blocked", result["summary"]["hold_reason_counts"])
+        self.assertEqual(
+            result["summary"]["hold_action_recommendation_counts"],
+            {"blocked": 1},
+        )
+        self.assertEqual(
+            result["summary"]["hold_action_policy_reason_counts"],
+            {"Bearish actions disabled for this asset.": 1},
+        )
+        self.assertEqual(
+            result["summary"]["hold_signal_status_counts"],
+            {"fresh": 1},
+        )
+        self.assertEqual(
+            result["recent_replay_events"][0]["action_policy_reason"],
+            "Bearish actions disabled for this asset.",
+        )
 
     def test_replay_approves_llm_target_candidate(self):
         snapshots = [make_snapshot("2026-06-13T12:00:00+00:00", 100.0, strategy_modes=["llm_target"])]
