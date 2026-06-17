@@ -2,7 +2,14 @@
   "decision_url": "http://192.168.50.211/bot/competition_decision.json",
   "log_file": "competition_shadow_trade_log.jsonl",
   "decision_csv_file": "competition_shadow_decisions.csv",
+  "backtest_snapshot_file": "competition_backtest_snapshot_log.jsonl",
+  "backtest_output_file": "competition_backtest.json",
   "poll_interval_seconds": 60,
   "request_timeout_seconds": 10,
-  "write_decision_csv": true
+  "write_decision_csv": true,
+  "backtest_trade_usd": 25,
+  "backtest_take_profit_pct": 0.8,
+  "backtest_stop_loss_pct": 0.8,
+  "backtest_max_hold_minutes": 60,
+  "backtest_fee_bps": 40
 }

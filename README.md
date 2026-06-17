@@ -115,6 +115,9 @@ COMPETITION_CONFIG_FILE=competition_bot_config.json
 COMPETITION_TRADE_LOG_FILE=competition_shadow_trade_log.jsonl
 COMPETITION_DECISION_CSV_FILE=competition_shadow_decisions.csv
 COMPETITION_POLL_INTERVAL_SECONDS=60
+COMPETITION_BACKTEST_SNAPSHOT_FILE=competition_backtest_snapshot_log.jsonl
+COMPETITION_BACKTEST_OUTPUT_FILE=competition_backtest.json
+COMPETITION_BACKTEST_WINDOW_HOURS=24
 KRAKEN_PAIR=XXBTZUSD
 SIGNAL_FILE=
 REQUEST_TIMEOUT_SECONDS=10
@@ -188,6 +191,25 @@ Run continuously:
 ```
 
 The script only records decisions. When the file says `risk.shadow_only` is true, `decision == "shadow_candidate"` is logged as `record_tradeable_shadow_candidate`; blocked decisions are logged with their reason. If `status != "ok"`, the source is stale, or the file is not explicitly shadow-only, it logs `do_nothing`.
+
+Capture one backtest snapshot:
+
+```bash
+./venv/bin/python capture_competition_snapshot.py
+```
+
+Replay the captured snapshots for P&L:
+
+```bash
+./venv/bin/python competition_backtest.py
+```
+
+The competition backtest compares two scenarios:
+
+- `competition_allowed`: enters only when the engine file is fresh, `status == "ok"`, `risk.shadow_only == true`, and `decision == "shadow_candidate"`.
+- `simulated_buy_allowed`: enters on any fresh `status == "ok"` snapshot, ignoring whether the competition guardrail decision blocked buying.
+
+The replay uses one simulated position at a time, mid price when present, otherwise last price, fixed USD notional capped by `risk.max_position_usd`, and exits by take-profit, stop-loss, max hold, or final mark-to-market.
 
 ## How `range_grid_bot.py` works
 

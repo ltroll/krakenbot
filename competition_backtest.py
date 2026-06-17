@@ -1,0 +1,614 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(*args, **kwargs):
+        return False
+
+
+ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+load_dotenv(dotenv_path=ENV_FILE, override=True)
+
+DEFAULT_SNAPSHOT_LOG_FILE = "competition_backtest_snapshot_log.jsonl"
+DEFAULT_CONFIG_FILE = "competition_bot_config.json"
+DEFAULT_OUTPUT_FILE = "competition_backtest.json"
+
+
+def parse_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def parse_cli_args():
+    parser = argparse.ArgumentParser(
+        description="Replay competition decision snapshots for simulated P&L."
+    )
+    parser.add_argument(
+        "--config-file",
+        default=os.getenv("COMPETITION_CONFIG_FILE", DEFAULT_CONFIG_FILE),
+        help="Competition config JSON file.",
+    )
+    parser.add_argument(
+        "--snapshot-file",
+        help="Base JSONL snapshot file.",
+    )
+    parser.add_argument(
+        "--output-file",
+        help="JSON output path.",
+    )
+    parser.add_argument(
+        "--window-hours",
+        type=float,
+        help="Lookback window to replay.",
+    )
+    parser.add_argument(
+        "--trade-usd",
+        type=float,
+        help="Fallback simulated trade notional.",
+    )
+    parser.add_argument(
+        "--take-profit-pct",
+        type=float,
+        help="Take-profit percent, e.g. 0.8 for 0.8%%.",
+    )
+    parser.add_argument(
+        "--stop-loss-pct",
+        type=float,
+        help="Stop-loss percent, e.g. 0.8 for 0.8%%.",
+    )
+    parser.add_argument(
+        "--max-hold-minutes",
+        type=float,
+        help="Maximum simulated hold time before timeout exit.",
+    )
+    parser.add_argument(
+        "--cooldown-minutes",
+        type=float,
+        help="Cooldown after an exit before another entry.",
+    )
+    parser.add_argument(
+        "--fee-bps",
+        type=float,
+        help="Round-trip fee in basis points.",
+    )
+    parser.add_argument(
+        "--recent-limit",
+        type=int,
+        help="Number of recent simulated trades to include.",
+    )
+    parser.add_argument(
+        "--rotate-daily",
+        default=os.getenv("COMPETITION_BACKTEST_ROTATE_DAILY", "true"),
+        help="Whether to read date-suffixed JSONL files.",
+    )
+    return parser.parse_args()
+
+
+def load_config(path):
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def env_config_value(env_name, config, key, default=None):
+    value = os.getenv(env_name)
+    if value is not None:
+        return value
+    return config.get(key, default)
+
+
+def runtime_from_args(args):
+    config = load_config(args.config_file)
+
+    def value(arg_value, env_name, key, default):
+        if arg_value is not None:
+            return arg_value
+        return env_config_value(env_name, config, key, default)
+
+    return argparse.Namespace(**{
+        "config_file": args.config_file,
+        "snapshot_file": value(
+            args.snapshot_file,
+            "COMPETITION_BACKTEST_SNAPSHOT_FILE",
+            "backtest_snapshot_file",
+            DEFAULT_SNAPSHOT_LOG_FILE,
+        ),
+        "output_file": value(
+            args.output_file,
+            "COMPETITION_BACKTEST_OUTPUT_FILE",
+            "backtest_output_file",
+            DEFAULT_OUTPUT_FILE,
+        ),
+        "window_hours": float(value(
+            args.window_hours,
+            "COMPETITION_BACKTEST_WINDOW_HOURS",
+            "backtest_window_hours",
+            24,
+        )),
+        "trade_usd": float(value(
+            args.trade_usd,
+            "COMPETITION_BACKTEST_TRADE_USD",
+            "backtest_trade_usd",
+            25,
+        )),
+        "take_profit_pct": float(value(
+            args.take_profit_pct,
+            "COMPETITION_BACKTEST_TAKE_PROFIT_PCT",
+            "backtest_take_profit_pct",
+            0.8,
+        )),
+        "stop_loss_pct": float(value(
+            args.stop_loss_pct,
+            "COMPETITION_BACKTEST_STOP_LOSS_PCT",
+            "backtest_stop_loss_pct",
+            0.8,
+        )),
+        "max_hold_minutes": float(value(
+            args.max_hold_minutes,
+            "COMPETITION_BACKTEST_MAX_HOLD_MINUTES",
+            "backtest_max_hold_minutes",
+            60,
+        )),
+        "cooldown_minutes": float(value(
+            args.cooldown_minutes,
+            "COMPETITION_BACKTEST_COOLDOWN_MINUTES",
+            "backtest_cooldown_minutes",
+            0,
+        )),
+        "fee_bps": float(value(
+            args.fee_bps,
+            "COMPETITION_BACKTEST_FEE_BPS",
+            "backtest_fee_bps",
+            40,
+        )),
+        "recent_limit": int(value(
+            args.recent_limit,
+            "COMPETITION_BACKTEST_RECENT_LIMIT",
+            "backtest_recent_limit",
+            25,
+        )),
+        "rotate_daily": parse_bool(args.rotate_daily, default=True),
+    })
+
+
+def now_utc():
+    return datetime.now(timezone.utc)
+
+
+def parse_iso8601(value):
+    if not value:
+        return None
+    try:
+        text = str(value)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        ts = datetime.fromisoformat(text)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def safe_float(value):
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def load_jsonl(path):
+    if not os.path.exists(path):
+        return []
+
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                rows.append(json.loads(text))
+            except Exception:
+                continue
+    return rows
+
+
+def rotated_snapshot_path(base_path, dt):
+    root, ext = os.path.splitext(base_path)
+    return f"{root}_{dt.strftime('%Y%m%d')}{ext or '.jsonl'}"
+
+
+def daterange(start_date, end_date):
+    current = start_date
+    while current <= end_date:
+        yield current
+        current += timedelta(days=1)
+
+
+def snapshot_source_files(base_path, since_dt, until_dt, rotate_daily=True):
+    if rotate_daily:
+        files = []
+        for day in daterange(since_dt.date(), until_dt.date()):
+            path = rotated_snapshot_path(
+                base_path,
+                datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc),
+            )
+            if os.path.exists(path):
+                files.append(os.path.abspath(path))
+        if files:
+            return files
+
+    if os.path.exists(base_path):
+        return [os.path.abspath(base_path)]
+
+    return []
+
+
+def snapshot_timestamp(snapshot):
+    return parse_iso8601(snapshot.get("captured_at"))
+
+
+def decision_payload(snapshot):
+    payload = (snapshot.get("decision") or {}).get("payload")
+    return payload if isinstance(payload, dict) else {}
+
+
+def decision_summary(snapshot):
+    summary = (snapshot.get("decision") or {}).get("summary")
+    if isinstance(summary, dict) and summary:
+        return summary
+
+    payload = decision_payload(snapshot)
+    competition = payload.get("competition") or {}
+    market = payload.get("market") or {}
+    risk = payload.get("risk") or {}
+    return {
+        "status": payload.get("status"),
+        "decision": payload.get("decision"),
+        "reason": payload.get("reason"),
+        "source_age_minutes": payload.get("source_age_minutes"),
+        "source_stale_after_minutes": payload.get("source_stale_after_minutes"),
+        "asset_id": competition.get("asset_id"),
+        "kraken_pair": competition.get("kraken_pair"),
+        "last_price": market.get("last_price"),
+        "mid_price": market.get("mid_price"),
+        "spread_bps": market.get("spread_bps"),
+        "shadow_only": risk.get("shadow_only"),
+        "live_trading_enabled": risk.get("live_trading_enabled"),
+        "max_position_usd": risk.get("max_position_usd"),
+        "filter_failures": payload.get("filter_failures"),
+    }
+
+
+def snapshot_price(snapshot):
+    summary = decision_summary(snapshot)
+    return (
+        safe_float(summary.get("mid_price"))
+        or safe_float(summary.get("last_price"))
+    )
+
+
+def snapshot_is_fresh_ok(snapshot):
+    summary = decision_summary(snapshot)
+    if summary.get("status") != "ok":
+        return False, "status_not_ok"
+
+    age = safe_float(summary.get("source_age_minutes"))
+    stale_after = safe_float(summary.get("source_stale_after_minutes"))
+    if age is None or stale_after is None:
+        return False, "missing_source_freshness"
+    if age > stale_after:
+        return False, "source_snapshot_stale"
+
+    return True, None
+
+
+def competition_allows_entry(snapshot):
+    fresh, reason = snapshot_is_fresh_ok(snapshot)
+    if not fresh:
+        return False, reason
+
+    summary = decision_summary(snapshot)
+    if summary.get("shadow_only") is not True:
+        return False, "not_shadow_only"
+    if summary.get("decision") != "shadow_candidate":
+        return False, summary.get("reason") or "decision_not_shadow_candidate"
+
+    return True, None
+
+
+def simulated_buy_allows_entry(snapshot):
+    fresh, reason = snapshot_is_fresh_ok(snapshot)
+    if not fresh:
+        return False, reason
+    return True, None
+
+
+def entry_notional_usd(snapshot, fallback):
+    max_position = safe_float(decision_summary(snapshot).get("max_position_usd"))
+    if max_position is not None and max_position > 0:
+        return min(fallback, max_position)
+    return fallback
+
+
+def return_pct(entry_price, exit_price):
+    return ((exit_price - entry_price) / entry_price) * 100.0
+
+
+def net_pnl_usd(notional, gross_return_pct, fee_bps):
+    return notional * ((gross_return_pct / 100.0) - (fee_bps / 10000.0))
+
+
+def empty_strategy_summary(name):
+    return {
+        "strategy": name,
+        "snapshots": 0,
+        "entries": 0,
+        "closed_trades": 0,
+        "open_trades": 0,
+        "wins": 0,
+        "losses": 0,
+        "take_profit_count": 0,
+        "stop_loss_count": 0,
+        "timeout_count": 0,
+        "mark_to_market_count": 0,
+        "gross_pnl_usd": 0.0,
+        "net_pnl_usd": 0.0,
+        "avg_net_return_pct": None,
+        "win_rate": None,
+        "blocked_reasons": {},
+    }
+
+
+def close_trade(position, snapshot, exit_reason, fee_bps):
+    exited_at = snapshot.get("captured_at")
+    exit_price = snapshot_price(snapshot)
+    if exit_price is None:
+        return None
+
+    gross_return = return_pct(position["entry_price"], exit_price)
+    gross_pnl = position["notional_usd"] * (gross_return / 100.0)
+    net_pnl = net_pnl_usd(position["notional_usd"], gross_return, fee_bps)
+    net_return = (net_pnl / position["notional_usd"]) * 100.0
+
+    return {
+        "strategy": position["strategy"],
+        "entry_at": position["entry_at"],
+        "exit_at": exited_at,
+        "exit_reason": exit_reason,
+        "entry_price": round(position["entry_price"], 8),
+        "exit_price": round(exit_price, 8),
+        "notional_usd": round(position["notional_usd"], 8),
+        "gross_return_pct": round(gross_return, 6),
+        "net_return_pct": round(net_return, 6),
+        "gross_pnl_usd": round(gross_pnl, 8),
+        "net_pnl_usd": round(net_pnl, 8),
+        "entry_decision": position["entry_decision"],
+        "entry_reason": position["entry_reason"],
+    }
+
+
+def update_summary_for_trade(summary, trade):
+    summary["closed_trades"] += 1
+    summary["gross_pnl_usd"] += trade["gross_pnl_usd"]
+    summary["net_pnl_usd"] += trade["net_pnl_usd"]
+    if trade["net_pnl_usd"] >= 0:
+        summary["wins"] += 1
+    else:
+        summary["losses"] += 1
+
+    reason_key = f"{trade['exit_reason']}_count"
+    if reason_key in summary:
+        summary[reason_key] += 1
+
+
+def finalize_summary(summary, trades):
+    summary["gross_pnl_usd"] = round(summary["gross_pnl_usd"], 8)
+    summary["net_pnl_usd"] = round(summary["net_pnl_usd"], 8)
+    if summary["closed_trades"]:
+        summary["win_rate"] = round(summary["wins"] / summary["closed_trades"], 6)
+        avg = sum(trade["net_return_pct"] for trade in trades) / summary["closed_trades"]
+        summary["avg_net_return_pct"] = round(avg, 6)
+    summary["blocked_reasons"] = dict(Counter(summary["blocked_reasons"]).most_common())
+    return summary
+
+
+def replay_strategy(
+    name,
+    snapshots,
+    allow_entry,
+    *,
+    trade_usd,
+    take_profit_pct,
+    stop_loss_pct,
+    max_hold_minutes,
+    cooldown_minutes,
+    fee_bps,
+):
+    summary = empty_strategy_summary(name)
+    trades = []
+    position = None
+    cooldown_until = None
+    blocked_reasons = Counter()
+
+    for snapshot in snapshots:
+        captured_at = snapshot_timestamp(snapshot)
+        price = snapshot_price(snapshot)
+        if captured_at is None or price is None or price <= 0:
+            continue
+
+        summary["snapshots"] += 1
+
+        if position is not None:
+            held_minutes = (captured_at - position["entry_dt"]).total_seconds() / 60.0
+            gross_return = return_pct(position["entry_price"], price)
+            exit_reason = None
+            if gross_return >= take_profit_pct:
+                exit_reason = "take_profit"
+            elif gross_return <= -abs(stop_loss_pct):
+                exit_reason = "stop_loss"
+            elif held_minutes >= max_hold_minutes:
+                exit_reason = "timeout"
+
+            if exit_reason:
+                trade = close_trade(position, snapshot, exit_reason, fee_bps)
+                if trade:
+                    update_summary_for_trade(summary, trade)
+                    trades.append(trade)
+                    cooldown_until = captured_at + timedelta(minutes=cooldown_minutes)
+                position = None
+                continue
+
+        if position is not None:
+            continue
+        if cooldown_until is not None and captured_at < cooldown_until:
+            continue
+
+        allowed, reason = allow_entry(snapshot)
+        if not allowed:
+            blocked_reasons[reason or "blocked"] += 1
+            continue
+
+        summary_info = decision_summary(snapshot)
+        notional = entry_notional_usd(snapshot, trade_usd)
+        position = {
+            "strategy": name,
+            "entry_at": snapshot.get("captured_at"),
+            "entry_dt": captured_at,
+            "entry_price": price,
+            "notional_usd": notional,
+            "entry_decision": summary_info.get("decision"),
+            "entry_reason": summary_info.get("reason"),
+        }
+        summary["entries"] += 1
+
+    if position is not None:
+        trade = close_trade(position, snapshots[-1], "mark_to_market", fee_bps)
+        if trade:
+            update_summary_for_trade(summary, trade)
+            trades.append(trade)
+        summary["open_trades"] = 1
+
+    summary["blocked_reasons"] = blocked_reasons
+    return {
+        "summary": finalize_summary(summary, trades),
+        "trades": trades,
+    }
+
+
+def filter_snapshots(snapshots, since_dt, until_dt):
+    filtered = []
+    for snapshot in snapshots:
+        ts = snapshot_timestamp(snapshot)
+        if ts is None or ts < since_dt or ts > until_dt:
+            continue
+        filtered.append(snapshot)
+    return sorted(filtered, key=snapshot_timestamp)
+
+
+def load_snapshots(base_path, since_dt, until_dt, rotate_daily=True):
+    files = snapshot_source_files(base_path, since_dt, until_dt, rotate_daily=rotate_daily)
+    rows = []
+    for path in files:
+        rows.extend(load_jsonl(path))
+    return filter_snapshots(rows, since_dt, until_dt), files
+
+
+def build_backtest(args):
+    until_dt = now_utc()
+    since_dt = until_dt - timedelta(hours=args.window_hours)
+    rotate_daily = parse_bool(args.rotate_daily, default=True)
+    snapshots, source_files = load_snapshots(
+        args.snapshot_file,
+        since_dt,
+        until_dt,
+        rotate_daily=rotate_daily,
+    )
+
+    scenarios = {
+        "competition_allowed": replay_strategy(
+            "competition_allowed",
+            snapshots,
+            competition_allows_entry,
+            trade_usd=args.trade_usd,
+            take_profit_pct=args.take_profit_pct,
+            stop_loss_pct=args.stop_loss_pct,
+            max_hold_minutes=args.max_hold_minutes,
+            cooldown_minutes=args.cooldown_minutes,
+            fee_bps=args.fee_bps,
+        ),
+        "simulated_buy_allowed": replay_strategy(
+            "simulated_buy_allowed",
+            snapshots,
+            simulated_buy_allows_entry,
+            trade_usd=args.trade_usd,
+            take_profit_pct=args.take_profit_pct,
+            stop_loss_pct=args.stop_loss_pct,
+            max_hold_minutes=args.max_hold_minutes,
+            cooldown_minutes=args.cooldown_minutes,
+            fee_bps=args.fee_bps,
+        ),
+    }
+
+    recent_limit = max(args.recent_limit, 0)
+    for result in scenarios.values():
+        result["recent_trades"] = result["trades"][-recent_limit:] if recent_limit else []
+        del result["trades"]
+
+    return {
+        "timestamp": until_dt.isoformat(),
+        "since": since_dt.isoformat(),
+        "window_hours": args.window_hours,
+        "snapshot_file_base": os.path.abspath(args.snapshot_file),
+        "source_files": source_files,
+        "snapshot_count": len(snapshots),
+        "simulation": {
+            "trade_usd": args.trade_usd,
+            "take_profit_pct": args.take_profit_pct,
+            "stop_loss_pct": args.stop_loss_pct,
+            "max_hold_minutes": args.max_hold_minutes,
+            "cooldown_minutes": args.cooldown_minutes,
+            "fee_bps": args.fee_bps,
+            "fill_model": "one_position_at_a_time_mid_or_last_price",
+        },
+        "strategies": scenarios,
+    }
+
+
+def write_json(path, payload):
+    output_dir = os.path.dirname(path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+
+
+def main():
+    args = parse_cli_args()
+    runtime = runtime_from_args(args)
+    payload = build_backtest(runtime)
+    write_json(runtime.output_file, payload)
+    print(json.dumps({
+        "output_file": os.path.abspath(runtime.output_file),
+        "snapshot_count": payload["snapshot_count"],
+        "competition_allowed": payload["strategies"]["competition_allowed"]["summary"],
+        "simulated_buy_allowed": payload["strategies"]["simulated_buy_allowed"]["summary"],
+    }, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
