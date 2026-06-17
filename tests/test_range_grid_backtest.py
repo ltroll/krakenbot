@@ -320,6 +320,40 @@ class RangeGridBacktestTests(unittest.TestCase):
             "median",
         )
 
+    def test_hold_summary_reports_active_strategy_modes(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                100.0,
+                action_recommendation="risk_off",
+                strategy_modes=["low", "median", "high"],
+                strategy_overrides={
+                    "operating_mode": "range_only",
+                    "dynamic_anchor_mode": True,
+                    "dynamic_anchor_high_band_min": 0.75,
+                    "dynamic_anchor_low_band_max": 0.35,
+                    "dynamic_anchor_midpoint_split": 0.5,
+                    "dynamic_anchor_mid_mode": "median",
+                },
+            )
+        ]
+        snapshots[0]["signal"]["payload"]["price_regime"]["range_position_24h"] = 0.5
+        snapshots[0]["signal"]["payload"]["action_policy"] = {
+            "reason": "Bearish sentiment is strong enough to block new long entries or require a stricter price discount.",
+            "risk_off_blocks_longs": True,
+        }
+
+        result = backtest.replay_from_snapshots(snapshots)
+
+        self.assertEqual(
+            result["summary"]["hold_active_strategy_mode_counts"].get("median"),
+            1,
+        )
+        self.assertEqual(
+            result["recent_replay_events"][0]["active_strategy_modes"],
+            ["median"],
+        )
+
     def test_watch_only_still_blocks_llm_permissions(self):
         permissions = backtest.sentiment_buy_permissions("watch_only")
         self.assertFalse(permissions["llm_buys_allowed"])

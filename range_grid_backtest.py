@@ -1008,6 +1008,7 @@ def empty_replay_summary():
         "hold_action_recommendation_counts": {},
         "hold_action_policy_reason_counts": {},
         "hold_signal_status_counts": {},
+        "hold_active_strategy_mode_counts": {},
         "blocked_reason_counts": {},
         "candidate_counts_by_source": {},
         "candidate_counts_by_strategy_mode": {},
@@ -1025,6 +1026,7 @@ def replay_from_snapshots(snapshots):
     hold_action_recommendation_counts = Counter()
     hold_action_policy_reason_counts = Counter()
     hold_signal_status_counts = Counter()
+    hold_active_strategy_mode_counts = Counter()
     blocked_reason_counts = Counter()
     candidate_counts_by_source = Counter()
     candidate_counts_by_strategy_mode = Counter()
@@ -1055,6 +1057,12 @@ def replay_from_snapshots(snapshots):
             hold_action_recommendation_counts[action_recommendation] += 1
             signal_status = signal.get("signal_status") or "unknown"
             hold_signal_status_counts[signal_status] += 1
+            active_strategy_modes = built.get("strategy_modes") or []
+            if active_strategy_modes:
+                for strategy_mode in active_strategy_modes:
+                    hold_active_strategy_mode_counts[strategy_mode] += 1
+            else:
+                hold_active_strategy_mode_counts["none"] += 1
             action_policy = signal.get("action_policy")
             if isinstance(action_policy, dict):
                 action_policy_reason = action_policy.get("reason")
@@ -1068,7 +1076,7 @@ def replay_from_snapshots(snapshots):
                 "action_recommendation": action_recommendation,
                 "action_policy_reason": action_policy_reason,
                 "signal_status": signal_status,
-                "active_strategy_modes": built.get("strategy_modes") or [],
+                "active_strategy_modes": active_strategy_modes,
                 "hold_reason": built["hold_reason"],
                 "raw_candidate_count": len(built["raw_candidates"]),
             })
@@ -1119,6 +1127,9 @@ def replay_from_snapshots(snapshots):
     )
     summary["hold_signal_status_counts"] = dict(
         hold_signal_status_counts.most_common()
+    )
+    summary["hold_active_strategy_mode_counts"] = dict(
+        hold_active_strategy_mode_counts.most_common()
     )
     summary["blocked_reason_counts"] = dict(blocked_reason_counts.most_common())
     summary["candidate_counts_by_source"] = dict(candidate_counts_by_source.most_common())
