@@ -4,7 +4,7 @@
   Normal operations. Uses `range_plus_llm` and keeps backlog guardrails enabled.
 
 - `range_grid_strategy_recovery_range_only.json`
-  Recovery mode for long-held underwater sells. Uses `range_only`, `sentiment_control_mode=risk_modulated`, disables backlog buy blocking, allows range buys to continue through liquidity/confidence-only sentiment blocks, and enables dynamic anchor selection so the active range mode can shift with range position during testing.
+  Recovery mode for long-held underwater sells. Uses `range_only`, `sentiment_control_mode=risk_modulated`, disables backlog buy blocking, allows range buys to continue through liquidity/confidence-only sentiment blocks, and enables dynamic anchor selection across `low,median,high` so the active range mode can shift with range position during testing.
 
 Sentiment control modes:
 

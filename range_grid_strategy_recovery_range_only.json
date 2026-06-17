@@ -1,6 +1,6 @@
 {
   "range_window_hours": 24,
-  "grid_anchor": "low,high",
+  "grid_anchor": "low,median,high",
   "operating_mode": "range_only",
   "sentiment_control_mode": "risk_modulated",
   "allow_range_buy_on_confidence_block": true,
