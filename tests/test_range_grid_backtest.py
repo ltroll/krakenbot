@@ -314,6 +314,35 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertFalse(permissions["range_buys_allowed"])
         self.assertFalse(permissions["any_buys_allowed"])
 
+    def test_risk_modulated_block_allows_core_range_but_not_high_or_llm(self):
+        permissions = backtest.sentiment_buy_permissions(
+            "blocked",
+            {
+                "reason": "BTC bullish utility is disabled by recent backtest calibration.",
+            },
+            operating_mode="range_plus_llm",
+            sentiment_control_mode="risk_modulated",
+        )
+        self.assertFalse(permissions["llm_buys_allowed"])
+        self.assertTrue(permissions["range_core_buys_allowed"])
+        self.assertFalse(permissions["range_high_buys_allowed"])
+        self.assertTrue(permissions["range_buys_allowed"])
+
+    def test_risk_modulated_risk_off_still_blocks_all_range_buys(self):
+        permissions = backtest.sentiment_buy_permissions(
+            "risk_off",
+            {
+                "reason": "Bearish sentiment is strong enough to block new long entries or require a stricter price discount.",
+                "risk_off_blocks_longs": True,
+            },
+            operating_mode="range_plus_llm",
+            sentiment_control_mode="risk_modulated",
+        )
+        self.assertFalse(permissions["llm_buys_allowed"])
+        self.assertFalse(permissions["range_core_buys_allowed"])
+        self.assertFalse(permissions["range_high_buys_allowed"])
+        self.assertFalse(permissions["range_buys_allowed"])
+
     def test_replay_allows_range_only_override_on_confidence_liquidity_block(self):
         snapshots = [
             make_snapshot(
@@ -337,6 +366,50 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertGreaterEqual(result["summary"]["raw_candidates"], 1)
         self.assertGreaterEqual(result["summary"]["approved_candidates"], 1)
         self.assertEqual(result["summary"]["hold_snapshots"], 0)
+
+    def test_replay_risk_modulated_allows_low_range_during_blocked_calibration(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                94.0,
+                action_recommendation="blocked",
+                strategy_modes=["low"],
+                strategy_overrides={
+                    "operating_mode": "range_plus_llm",
+                    "sentiment_control_mode": "risk_modulated",
+                },
+            )
+        ]
+        snapshots[0]["signal"]["payload"]["action_policy"] = {
+            "reason": "BTC bullish utility is disabled by recent backtest calibration."
+        }
+
+        result = backtest.replay_from_snapshots(snapshots)
+
+        self.assertGreaterEqual(result["summary"]["raw_candidates"], 1)
+        self.assertGreaterEqual(result["summary"]["approved_candidates"], 1)
+
+    def test_replay_risk_modulated_blocks_high_range_during_blocked_calibration(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                104.5,
+                action_recommendation="blocked",
+                strategy_modes=["high"],
+                strategy_overrides={
+                    "operating_mode": "range_plus_llm",
+                    "sentiment_control_mode": "risk_modulated",
+                },
+            )
+        ]
+        snapshots[0]["signal"]["payload"]["action_policy"] = {
+            "reason": "BTC bullish utility is disabled by recent backtest calibration."
+        }
+
+        result = backtest.replay_from_snapshots(snapshots)
+
+        self.assertGreaterEqual(result["summary"]["raw_candidates"], 1)
+        self.assertEqual(result["summary"]["approved_candidates"], 0)
 
     def test_missed_opportunities_reports_approved_but_not_placed(self):
         replay = {

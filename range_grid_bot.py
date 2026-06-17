@@ -1717,29 +1717,83 @@ def is_liquidity_confidence_block(action_recommendation, action_policy):
     return action_policy.get("max_liquidity_risk") is not None and "confidence" in reason
 
 
+def normalize_sentiment_control_mode(raw_value, operating_mode=None):
+    normalized = str(raw_value or "").strip().lower()
+    if normalized in ("strict_sentiment", "risk_modulated", "price_first"):
+        return normalized
+    return "strict_sentiment"
+
+
+def is_risk_off_block(action_recommendation, action_policy):
+    normalized = (action_recommendation or "neutral").strip().lower()
+    if normalized == "risk_off":
+        return True
+    if not isinstance(action_policy, dict):
+        return False
+
+    reason = str(action_policy.get("reason") or "").lower()
+    if "block new long entries" in reason:
+        return True
+    if (
+        action_policy.get("risk_off_blocks_longs")
+        and normalized in ("blocked", "risk_off")
+        and "bearish sentiment" in reason
+    ):
+        return True
+    return False
+
+
 def sentiment_buy_permissions(
     action_recommendation,
     action_policy=None,
     *,
     operating_mode=None,
-    allow_range_buy_on_confidence_block=False
+    allow_range_buy_on_confidence_block=False,
+    sentiment_control_mode=None
 ):
     normalized = (action_recommendation or "neutral").strip().lower()
+    sentiment_control_mode = normalize_sentiment_control_mode(
+        sentiment_control_mode,
+        operating_mode
+    )
     llm_buys_allowed = normalized == "bullish_allowed"
-    range_buys_allowed = normalized in (
+    range_core_buys_allowed = normalized in (
         "bullish_allowed",
         "neutral",
         "watch_only"
     )
+    range_high_buys_allowed = range_core_buys_allowed
     if (
-        not range_buys_allowed
+        not range_core_buys_allowed
         and allow_range_buy_on_confidence_block
         and operating_mode == "range_only"
         and is_liquidity_confidence_block(action_recommendation, action_policy)
     ):
-        range_buys_allowed = True
+        range_core_buys_allowed = True
+        range_high_buys_allowed = True
+    elif (
+        normalized == "blocked"
+        and sentiment_control_mode == "risk_modulated"
+        and not is_risk_off_block(action_recommendation, action_policy)
+    ):
+        range_core_buys_allowed = True
+        range_high_buys_allowed = False
+    elif (
+        normalized == "blocked"
+        and sentiment_control_mode == "price_first"
+    ):
+        range_core_buys_allowed = not is_risk_off_block(
+            action_recommendation,
+            action_policy
+        )
+        range_high_buys_allowed = range_core_buys_allowed
+    range_buys_allowed = (
+        range_core_buys_allowed or range_high_buys_allowed
+    )
     return {
         "llm_buys_allowed": llm_buys_allowed,
+        "range_core_buys_allowed": range_core_buys_allowed,
+        "range_high_buys_allowed": range_high_buys_allowed,
         "range_buys_allowed": range_buys_allowed,
         "any_buys_allowed": llm_buys_allowed or range_buys_allowed
     }
@@ -2460,15 +2514,26 @@ def main():
                 "allow_range_buy_on_confidence_block",
                 False
             )
+            sentiment_control_mode = normalize_sentiment_control_mode(
+                profile_str("sentiment_control_mode", None),
+                operating_mode
+            )
             buy_permissions = sentiment_buy_permissions(
                 action_recommendation,
                 action_policy,
                 operating_mode=operating_mode,
                 allow_range_buy_on_confidence_block=(
                     allow_range_buy_on_confidence_block
-                )
+                ),
+                sentiment_control_mode=sentiment_control_mode
             )
             llm_buys_allowed = buy_permissions["llm_buys_allowed"]
+            range_core_buys_allowed = buy_permissions[
+                "range_core_buys_allowed"
+            ]
+            range_high_buys_allowed = buy_permissions[
+                "range_high_buys_allowed"
+            ]
             range_buys_allowed = buy_permissions["range_buys_allowed"]
             base_any_buys_allowed = buy_permissions["any_buys_allowed"]
             range_modes_enabled = any(
@@ -3390,8 +3455,15 @@ def main():
                     ):
                         skip_reason = "sentiment_action_not_bullish_allowed"
                     elif (
+                        buy_source == "range_high_band"
+                        and not range_high_buys_allowed
+                    ):
+                        skip_reason = (
+                            "sentiment_action_not_high_range_permitted"
+                        )
+                    elif (
                         buy_source != "llm_target"
-                        and not range_buys_allowed
+                        and not range_core_buys_allowed
                     ):
                         skip_reason = (
                             "sentiment_action_not_range_permitted"
@@ -3467,8 +3539,11 @@ def main():
                             range_signal_gates_allow=range_signal_gates_allow,
                             range_fallback_active=range_fallback_active,
                             llm_buys_allowed=llm_buys_allowed,
+                            range_core_buys_allowed=range_core_buys_allowed,
+                            range_high_buys_allowed=range_high_buys_allowed,
                             range_buys_allowed=range_buys_allowed,
                             operating_mode=operating_mode,
+                            sentiment_control_mode=sentiment_control_mode,
                             runtime_block_reason=runtime_block_reason,
                             buy_source=buy_source,
                             bucket_name=bucket_name,
@@ -3688,8 +3763,11 @@ def main():
                     freshness_block_reason=freshness_block_reason,
                     signal_allows_trading=any_buys_allowed,
                     llm_buys_allowed=llm_buys_allowed,
+                    range_core_buys_allowed=range_core_buys_allowed,
+                    range_high_buys_allowed=range_high_buys_allowed,
                     range_buys_allowed=range_buys_allowed,
                     range_fallback_active=range_fallback_active,
+                    sentiment_control_mode=sentiment_control_mode,
                     source_guard_allows_trading=source_guard_allows_trading,
                     runtime_block_reason=runtime_block_reason,
                     realized_pnl_today=round(realized_pnl_today, 8),
@@ -3768,8 +3846,11 @@ def main():
                 freshness_block_reason=freshness_block_reason,
                 signal_allows_trading=any_buys_allowed,
                 llm_buys_allowed=llm_buys_allowed,
+                range_core_buys_allowed=range_core_buys_allowed,
+                range_high_buys_allowed=range_high_buys_allowed,
                 range_buys_allowed=range_buys_allowed,
                 range_fallback_active=range_fallback_active,
+                sentiment_control_mode=sentiment_control_mode,
                 source_guard_allows_trading=source_guard_allows_trading,
                 runtime_block_reason=runtime_block_reason,
                 realized_pnl_today=round(realized_pnl_today, 8),
@@ -3878,6 +3959,7 @@ def main():
             write_status_snapshot({
                 "timestamp": cycle_id,
                 "operating_mode": operating_mode,
+                "sentiment_control_mode": sentiment_control_mode,
                 "strategy_profile": STRATEGY_PROFILE,
                 "grid_anchor": grid_anchor,
                 "configured_strategy_modes": configured_strategy_modes,

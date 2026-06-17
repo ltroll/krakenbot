@@ -4,7 +4,18 @@
   Normal operations. Uses `range_plus_llm` and keeps backlog guardrails enabled.
 
 - `range_grid_strategy_recovery_range_only.json`
-  Recovery mode for long-held underwater sells. Uses `range_only`, disables backlog buy blocking, and allows range buys to continue through liquidity/confidence-only sentiment blocks so the bot can keep working the range during testing.
+  Recovery mode for long-held underwater sells. Uses `range_only`, `sentiment_control_mode=risk_modulated`, disables backlog buy blocking, allows range buys to continue through liquidity/confidence-only sentiment blocks, and enables dynamic anchor selection so the active range mode can shift with range position during testing.
+
+Sentiment control modes:
+
+- `strict_sentiment`
+  Existing conservative behavior. `llm_target` needs `bullish_allowed`, and ordinary range buys only proceed on permissive sentiment recommendations.
+
+- `risk_modulated`
+  Production-oriented compromise. `llm_target` stays strict, lower/mid range buys can continue during ordinary `blocked` states, and upper-range/high-anchor buys remain sentiment-sensitive. `risk_off` still blocks new longs.
+
+- `price_first`
+  Future-facing option for tests. Treats sentiment mostly as a hard-stop/risk-off layer rather than a general range-entry gate.
 
 - `range_grid_strategy_sell_only.json`
   Inventory-management mode. No new buys, but existing sells remain active and managed.
