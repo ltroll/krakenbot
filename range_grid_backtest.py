@@ -745,12 +745,12 @@ def build_candidates(snapshot, price):
         "any_buys_allowed": any_buys_allowed,
         "range_fallback_active": range_fallback_active,
         "action_recommendation": action_recommendation,
+        "strategy_modes": strategy_modes,
         "sentiment_control_mode": sentiment_control_mode,
         "low": low,
         "high": high,
         "mean": mean,
         "median": median,
-        "strategy_modes": strategy_modes,
         "llm_target": llm_target,
         "llm_buy_allowed": False,
         "raw_candidates": [],
@@ -815,7 +815,8 @@ def build_candidates(snapshot, price):
         candidate_levels = [{
             "level": llm_target["buy_price"],
             "sell_pct_override": llm_target["sell_pct"],
-            "buy_source": "llm_target"
+            "buy_source": "llm_target",
+            "strategy_mode": "llm_target",
         }]
     else:
         for strategy_mode in strategy_modes:
@@ -842,7 +843,8 @@ def build_candidates(snapshot, price):
                 candidate_levels.append({
                     "level": level,
                     "sell_pct_override": sell_pct_override,
-                    "buy_source": buy_source
+                    "buy_source": buy_source,
+                    "strategy_mode": strategy_mode,
                 })
 
     deduped_candidates = []
@@ -1008,7 +1010,9 @@ def empty_replay_summary():
         "hold_signal_status_counts": {},
         "blocked_reason_counts": {},
         "candidate_counts_by_source": {},
+        "candidate_counts_by_strategy_mode": {},
         "approved_counts_by_source": {},
+        "approved_counts_by_strategy_mode": {},
     }
 
 
@@ -1023,7 +1027,9 @@ def replay_from_snapshots(snapshots):
     hold_signal_status_counts = Counter()
     blocked_reason_counts = Counter()
     candidate_counts_by_source = Counter()
+    candidate_counts_by_strategy_mode = Counter()
     approved_counts_by_source = Counter()
+    approved_counts_by_strategy_mode = Counter()
 
     for snapshot in snapshots:
         summary["snapshots"] += 1
@@ -1062,6 +1068,7 @@ def replay_from_snapshots(snapshots):
                 "action_recommendation": action_recommendation,
                 "action_policy_reason": action_policy_reason,
                 "signal_status": signal_status,
+                "active_strategy_modes": built.get("strategy_modes") or [],
                 "hold_reason": built["hold_reason"],
                 "raw_candidate_count": len(built["raw_candidates"]),
             })
@@ -1070,14 +1077,18 @@ def replay_from_snapshots(snapshots):
         for candidate in built["raw_candidates"]:
             summary["raw_candidates"] += 1
             candidate_counts_by_source[candidate["buy_source"]] += 1
+            candidate_counts_by_strategy_mode[candidate["strategy_mode"]] += 1
             approved, reason = evaluate_candidate(snapshot, candidate, price)
             if approved:
                 summary["approved_candidates"] += 1
                 approved_counts_by_source[candidate["buy_source"]] += 1
+                approved_counts_by_strategy_mode[candidate["strategy_mode"]] += 1
                 approved_event = {
                     "captured_at": snapshot.get("captured_at"),
                     "price": price,
+                    "active_strategy_modes": built.get("strategy_modes") or [],
                     "buy_source": candidate["buy_source"],
+                    "strategy_mode": candidate["strategy_mode"],
                     "level": round(candidate["level"], 2),
                     "sell_pct_override": candidate.get("sell_pct_override"),
                     "status": "approved_gate_only",
@@ -1091,7 +1102,9 @@ def replay_from_snapshots(snapshots):
                 recent.append({
                     "captured_at": snapshot.get("captured_at"),
                     "price": price,
+                    "active_strategy_modes": built.get("strategy_modes") or [],
                     "buy_source": candidate["buy_source"],
+                    "strategy_mode": candidate["strategy_mode"],
                     "level": round(candidate["level"], 2),
                     "status": "blocked_gate_only",
                     "reason": reason,
@@ -1109,7 +1122,13 @@ def replay_from_snapshots(snapshots):
     )
     summary["blocked_reason_counts"] = dict(blocked_reason_counts.most_common())
     summary["candidate_counts_by_source"] = dict(candidate_counts_by_source.most_common())
+    summary["candidate_counts_by_strategy_mode"] = dict(
+        candidate_counts_by_strategy_mode.most_common()
+    )
     summary["approved_counts_by_source"] = dict(approved_counts_by_source.most_common())
+    summary["approved_counts_by_strategy_mode"] = dict(
+        approved_counts_by_strategy_mode.most_common()
+    )
 
     return {
         "summary": summary,

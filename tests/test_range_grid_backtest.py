@@ -282,6 +282,44 @@ class RangeGridBacktestTests(unittest.TestCase):
             result["summary"]["candidate_counts_by_source"].get("range_high_band")
         )
 
+    def test_dynamic_anchor_mid_range_reports_median_strategy_mode(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                99.0,
+                action_recommendation="watch_only",
+                strategy_modes=["low", "median", "high"],
+                strategy_overrides={
+                    "operating_mode": "range_only",
+                    "dynamic_anchor_mode": True,
+                    "dynamic_anchor_high_band_min": 0.75,
+                    "dynamic_anchor_low_band_max": 0.35,
+                    "dynamic_anchor_midpoint_split": 0.5,
+                    "dynamic_anchor_mid_mode": "median",
+                },
+            )
+        ]
+        snapshots[0]["signal"]["payload"]["price_regime"]["range_position_24h"] = 0.5
+
+        result = backtest.replay_from_snapshots(snapshots)
+
+        self.assertEqual(
+            result["summary"]["candidate_counts_by_source"].get("range_median"),
+            2,
+        )
+        self.assertEqual(
+            result["summary"]["candidate_counts_by_strategy_mode"].get("median"),
+            2,
+        )
+        self.assertEqual(
+            result["recent_replay_events"][0]["active_strategy_modes"],
+            ["median"],
+        )
+        self.assertEqual(
+            result["recent_replay_events"][0]["strategy_mode"],
+            "median",
+        )
+
     def test_watch_only_still_blocks_llm_permissions(self):
         permissions = backtest.sentiment_buy_permissions("watch_only")
         self.assertFalse(permissions["llm_buys_allowed"])
