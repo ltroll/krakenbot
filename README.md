@@ -18,6 +18,7 @@ Core bot files:
 - [`range_grid_bot_average.py`](/C:/Users/bgert/krakenbot/range_grid_bot_average.py): test/alternate range-grid variant.
 - [`kraken_sentiment_executor.py`](/C:/Users/bgert/krakenbot/kraken_sentiment_executor.py): allocation-style sentiment trader.
 - [`stats_trend_bot.py`](/C:/Users/bgert/krakenbot/stats_trend_bot.py): stats/trend trader that derives entries from price history instead of sentiment.
+- [`competition_shadow_bot.py`](/C:/Users/bgert/krakenbot/competition_shadow_bot.py): shadow-only NEO competition decision monitor.
 - [`kraken_bot.py`](/C:/Users/bgert/krakenbot/kraken_bot.py): older/general Kraken bot logic.
 - [`account_value_usd.py`](/C:/Users/bgert/krakenbot/account_value_usd.py): account value helper.
 
@@ -109,6 +110,11 @@ STATS_TREND_BACKTEST_STEP_PATH=/admin/api/backtest/step
 STATS_TREND_BACKTEST_STEPS_PER_CYCLE=1
 STATS_TREND_BACKTEST_USE_API_MARKET_DATA=true
 STATS_TREND_MARKET_HISTORY_SOURCE=price_log
+COMPETITION_DECISION_URL=http://192.168.50.211/bot/competition_decision.json
+COMPETITION_CONFIG_FILE=competition_bot_config.json
+COMPETITION_TRADE_LOG_FILE=competition_shadow_trade_log.jsonl
+COMPETITION_DECISION_CSV_FILE=competition_shadow_decisions.csv
+COMPETITION_POLL_INTERVAL_SECONDS=60
 KRAKEN_PAIR=XXBTZUSD
 SIGNAL_FILE=
 REQUEST_TIMEOUT_SECONDS=10
@@ -160,6 +166,28 @@ The sentiment file is expected to look like this:
 ```
 
 For the active range-grid bot, only `execution_signal` is currently used directly.
+
+### Competition decision
+
+The NEO competition lane reads the bot-facing guardrail file from `COMPETITION_DECISION_URL`, defaulting to:
+
+```text
+http://192.168.50.211/bot/competition_decision.json
+```
+
+Run one shadow check:
+
+```bash
+./venv/bin/python competition_shadow_bot.py --once
+```
+
+Run continuously:
+
+```bash
+./venv/bin/python competition_shadow_bot.py
+```
+
+The script only records decisions. When the file says `risk.shadow_only` is true, `decision == "shadow_candidate"` is logged as `record_tradeable_shadow_candidate`; blocked decisions are logged with their reason. If `status != "ok"`, the source is stale, or the file is not explicitly shadow-only, it logs `do_nothing`.
 
 ## How `range_grid_bot.py` works
 

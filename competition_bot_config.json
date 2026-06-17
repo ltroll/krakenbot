@@ -1,0 +1,8 @@
+{
+  "decision_url": "http://192.168.50.211/bot/competition_decision.json",
+  "log_file": "competition_shadow_trade_log.jsonl",
+  "decision_csv_file": "competition_shadow_decisions.csv",
+  "poll_interval_seconds": 60,
+  "request_timeout_seconds": 10,
+  "write_decision_csv": true
+}
