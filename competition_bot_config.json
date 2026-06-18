@@ -17,6 +17,9 @@
   "backtest_maker_fee_bps": 20,
   "backtest_maker_order_timeout_minutes": 5,
   "backtest_maker_cancel_on_signal_block": true,
+  "backtest_min_aggression_score": 0.15,
+  "backtest_min_trade_count": 5,
+  "backtest_min_total_notional_usd": 1000,
   "backtest_cooldown_minutes": 5,
   "backtest_require_signal_reset": true
 }

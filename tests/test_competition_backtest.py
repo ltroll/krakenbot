@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from competition_backtest import (
     competition_allows_entry,
+    competition_directional_allows_entry,
     replay_strategy,
     simulated_buy_allows_entry,
 )
@@ -14,6 +15,9 @@ def make_snapshot(
     decision="shadow_candidate",
     status="ok",
     spread_bps=20,
+    aggression_score=0.2,
+    trade_count=20,
+    total_notional_usd=5000,
 ):
     captured_at = datetime(2026, 6, 17, 14, 0, tzinfo=timezone.utc) + timedelta(
         minutes=minutes
@@ -36,6 +40,9 @@ def make_snapshot(
                 "market": {
                     "mid_price": price,
                     "last_price": price,
+                    "aggression_score": aggression_score,
+                    "trade_count": trade_count,
+                    "total_notional_usd": total_notional_usd,
                 },
                 "risk": {
                     "shadow_only": True,
@@ -53,6 +60,9 @@ def make_snapshot(
                 "mid_price": price,
                 "last_price": price,
                 "spread_bps": spread_bps,
+                "aggression_score": aggression_score,
+                "trade_count": trade_count,
+                "total_notional_usd": total_notional_usd,
                 "shadow_only": True,
                 "max_position_usd": 25.0,
             },
@@ -79,6 +89,40 @@ class CompetitionBacktestTests(unittest.TestCase):
         self.assertTrue(allowed)
         self.assertIsNone(reason)
 
+    def test_directional_entry_requires_market_pressure_thresholds(self):
+        thresholds = {
+            "min_aggression_score": 0.15,
+            "min_trade_count": 5,
+            "min_total_notional_usd": 1000,
+        }
+        allowed, reason = competition_directional_allows_entry(
+            make_snapshot(0, 2.0),
+            **thresholds,
+        )
+        self.assertTrue(allowed)
+        self.assertIsNone(reason)
+
+        allowed, reason = competition_directional_allows_entry(
+            make_snapshot(0, 2.0, aggression_score=0.1),
+            **thresholds,
+        )
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "directional_aggression_below_min")
+
+        allowed, reason = competition_directional_allows_entry(
+            make_snapshot(0, 2.0, trade_count=4),
+            **thresholds,
+        )
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "directional_trade_count_below_min")
+
+        allowed, reason = competition_directional_allows_entry(
+            make_snapshot(0, 2.0, total_notional_usd=999),
+            **thresholds,
+        )
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "directional_notional_below_min")
+
     def test_replay_strategy_closes_take_profit(self):
         snapshots = [
             make_snapshot(0, 2.00),
@@ -102,6 +146,10 @@ class CompetitionBacktestTests(unittest.TestCase):
         self.assertEqual(summary["closed_trades"], 1)
         self.assertEqual(summary["take_profit_count"], 1)
         self.assertGreater(summary["net_pnl_usd"], 0)
+        trade = result["trades"][0]
+        self.assertEqual(trade["entry_aggression_score"], 0.2)
+        self.assertEqual(trade["entry_trade_count"], 20.0)
+        self.assertEqual(trade["entry_total_notional_usd"], 5000.0)
 
     def test_replay_strategy_baseline_enters_when_competition_blocks(self):
         snapshots = [

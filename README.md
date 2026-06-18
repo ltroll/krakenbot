@@ -219,11 +219,16 @@ COMPETITION_BACKTEST_TAKER_FEE_BPS=40
 COMPETITION_BACKTEST_MAKER_FEE_BPS=20
 COMPETITION_BACKTEST_MAKER_ORDER_TIMEOUT_MINUTES=5
 COMPETITION_BACKTEST_MAKER_CANCEL_ON_SIGNAL_BLOCK=true
+COMPETITION_BACKTEST_MIN_AGGRESSION_SCORE=0.15
+COMPETITION_BACKTEST_MIN_TRADE_COUNT=5
+COMPETITION_BACKTEST_MIN_TOTAL_NOTIONAL_USD=1000
 COMPETITION_BACKTEST_COOLDOWN_MINUTES=5
 COMPETITION_BACKTEST_REQUIRE_SIGNAL_RESET=true
 ```
 
 `taker` buys at the inferred ask and sells at the inferred bid. `maker` places a post-only bid and requires a later snapshot's trade price to touch that limit before counting an entry. Unfilled bids expire after the configured timeout and pending bids are cancelled when the entry signal blocks. A filled maker position rests its take-profit at the target price; stop-loss, timeout, and final mark-to-market exits cross the spread as takers and use half maker plus half taker round-trip fees. `mid` retains the original mid/last-price behavior. With signal reset enabled, `competition_allowed` must observe a blocked snapshot after an exit before it can enter again; the continuous-buy baseline remains available for comparison. Reports separate realized closed-trade P&L from unrealized mark-to-market P&L.
+
+The report also includes `competition_directional`. This scenario requires the competition guardrails plus minimum aggression score, recent trade count, and recent trade notional. Each trade records its entry-time directional values so profitable and losing thresholds can be compared without changing the collector.
 
 ## How `range_grid_bot.py` works
 

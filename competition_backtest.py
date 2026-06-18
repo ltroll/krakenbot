@@ -110,6 +110,21 @@ def parse_cli_args():
         help="Cancel a pending maker entry when its entry signal becomes blocked.",
     )
     parser.add_argument(
+        "--min-aggression-score",
+        type=float,
+        help="Minimum directional aggression score required for entry.",
+    )
+    parser.add_argument(
+        "--min-trade-count",
+        type=int,
+        help="Minimum recent trade count required for directional entry.",
+    )
+    parser.add_argument(
+        "--min-total-notional-usd",
+        type=float,
+        help="Minimum recent trade notional required for directional entry.",
+    )
+    parser.add_argument(
         "--recent-limit",
         type=int,
         help="Number of recent simulated trades to include.",
@@ -246,6 +261,24 @@ def runtime_from_args(args):
             "backtest_maker_cancel_on_signal_block",
             True,
         )),
+        "min_aggression_score": float(value(
+            args.min_aggression_score,
+            "COMPETITION_BACKTEST_MIN_AGGRESSION_SCORE",
+            "backtest_min_aggression_score",
+            0.15,
+        )),
+        "min_trade_count": int(value(
+            args.min_trade_count,
+            "COMPETITION_BACKTEST_MIN_TRADE_COUNT",
+            "backtest_min_trade_count",
+            5,
+        )),
+        "min_total_notional_usd": float(value(
+            args.min_total_notional_usd,
+            "COMPETITION_BACKTEST_MIN_TOTAL_NOTIONAL_USD",
+            "backtest_min_total_notional_usd",
+            1000,
+        )),
         "recent_limit": int(value(
             args.recent_limit,
             "COMPETITION_BACKTEST_RECENT_LIMIT",
@@ -361,6 +394,9 @@ def decision_summary(snapshot):
         "last_price": market.get("last_price"),
         "mid_price": market.get("mid_price"),
         "spread_bps": market.get("spread_bps"),
+        "trade_count": market.get("trade_count"),
+        "total_notional_usd": market.get("total_notional_usd"),
+        "aggression_score": market.get("aggression_score"),
         "shadow_only": risk.get("shadow_only"),
         "live_trading_enabled": risk.get("live_trading_enabled"),
         "max_position_usd": risk.get("max_position_usd"),
@@ -425,6 +461,38 @@ def competition_allows_entry(snapshot):
         return False, "not_shadow_only"
     if summary.get("decision") != "shadow_candidate":
         return False, summary.get("reason") or "decision_not_shadow_candidate"
+
+    return True, None
+
+
+def competition_directional_allows_entry(
+    snapshot,
+    *,
+    min_aggression_score,
+    min_trade_count,
+    min_total_notional_usd,
+):
+    allowed, reason = competition_allows_entry(snapshot)
+    if not allowed:
+        return False, reason
+
+    summary = decision_summary(snapshot)
+    aggression_score = safe_float(summary.get("aggression_score"))
+    trade_count = safe_float(summary.get("trade_count"))
+    total_notional_usd = safe_float(summary.get("total_notional_usd"))
+
+    if aggression_score is None:
+        return False, "directional_aggression_missing"
+    if aggression_score < min_aggression_score:
+        return False, "directional_aggression_below_min"
+    if trade_count is None:
+        return False, "directional_trade_count_missing"
+    if trade_count < min_trade_count:
+        return False, "directional_trade_count_below_min"
+    if total_notional_usd is None:
+        return False, "directional_notional_missing"
+    if total_notional_usd < min_total_notional_usd:
+        return False, "directional_notional_below_min"
 
     return True, None
 
@@ -516,6 +584,9 @@ def close_trade(
         "net_pnl_usd": round(net_pnl, 8),
         "entry_decision": position["entry_decision"],
         "entry_reason": position["entry_reason"],
+        "entry_aggression_score": position.get("entry_aggression_score"),
+        "entry_trade_count": position.get("entry_trade_count"),
+        "entry_total_notional_usd": position.get("entry_total_notional_usd"),
         "entry_order_placed_at": position.get("entry_order_placed_at"),
         "fee_bps": round(fee_bps, 6),
         "position_status": "open" if exit_reason == "mark_to_market" else "closed",
@@ -713,6 +784,11 @@ def replay_strategy(
             "notional_usd": notional,
             "entry_decision": summary_info.get("decision"),
             "entry_reason": summary_info.get("reason"),
+            "entry_aggression_score": safe_float(summary_info.get("aggression_score")),
+            "entry_trade_count": safe_float(summary_info.get("trade_count")),
+            "entry_total_notional_usd": safe_float(
+                summary_info.get("total_notional_usd")
+            ),
         }
         if fill_model == "maker":
             pending_entry = {
@@ -793,11 +869,36 @@ def build_backtest(args):
         "maker": args.maker_fee_bps,
     }[args.fill_model]
 
+    def directional_allows_entry(snapshot):
+        return competition_directional_allows_entry(
+            snapshot,
+            min_aggression_score=args.min_aggression_score,
+            min_trade_count=args.min_trade_count,
+            min_total_notional_usd=args.min_total_notional_usd,
+        )
+
     scenarios = {
         "competition_allowed": replay_strategy(
             "competition_allowed",
             snapshots,
             competition_allows_entry,
+            trade_usd=args.trade_usd,
+            take_profit_pct=args.take_profit_pct,
+            stop_loss_pct=args.stop_loss_pct,
+            max_hold_minutes=args.max_hold_minutes,
+            cooldown_minutes=args.cooldown_minutes,
+            fee_bps=selected_fee_bps,
+            fill_model=args.fill_model,
+            require_signal_reset=args.require_signal_reset,
+            maker_order_timeout_minutes=args.maker_order_timeout_minutes,
+            maker_cancel_on_signal_block=args.maker_cancel_on_signal_block,
+            maker_fee_bps=args.maker_fee_bps,
+            taker_fee_bps=args.taker_fee_bps,
+        ),
+        "competition_directional": replay_strategy(
+            "competition_directional",
+            snapshots,
+            directional_allows_entry,
             trade_usd=args.trade_usd,
             take_profit_pct=args.take_profit_pct,
             stop_loss_pct=args.stop_loss_pct,
@@ -860,6 +961,9 @@ def build_backtest(args):
             "competition_require_signal_reset": args.require_signal_reset,
             "maker_order_timeout_minutes": args.maker_order_timeout_minutes,
             "maker_cancel_on_signal_block": args.maker_cancel_on_signal_block,
+            "directional_min_aggression_score": args.min_aggression_score,
+            "directional_min_trade_count": args.min_trade_count,
+            "directional_min_total_notional_usd": args.min_total_notional_usd,
         },
         "strategies": scenarios,
     }
@@ -882,6 +986,7 @@ def main():
         "output_file": os.path.abspath(runtime.output_file),
         "snapshot_count": payload["snapshot_count"],
         "competition_allowed": payload["strategies"]["competition_allowed"]["summary"],
+        "competition_directional": payload["strategies"]["competition_directional"]["summary"],
         "simulated_buy_allowed": payload["strategies"]["simulated_buy_allowed"]["summary"],
     }, sort_keys=True))
 
