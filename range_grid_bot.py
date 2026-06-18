@@ -153,6 +153,40 @@ def strategy_float(config, key, default):
         return float(default)
 
 
+def effective_entry_step_pct(base_entry_step_pct, volatility_pct, config):
+    base_step = numeric_or_default(base_entry_step_pct, 0.0)
+    if base_step <= 0:
+        return 0.0
+    if not strategy_bool(config, "volatility_adaptive_entry_step_enabled", False):
+        return base_step
+
+    volatility = numeric_or_default(volatility_pct, None)
+    if volatility is None or volatility <= 0:
+        return base_step
+
+    reference_pct = strategy_float(config, "volatility_reference_pct", 0.02)
+    if reference_pct <= 0:
+        reference_pct = 0.02
+    min_multiplier = strategy_float(
+        config,
+        "volatility_min_step_multiplier",
+        1.0
+    )
+    if min_multiplier <= 0:
+        min_multiplier = 1.0
+    max_multiplier = strategy_float(
+        config,
+        "volatility_max_step_multiplier",
+        max(min_multiplier, 2.0)
+    )
+    if max_multiplier < min_multiplier:
+        max_multiplier = min_multiplier
+
+    raw_multiplier = volatility / reference_pct
+    step_multiplier = max(min_multiplier, min(max_multiplier, raw_multiplier))
+    return base_step * step_multiplier
+
+
 def select_dynamic_strategy_modes(base_modes, operating_mode, range_position, strategy_config):
     active_modes = apply_operating_mode_to_strategy_modes(base_modes, operating_mode)
     if not active_modes:
@@ -1360,18 +1394,18 @@ def refresh_range():
 # GRID
 # ----------------------
 
-def compute_grid(low, high, mean):
+def compute_grid(anchor, step_pct, grid_size):
     return sorted(
         [
-            mean * (1 - (entry_step_pct * (i + 1)))
-            for i in range(max_grid_size)
+            anchor * (1 - (step_pct * (i + 1)))
+            for i in range(grid_size)
         ],
         reverse=True
     )
 
 
-def compute_high_anchor_grid(high, price):
-    lower_bound = high * (1 - entry_step_pct)
+def compute_high_anchor_grid(high, price, step_pct):
+    lower_bound = high * (1 - step_pct)
 
     if lower_bound <= price <= high:
         return [price]
@@ -2597,6 +2631,15 @@ def main():
                 base_any_buys_allowed = False
                 any_buys_allowed = False
             external_block_reason = sentiment_payload.get("action_reason")
+            price_regime_volatility_pct = numeric_or_default(
+                price_regime.get("realized_volatility_24h_pct"),
+                None
+            )
+            current_entry_step_pct = effective_entry_step_pct(
+                entry_step_pct,
+                price_regime_volatility_pct,
+                strategy_config
+            )
             regime = sentiment_regime(execution_signal)
             effective_position_size_pct = (
                 position_size_pct * regime["position_size_multiplier"]
@@ -3316,21 +3359,37 @@ def main():
                         if strategy_mode == "llm_target":
                             continue
                         if strategy_mode == "mean":
-                            grid = compute_grid(low, high, mean)
+                            grid = compute_grid(
+                                mean,
+                                current_entry_step_pct,
+                                max_grid_size
+                            )
                             sell_pct_override = None
                             buy_source = "range_mean"
                         elif strategy_mode == "median" and median is not None:
-                            grid = compute_grid(low, high, median)
+                            grid = compute_grid(
+                                median,
+                                current_entry_step_pct,
+                                max_grid_size
+                            )
                             sell_pct_override = None
                             buy_source = "range_median"
                         elif strategy_mode == "high":
                             if not regime["allow_high_anchor"]:
                                 continue
-                            grid = compute_high_anchor_grid(high, price)
+                            grid = compute_high_anchor_grid(
+                                high,
+                                price,
+                                current_entry_step_pct
+                            )
                             sell_pct_override = high_anchor_profit_target_pct
                             buy_source = "range_high_band"
                         else:
-                            grid = compute_grid(low, high, low)
+                            grid = compute_grid(
+                                low,
+                                current_entry_step_pct,
+                                max_grid_size
+                            )
                             sell_pct_override = None
                             buy_source = "range_low"
 
@@ -3588,6 +3647,7 @@ def main():
                             mean_reversion_opportunity=(
                                 mean_reversion_opportunity
                             ),
+                            effective_entry_step_pct=current_entry_step_pct,
                             last_sell_price=last_sell_price,
                             candidate_volume_btc=round(volume, VOLUME_DECIMALS),
                             candidate_sell_pct_override=active_sell_pct_override,
@@ -3635,6 +3695,7 @@ def main():
                             mean_reversion_opportunity=(
                                 mean_reversion_opportunity
                             ),
+                            effective_entry_step_pct=current_entry_step_pct,
                             buy_source=buy_source,
                             reason=skip_reason
                         )
@@ -3663,6 +3724,7 @@ def main():
                         flow_pressure=flow_pressure,
                         flow_control_reason=flow_control["reason"],
                         mean_reversion_opportunity=mean_reversion_opportunity,
+                        effective_entry_step_pct=current_entry_step_pct,
                         buy_source=buy_source,
                         bucket_name=bucket_name,
                         bucket_inventory_usd=round(bucket_inventory_usd, 8),
@@ -3786,6 +3848,7 @@ def main():
                     smoothed_risk_multiplier=smoothed_risk_multiplier,
                     flow_pressure=flow_pressure,
                     mean_reversion_opportunity=mean_reversion_opportunity,
+                    effective_entry_step_pct=current_entry_step_pct,
                     effective_position_size_pct=effective_position_size_pct,
                     range_low=low,
                     range_high=high,
@@ -3869,6 +3932,7 @@ def main():
                 smoothed_risk_multiplier=smoothed_risk_multiplier,
                 flow_pressure=flow_pressure,
                 mean_reversion_opportunity=mean_reversion_opportunity,
+                effective_entry_step_pct=current_entry_step_pct,
                 range_low=low,
                 range_high=high,
                 range_mean=mean,
@@ -3970,6 +4034,7 @@ def main():
                     False
                 ),
                 "price_regime_range_position": price_regime_range_position,
+                "effective_entry_step_pct": current_entry_step_pct,
                 "price": price,
                 "execution_signal": execution_signal,
                 "signal_status": signal_status,

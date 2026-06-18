@@ -306,6 +306,34 @@ def parse_strategy_modes(raw_value):
     return normalized_modes
 
 
+def effective_entry_step_pct(base_entry_step_pct, volatility_pct, config):
+    base_step = safe_float(base_entry_step_pct) or 0.0
+    if base_step <= 0:
+        return 0.0
+    if not str(config.get("volatility_adaptive_entry_step_enabled", False)).strip().lower() in (
+        "1", "true", "yes", "on"
+    ):
+        return base_step
+
+    volatility = safe_float(volatility_pct)
+    if volatility is None or volatility <= 0:
+        return base_step
+
+    reference_pct = safe_float(config.get("volatility_reference_pct"))
+    if reference_pct is None or reference_pct <= 0:
+        reference_pct = 0.02
+    min_multiplier = safe_float(config.get("volatility_min_step_multiplier"))
+    if min_multiplier is None or min_multiplier <= 0:
+        min_multiplier = 1.0
+    max_multiplier = safe_float(config.get("volatility_max_step_multiplier"))
+    if max_multiplier is None or max_multiplier < min_multiplier:
+        max_multiplier = max(min_multiplier, 2.0)
+
+    raw_multiplier = volatility / reference_pct
+    step_multiplier = max(min_multiplier, min(max_multiplier, raw_multiplier))
+    return base_step * step_multiplier
+
+
 def strategy_bool(config, key, default=False):
     value = config.get(key, default)
     if isinstance(value, bool):
@@ -733,6 +761,12 @@ def build_candidates(snapshot, price):
     mean_reversion_opportunity = safe_float(signal.get("mean_reversion_opportunity"))
     if mean_reversion_opportunity is None:
         mean_reversion_opportunity = 0.0
+    base_entry_step_pct = safe_float(config.get("entry_step_pct")) or 0.0
+    effective_step_pct = effective_entry_step_pct(
+        base_entry_step_pct,
+        safe_float(signal.get("price_regime", {}).get("realized_volatility_24h_pct")),
+        config,
+    )
 
     result = {
         "freshness_allows_trading": freshness_allows_trading,
@@ -746,6 +780,7 @@ def build_candidates(snapshot, price):
         "range_fallback_active": range_fallback_active,
         "action_recommendation": action_recommendation,
         "strategy_modes": strategy_modes,
+        "effective_entry_step_pct": effective_step_pct,
         "sentiment_control_mode": sentiment_control_mode,
         "low": low,
         "high": high,
@@ -796,7 +831,6 @@ def build_candidates(snapshot, price):
         )
         return result
 
-    entry_step_pct = safe_float(config.get("entry_step_pct")) or 0.0
     max_grid_size = int(config.get("max_grid_size", 4))
     sentiment_disable_high_anchor_below = safe_float(
         config.get("sentiment_disable_high_anchor_below")
@@ -821,21 +855,21 @@ def build_candidates(snapshot, price):
     else:
         for strategy_mode in strategy_modes:
             if strategy_mode == "mean" and mean is not None:
-                grid = compute_grid(mean, entry_step_pct, max_grid_size)
+                grid = compute_grid(mean, effective_step_pct, max_grid_size)
                 sell_pct_override = None
                 buy_source = "range_mean"
             elif strategy_mode == "median" and median is not None:
-                grid = compute_grid(median, entry_step_pct, max_grid_size)
+                grid = compute_grid(median, effective_step_pct, max_grid_size)
                 sell_pct_override = None
                 buy_source = "range_median"
             elif strategy_mode == "high":
                 if not allow_high_anchor:
                     continue
-                grid = compute_high_anchor_grid(high, price, entry_step_pct)
+                grid = compute_high_anchor_grid(high, price, effective_step_pct)
                 sell_pct_override = safe_float(config.get("high_anchor_profit_target_pct"))
                 buy_source = "range_high_band"
             else:
-                grid = compute_grid(low, entry_step_pct, max_grid_size)
+                grid = compute_grid(low, effective_step_pct, max_grid_size)
                 sell_pct_override = None
                 buy_source = "range_low"
 
@@ -1077,6 +1111,7 @@ def replay_from_snapshots(snapshots):
                 "action_policy_reason": action_policy_reason,
                 "signal_status": signal_status,
                 "active_strategy_modes": active_strategy_modes,
+                "effective_entry_step_pct": built.get("effective_entry_step_pct"),
                 "hold_reason": built["hold_reason"],
                 "raw_candidate_count": len(built["raw_candidates"]),
             })
@@ -1095,6 +1130,7 @@ def replay_from_snapshots(snapshots):
                     "captured_at": snapshot.get("captured_at"),
                     "price": price,
                     "active_strategy_modes": built.get("strategy_modes") or [],
+                    "effective_entry_step_pct": built.get("effective_entry_step_pct"),
                     "buy_source": candidate["buy_source"],
                     "strategy_mode": candidate["strategy_mode"],
                     "level": round(candidate["level"], 2),
@@ -1111,6 +1147,7 @@ def replay_from_snapshots(snapshots):
                     "captured_at": snapshot.get("captured_at"),
                     "price": price,
                     "active_strategy_modes": built.get("strategy_modes") or [],
+                    "effective_entry_step_pct": built.get("effective_entry_step_pct"),
                     "buy_source": candidate["buy_source"],
                     "strategy_mode": candidate["strategy_mode"],
                     "level": round(candidate["level"], 2),

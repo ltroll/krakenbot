@@ -358,6 +358,42 @@ class RangeGridBacktestTests(unittest.TestCase):
         permissions = backtest.sentiment_buy_permissions("watch_only")
         self.assertFalse(permissions["llm_buys_allowed"])
 
+    def test_effective_entry_step_pct_widens_with_volatility(self):
+        widened = backtest.effective_entry_step_pct(
+            0.01,
+            0.04,
+            {
+                "volatility_adaptive_entry_step_enabled": True,
+                "volatility_reference_pct": 0.02,
+                "volatility_min_step_multiplier": 1.0,
+                "volatility_max_step_multiplier": 2.0,
+            },
+        )
+        self.assertEqual(widened, 0.02)
+
+    def test_build_candidates_uses_wider_spacing_when_volatility_is_high(self):
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            95.0,
+            action_recommendation="watch_only",
+            strategy_modes=["low"],
+            strategy_overrides={
+                "volatility_adaptive_entry_step_enabled": True,
+                "volatility_reference_pct": 0.02,
+                "volatility_min_step_multiplier": 1.0,
+                "volatility_max_step_multiplier": 2.0,
+            },
+        )
+        snapshot["signal"]["payload"]["price_regime"]["realized_volatility_24h_pct"] = 0.04
+
+        result = backtest.build_candidates(snapshot, 95.0)
+
+        self.assertEqual(result["effective_entry_step_pct"], 0.02)
+        self.assertEqual(
+            [round(candidate["level"], 2) for candidate in result["raw_candidates"]],
+            [93.1, 91.2],
+        )
+
     def test_confidence_liquidity_block_can_allow_range_only_override(self):
         permissions = backtest.sentiment_buy_permissions(
             "blocked",
