@@ -187,6 +187,57 @@ def effective_entry_step_pct(base_entry_step_pct, volatility_pct, config):
     return base_step * step_multiplier
 
 
+def inventory_pressure_adjustment(
+    deployed_inventory_usd,
+    effective_max_inventory_usd,
+    config
+):
+    if not strategy_bool(
+        config,
+        "inventory_pressure_size_scaling_enabled",
+        False
+    ):
+        return {
+            "usage_ratio": 0.0,
+            "size_multiplier": 1.0,
+        }
+
+    max_inventory = numeric_or_default(effective_max_inventory_usd, 0.0)
+    deployed_inventory = numeric_or_default(deployed_inventory_usd, 0.0)
+    if max_inventory <= 0:
+        return {
+            "usage_ratio": 1.0,
+            "size_multiplier": 0.0,
+        }
+
+    usage_ratio = max(0.0, deployed_inventory / max_inventory)
+    start_ratio = strategy_float(
+        config,
+        "inventory_pressure_start_usage_pct",
+        0.5
+    )
+    min_multiplier = strategy_float(
+        config,
+        "inventory_pressure_min_size_multiplier",
+        0.25
+    )
+    start_ratio = max(0.0, min(1.0, start_ratio))
+    min_multiplier = max(0.0, min(1.0, min_multiplier))
+
+    if usage_ratio <= start_ratio:
+        size_multiplier = 1.0
+    elif usage_ratio >= 1.0:
+        size_multiplier = min_multiplier
+    else:
+        progress = (usage_ratio - start_ratio) / (1.0 - start_ratio)
+        size_multiplier = 1.0 - ((1.0 - min_multiplier) * progress)
+
+    return {
+        "usage_ratio": usage_ratio,
+        "size_multiplier": size_multiplier,
+    }
+
+
 def select_dynamic_strategy_modes(base_modes, operating_mode, range_position, strategy_config):
     active_modes = apply_operating_mode_to_strategy_modes(base_modes, operating_mode)
     if not active_modes:
@@ -2661,6 +2712,17 @@ def main():
                     effective_max_open_sell_orders * smoothed_risk_multiplier
                 ))
             )
+            deployed_inventory_usd = current_inventory_usd(price)
+            inventory_pressure = inventory_pressure_adjustment(
+                deployed_inventory_usd,
+                effective_max_inventory_usd,
+                strategy_config
+            )
+            inventory_pressure_usage_ratio = inventory_pressure["usage_ratio"]
+            inventory_pressure_size_multiplier = inventory_pressure[
+                "size_multiplier"
+            ]
+            effective_position_size_pct *= inventory_pressure_size_multiplier
 
             log_event(
                 "SIGNAL_UPDATE",
@@ -2706,6 +2768,10 @@ def main():
                 smoothed_risk_multiplier=smoothed_risk_multiplier,
                 flow_pressure=flow_pressure,
                 mean_reversion_opportunity=mean_reversion_opportunity,
+                inventory_pressure_usage_ratio=inventory_pressure_usage_ratio,
+                inventory_pressure_size_multiplier=(
+                    inventory_pressure_size_multiplier
+                ),
                 price_regime_range_position=price_regime_range_position,
                 price_regime_volatility_pct=price_regime.get(
                     "realized_volatility_24h_pct"
@@ -3648,6 +3714,12 @@ def main():
                                 mean_reversion_opportunity
                             ),
                             effective_entry_step_pct=current_entry_step_pct,
+                            inventory_pressure_usage_ratio=(
+                                inventory_pressure_usage_ratio
+                            ),
+                            inventory_pressure_size_multiplier=(
+                                inventory_pressure_size_multiplier
+                            ),
                             last_sell_price=last_sell_price,
                             candidate_volume_btc=round(volume, VOLUME_DECIMALS),
                             candidate_sell_pct_override=active_sell_pct_override,
@@ -3696,6 +3768,12 @@ def main():
                                 mean_reversion_opportunity
                             ),
                             effective_entry_step_pct=current_entry_step_pct,
+                            inventory_pressure_usage_ratio=(
+                                inventory_pressure_usage_ratio
+                            ),
+                            inventory_pressure_size_multiplier=(
+                                inventory_pressure_size_multiplier
+                            ),
                             buy_source=buy_source,
                             reason=skip_reason
                         )
@@ -3725,6 +3803,12 @@ def main():
                         flow_control_reason=flow_control["reason"],
                         mean_reversion_opportunity=mean_reversion_opportunity,
                         effective_entry_step_pct=current_entry_step_pct,
+                        inventory_pressure_usage_ratio=(
+                            inventory_pressure_usage_ratio
+                        ),
+                        inventory_pressure_size_multiplier=(
+                            inventory_pressure_size_multiplier
+                        ),
                         buy_source=buy_source,
                         bucket_name=bucket_name,
                         bucket_inventory_usd=round(bucket_inventory_usd, 8),
@@ -3849,6 +3933,10 @@ def main():
                     flow_pressure=flow_pressure,
                     mean_reversion_opportunity=mean_reversion_opportunity,
                     effective_entry_step_pct=current_entry_step_pct,
+                    inventory_pressure_usage_ratio=inventory_pressure_usage_ratio,
+                    inventory_pressure_size_multiplier=(
+                        inventory_pressure_size_multiplier
+                    ),
                     effective_position_size_pct=effective_position_size_pct,
                     range_low=low,
                     range_high=high,
@@ -3933,6 +4021,10 @@ def main():
                 flow_pressure=flow_pressure,
                 mean_reversion_opportunity=mean_reversion_opportunity,
                 effective_entry_step_pct=current_entry_step_pct,
+                inventory_pressure_usage_ratio=inventory_pressure_usage_ratio,
+                inventory_pressure_size_multiplier=(
+                    inventory_pressure_size_multiplier
+                ),
                 range_low=low,
                 range_high=high,
                 range_mean=mean,
@@ -4035,6 +4127,12 @@ def main():
                 ),
                 "price_regime_range_position": price_regime_range_position,
                 "effective_entry_step_pct": current_entry_step_pct,
+                "inventory_pressure_usage_ratio": (
+                    inventory_pressure_usage_ratio
+                ),
+                "inventory_pressure_size_multiplier": (
+                    inventory_pressure_size_multiplier
+                ),
                 "price": price,
                 "execution_signal": execution_signal,
                 "signal_status": signal_status,

@@ -371,6 +371,28 @@ class RangeGridBacktestTests(unittest.TestCase):
         )
         self.assertEqual(widened, 0.02)
 
+    def test_inventory_pressure_adjustment_reduces_size_near_inventory_cap(self):
+        adjustment = backtest.inventory_pressure_adjustment(
+            600.0,
+            750.0,
+            {
+                "inventory_pressure_size_scaling_enabled": True,
+                "inventory_pressure_start_usage_pct": 0.5,
+                "inventory_pressure_min_size_multiplier": 0.25,
+            },
+        )
+        self.assertAlmostEqual(adjustment["usage_ratio"], 0.8)
+        self.assertAlmostEqual(adjustment["size_multiplier"], 0.55)
+
+    def test_inventory_pressure_adjustment_defaults_to_full_size_when_disabled(self):
+        adjustment = backtest.inventory_pressure_adjustment(
+            600.0,
+            750.0,
+            {},
+        )
+        self.assertEqual(adjustment["usage_ratio"], 0.0)
+        self.assertEqual(adjustment["size_multiplier"], 1.0)
+
     def test_build_candidates_uses_wider_spacing_when_volatility_is_high(self):
         snapshot = make_snapshot(
             "2026-06-13T12:00:00+00:00",

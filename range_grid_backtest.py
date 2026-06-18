@@ -334,6 +334,52 @@ def effective_entry_step_pct(base_entry_step_pct, volatility_pct, config):
     return base_step * step_multiplier
 
 
+def inventory_pressure_adjustment(
+    deployed_inventory_usd,
+    effective_max_inventory_usd,
+    config
+):
+    enabled = str(
+        config.get("inventory_pressure_size_scaling_enabled", False)
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if not enabled:
+        return {
+            "usage_ratio": 0.0,
+            "size_multiplier": 1.0,
+        }
+
+    max_inventory = safe_float(effective_max_inventory_usd) or 0.0
+    deployed_inventory = safe_float(deployed_inventory_usd) or 0.0
+    if max_inventory <= 0:
+        return {
+            "usage_ratio": 1.0,
+            "size_multiplier": 0.0,
+        }
+
+    usage_ratio = max(0.0, deployed_inventory / max_inventory)
+    start_ratio = safe_float(config.get("inventory_pressure_start_usage_pct"))
+    if start_ratio is None:
+        start_ratio = 0.5
+    min_multiplier = safe_float(config.get("inventory_pressure_min_size_multiplier"))
+    if min_multiplier is None:
+        min_multiplier = 0.25
+    start_ratio = max(0.0, min(1.0, start_ratio))
+    min_multiplier = max(0.0, min(1.0, min_multiplier))
+
+    if usage_ratio <= start_ratio:
+        size_multiplier = 1.0
+    elif usage_ratio >= 1.0:
+        size_multiplier = min_multiplier
+    else:
+        progress = (usage_ratio - start_ratio) / (1.0 - start_ratio)
+        size_multiplier = 1.0 - ((1.0 - min_multiplier) * progress)
+
+    return {
+        "usage_ratio": usage_ratio,
+        "size_multiplier": size_multiplier,
+    }
+
+
 def strategy_bool(config, key, default=False):
     value = config.get(key, default)
     if isinstance(value, bool):
@@ -767,6 +813,13 @@ def build_candidates(snapshot, price):
         safe_float(signal.get("price_regime", {}).get("realized_volatility_24h_pct")),
         config,
     )
+    effective_max_inventory_usd = safe_float(config.get("max_inventory_usd")) or float("inf")
+    deployed_inventory_usd = safe_float(state_info.get("deployed_inventory_usd")) or 0.0
+    inventory_pressure = inventory_pressure_adjustment(
+        deployed_inventory_usd,
+        effective_max_inventory_usd,
+        config,
+    )
 
     result = {
         "freshness_allows_trading": freshness_allows_trading,
@@ -781,6 +834,8 @@ def build_candidates(snapshot, price):
         "action_recommendation": action_recommendation,
         "strategy_modes": strategy_modes,
         "effective_entry_step_pct": effective_step_pct,
+        "inventory_pressure_usage_ratio": inventory_pressure["usage_ratio"],
+        "inventory_pressure_size_multiplier": inventory_pressure["size_multiplier"],
         "sentiment_control_mode": sentiment_control_mode,
         "low": low,
         "high": high,
@@ -1112,6 +1167,12 @@ def replay_from_snapshots(snapshots):
                 "signal_status": signal_status,
                 "active_strategy_modes": active_strategy_modes,
                 "effective_entry_step_pct": built.get("effective_entry_step_pct"),
+                "inventory_pressure_usage_ratio": built.get(
+                    "inventory_pressure_usage_ratio"
+                ),
+                "inventory_pressure_size_multiplier": built.get(
+                    "inventory_pressure_size_multiplier"
+                ),
                 "hold_reason": built["hold_reason"],
                 "raw_candidate_count": len(built["raw_candidates"]),
             })
@@ -1131,6 +1192,12 @@ def replay_from_snapshots(snapshots):
                     "price": price,
                     "active_strategy_modes": built.get("strategy_modes") or [],
                     "effective_entry_step_pct": built.get("effective_entry_step_pct"),
+                    "inventory_pressure_usage_ratio": built.get(
+                        "inventory_pressure_usage_ratio"
+                    ),
+                    "inventory_pressure_size_multiplier": built.get(
+                        "inventory_pressure_size_multiplier"
+                    ),
                     "buy_source": candidate["buy_source"],
                     "strategy_mode": candidate["strategy_mode"],
                     "level": round(candidate["level"], 2),
@@ -1148,6 +1215,12 @@ def replay_from_snapshots(snapshots):
                     "price": price,
                     "active_strategy_modes": built.get("strategy_modes") or [],
                     "effective_entry_step_pct": built.get("effective_entry_step_pct"),
+                    "inventory_pressure_usage_ratio": built.get(
+                        "inventory_pressure_usage_ratio"
+                    ),
+                    "inventory_pressure_size_multiplier": built.get(
+                        "inventory_pressure_size_multiplier"
+                    ),
                     "buy_source": candidate["buy_source"],
                     "strategy_mode": candidate["strategy_mode"],
                     "level": round(candidate["level"], 2),
