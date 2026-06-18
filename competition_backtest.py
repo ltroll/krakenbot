@@ -82,6 +82,25 @@ def parse_cli_args():
         help="Round-trip fee in basis points.",
     )
     parser.add_argument(
+        "--fill-model",
+        choices=("mid", "taker", "maker"),
+        help="Execution model: mid, taker (ask in/bid out), or maker (bid in/ask out).",
+    )
+    parser.add_argument(
+        "--maker-fee-bps",
+        type=float,
+        help="Round-trip maker fee in basis points; defaults to --fee-bps.",
+    )
+    parser.add_argument(
+        "--taker-fee-bps",
+        type=float,
+        help="Round-trip taker fee in basis points; defaults to --fee-bps.",
+    )
+    parser.add_argument(
+        "--require-signal-reset",
+        help="After an exit, require a blocked snapshot before re-entry.",
+    )
+    parser.add_argument(
         "--recent-limit",
         type=int,
         help="Number of recent simulated trades to include.",
@@ -171,6 +190,40 @@ def runtime_from_args(args):
             "COMPETITION_BACKTEST_FEE_BPS",
             "backtest_fee_bps",
             40,
+        )),
+        "fill_model": str(value(
+            args.fill_model,
+            "COMPETITION_BACKTEST_FILL_MODEL",
+            "backtest_fill_model",
+            "mid",
+        )).strip().lower(),
+        "maker_fee_bps": float(value(
+            args.maker_fee_bps,
+            "COMPETITION_BACKTEST_MAKER_FEE_BPS",
+            "backtest_maker_fee_bps",
+            value(
+                args.fee_bps,
+                "COMPETITION_BACKTEST_FEE_BPS",
+                "backtest_fee_bps",
+                40,
+            ),
+        )),
+        "taker_fee_bps": float(value(
+            args.taker_fee_bps,
+            "COMPETITION_BACKTEST_TAKER_FEE_BPS",
+            "backtest_taker_fee_bps",
+            value(
+                args.fee_bps,
+                "COMPETITION_BACKTEST_FEE_BPS",
+                "backtest_fee_bps",
+                40,
+            ),
+        )),
+        "require_signal_reset": parse_bool(value(
+            args.require_signal_reset,
+            "COMPETITION_BACKTEST_REQUIRE_SIGNAL_RESET",
+            "backtest_require_signal_reset",
+            False,
         )),
         "recent_limit": int(value(
             args.recent_limit,
@@ -302,6 +355,25 @@ def snapshot_price(snapshot):
     )
 
 
+def snapshot_execution_price(snapshot, side, fill_model):
+    price = snapshot_price(snapshot)
+    if price is None or fill_model == "mid":
+        return price
+
+    spread_bps = safe_float(decision_summary(snapshot).get("spread_bps"))
+    if spread_bps is None or spread_bps < 0:
+        return None
+
+    half_spread = spread_bps / 20000.0
+    if fill_model == "taker":
+        multiplier = 1.0 + half_spread if side == "buy" else 1.0 - half_spread
+    elif fill_model == "maker":
+        multiplier = 1.0 - half_spread if side == "buy" else 1.0 + half_spread
+    else:
+        raise ValueError(f"Unsupported fill model: {fill_model}")
+    return price * multiplier
+
+
 def snapshot_is_fresh_ok(snapshot):
     summary = decision_summary(snapshot)
     if summary.get("status") != "ok":
@@ -366,6 +438,10 @@ def empty_strategy_summary(name):
         "stop_loss_count": 0,
         "timeout_count": 0,
         "mark_to_market_count": 0,
+        "realized_gross_pnl_usd": 0.0,
+        "realized_net_pnl_usd": 0.0,
+        "unrealized_gross_pnl_usd": 0.0,
+        "unrealized_net_pnl_usd": 0.0,
         "gross_pnl_usd": 0.0,
         "net_pnl_usd": 0.0,
         "avg_net_return_pct": None,
@@ -374,9 +450,9 @@ def empty_strategy_summary(name):
     }
 
 
-def close_trade(position, snapshot, exit_reason, fee_bps):
+def close_trade(position, snapshot, exit_reason, fee_bps, fill_model):
     exited_at = snapshot.get("captured_at")
-    exit_price = snapshot_price(snapshot)
+    exit_price = snapshot_execution_price(snapshot, "sell", fill_model)
     if exit_price is None:
         return None
 
@@ -399,6 +475,7 @@ def close_trade(position, snapshot, exit_reason, fee_bps):
         "net_pnl_usd": round(net_pnl, 8),
         "entry_decision": position["entry_decision"],
         "entry_reason": position["entry_reason"],
+        "position_status": "open" if exit_reason == "mark_to_market" else "closed",
     }
 
 
@@ -406,6 +483,8 @@ def update_summary_for_trade(summary, trade):
     summary["closed_trades"] += 1
     summary["gross_pnl_usd"] += trade["gross_pnl_usd"]
     summary["net_pnl_usd"] += trade["net_pnl_usd"]
+    summary["realized_gross_pnl_usd"] += trade["gross_pnl_usd"]
+    summary["realized_net_pnl_usd"] += trade["net_pnl_usd"]
     if trade["net_pnl_usd"] >= 0:
         summary["wins"] += 1
     else:
@@ -416,12 +495,30 @@ def update_summary_for_trade(summary, trade):
         summary[reason_key] += 1
 
 
+def update_summary_for_open_trade(summary, trade):
+    summary["open_trades"] = 1
+    summary["mark_to_market_count"] += 1
+    summary["gross_pnl_usd"] += trade["gross_pnl_usd"]
+    summary["net_pnl_usd"] += trade["net_pnl_usd"]
+    summary["unrealized_gross_pnl_usd"] += trade["gross_pnl_usd"]
+    summary["unrealized_net_pnl_usd"] += trade["net_pnl_usd"]
+
+
 def finalize_summary(summary, trades):
-    summary["gross_pnl_usd"] = round(summary["gross_pnl_usd"], 8)
-    summary["net_pnl_usd"] = round(summary["net_pnl_usd"], 8)
+    money_fields = (
+        "gross_pnl_usd",
+        "net_pnl_usd",
+        "realized_gross_pnl_usd",
+        "realized_net_pnl_usd",
+        "unrealized_gross_pnl_usd",
+        "unrealized_net_pnl_usd",
+    )
+    for field in money_fields:
+        summary[field] = round(summary[field], 8)
     if summary["closed_trades"]:
         summary["win_rate"] = round(summary["wins"] / summary["closed_trades"], 6)
-        avg = sum(trade["net_return_pct"] for trade in trades) / summary["closed_trades"]
+        closed = [trade for trade in trades if trade["position_status"] == "closed"]
+        avg = sum(trade["net_return_pct"] for trade in closed) / summary["closed_trades"]
         summary["avg_net_return_pct"] = round(avg, 6)
     summary["blocked_reasons"] = dict(Counter(summary["blocked_reasons"]).most_common())
     return summary
@@ -438,16 +535,19 @@ def replay_strategy(
     max_hold_minutes,
     cooldown_minutes,
     fee_bps,
+    fill_model="mid",
+    require_signal_reset=False,
 ):
     summary = empty_strategy_summary(name)
     trades = []
     position = None
     cooldown_until = None
+    signal_armed = True
     blocked_reasons = Counter()
 
     for snapshot in snapshots:
         captured_at = snapshot_timestamp(snapshot)
-        price = snapshot_price(snapshot)
+        price = snapshot_execution_price(snapshot, "sell", fill_model)
         if captured_at is None or price is None or price <= 0:
             continue
 
@@ -465,11 +565,13 @@ def replay_strategy(
                 exit_reason = "timeout"
 
             if exit_reason:
-                trade = close_trade(position, snapshot, exit_reason, fee_bps)
+                trade = close_trade(position, snapshot, exit_reason, fee_bps, fill_model)
                 if trade:
                     update_summary_for_trade(summary, trade)
                     trades.append(trade)
                     cooldown_until = captured_at + timedelta(minutes=cooldown_minutes)
+                    if require_signal_reset:
+                        signal_armed = False
                 position = None
                 continue
 
@@ -481,15 +583,23 @@ def replay_strategy(
         allowed, reason = allow_entry(snapshot)
         if not allowed:
             blocked_reasons[reason or "blocked"] += 1
+            signal_armed = True
+            continue
+        if require_signal_reset and not signal_armed:
+            blocked_reasons["waiting_for_signal_reset"] += 1
             continue
 
         summary_info = decision_summary(snapshot)
         notional = entry_notional_usd(snapshot, trade_usd)
+        entry_price = snapshot_execution_price(snapshot, "buy", fill_model)
+        if entry_price is None or entry_price <= 0:
+            blocked_reasons["missing_spread_for_execution_model"] += 1
+            continue
         position = {
             "strategy": name,
             "entry_at": snapshot.get("captured_at"),
             "entry_dt": captured_at,
-            "entry_price": price,
+            "entry_price": entry_price,
             "notional_usd": notional,
             "entry_decision": summary_info.get("decision"),
             "entry_reason": summary_info.get("reason"),
@@ -497,11 +607,10 @@ def replay_strategy(
         summary["entries"] += 1
 
     if position is not None:
-        trade = close_trade(position, snapshots[-1], "mark_to_market", fee_bps)
+        trade = close_trade(position, snapshots[-1], "mark_to_market", fee_bps, fill_model)
         if trade:
-            update_summary_for_trade(summary, trade)
+            update_summary_for_open_trade(summary, trade)
             trades.append(trade)
-        summary["open_trades"] = 1
 
     summary["blocked_reasons"] = blocked_reasons
     return {
@@ -538,6 +647,13 @@ def build_backtest(args):
         until_dt,
         rotate_daily=rotate_daily,
     )
+    if args.fill_model not in ("mid", "taker", "maker"):
+        raise ValueError("fill_model must be one of: mid, taker, maker")
+    selected_fee_bps = {
+        "mid": args.fee_bps,
+        "taker": args.taker_fee_bps,
+        "maker": args.maker_fee_bps,
+    }[args.fill_model]
 
     scenarios = {
         "competition_allowed": replay_strategy(
@@ -549,7 +665,9 @@ def build_backtest(args):
             stop_loss_pct=args.stop_loss_pct,
             max_hold_minutes=args.max_hold_minutes,
             cooldown_minutes=args.cooldown_minutes,
-            fee_bps=args.fee_bps,
+            fee_bps=selected_fee_bps,
+            fill_model=args.fill_model,
+            require_signal_reset=args.require_signal_reset,
         ),
         "simulated_buy_allowed": replay_strategy(
             "simulated_buy_allowed",
@@ -560,7 +678,9 @@ def build_backtest(args):
             stop_loss_pct=args.stop_loss_pct,
             max_hold_minutes=args.max_hold_minutes,
             cooldown_minutes=args.cooldown_minutes,
-            fee_bps=args.fee_bps,
+            fee_bps=selected_fee_bps,
+            fill_model=args.fill_model,
+            require_signal_reset=False,
         ),
     }
 
@@ -582,8 +702,16 @@ def build_backtest(args):
             "stop_loss_pct": args.stop_loss_pct,
             "max_hold_minutes": args.max_hold_minutes,
             "cooldown_minutes": args.cooldown_minutes,
-            "fee_bps": args.fee_bps,
-            "fill_model": "one_position_at_a_time_mid_or_last_price",
+            "fee_bps": selected_fee_bps,
+            "maker_fee_bps": args.maker_fee_bps,
+            "taker_fee_bps": args.taker_fee_bps,
+            "fill_model": args.fill_model,
+            "fill_model_detail": {
+                "mid": "mid_or_last_price",
+                "taker": "buy_at_inferred_ask_sell_at_inferred_bid",
+                "maker": "optimistic_post_only_buy_at_inferred_bid_sell_at_inferred_ask",
+            }[args.fill_model],
+            "competition_require_signal_reset": args.require_signal_reset,
         },
         "strategies": scenarios,
     }

@@ -211,6 +211,18 @@ The competition backtest compares two scenarios:
 
 The replay uses one simulated position at a time, mid price when present, otherwise last price, fixed USD notional capped by `risk.max_position_usd`, and exits by take-profit, stop-loss, max hold, or final mark-to-market.
 
+Execution and re-entry assumptions are configurable from `.env`:
+
+```env
+COMPETITION_BACKTEST_FILL_MODEL=taker
+COMPETITION_BACKTEST_TAKER_FEE_BPS=40
+COMPETITION_BACKTEST_MAKER_FEE_BPS=20
+COMPETITION_BACKTEST_COOLDOWN_MINUTES=5
+COMPETITION_BACKTEST_REQUIRE_SIGNAL_RESET=true
+```
+
+`taker` buys at the inferred ask and sells at the inferred bid. `maker` buys at the inferred bid and sells at the inferred ask, so it is an optimistic post-only bound rather than proof that resting orders would fill. `mid` retains the original mid/last-price behavior. With signal reset enabled, `competition_allowed` must observe a blocked snapshot after an exit before it can enter again; the continuous-buy baseline remains available for comparison. Reports separate realized closed-trade P&L from unrealized mark-to-market P&L.
+
 ## How `range_grid_bot.py` works
 
 This bot combines a recent BTC trading range with a sentiment gate.

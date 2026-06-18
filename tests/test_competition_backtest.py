@@ -8,7 +8,13 @@ from competition_backtest import (
 )
 
 
-def make_snapshot(minutes, price, decision="shadow_candidate", status="ok"):
+def make_snapshot(
+    minutes,
+    price,
+    decision="shadow_candidate",
+    status="ok",
+    spread_bps=20,
+):
     captured_at = datetime(2026, 6, 17, 14, 0, tzinfo=timezone.utc) + timedelta(
         minutes=minutes
     )
@@ -46,6 +52,7 @@ def make_snapshot(minutes, price, decision="shadow_candidate", status="ok"):
                 "kraken_pair": "NEOUSD",
                 "mid_price": price,
                 "last_price": price,
+                "spread_bps": spread_bps,
                 "shadow_only": True,
                 "max_position_usd": 25.0,
             },
@@ -127,6 +134,85 @@ class CompetitionBacktestTests(unittest.TestCase):
 
         self.assertEqual(competition["summary"]["entries"], 0)
         self.assertEqual(baseline["summary"]["entries"], 1)
+
+    def test_taker_fill_pays_spread_while_maker_model_captures_it(self):
+        snapshots = [make_snapshot(0, 2.0), make_snapshot(60, 2.0)]
+
+        taker = replay_strategy(
+            "taker",
+            snapshots,
+            competition_allows_entry,
+            trade_usd=25,
+            take_profit_pct=10,
+            stop_loss_pct=10,
+            max_hold_minutes=60,
+            cooldown_minutes=0,
+            fee_bps=0,
+            fill_model="taker",
+        )
+        maker = replay_strategy(
+            "maker",
+            snapshots,
+            competition_allows_entry,
+            trade_usd=25,
+            take_profit_pct=10,
+            stop_loss_pct=10,
+            max_hold_minutes=60,
+            cooldown_minutes=0,
+            fee_bps=0,
+            fill_model="maker",
+        )
+
+        self.assertLess(taker["summary"]["net_pnl_usd"], 0)
+        self.assertGreater(maker["summary"]["net_pnl_usd"], 0)
+
+    def test_signal_reset_prevents_immediate_reentry(self):
+        snapshots = [
+            make_snapshot(0, 2.00),
+            make_snapshot(5, 2.03),
+            make_snapshot(6, 2.03),
+            make_snapshot(7, 2.03, decision="blocked"),
+            make_snapshot(8, 2.03),
+        ]
+
+        result = replay_strategy(
+            "competition_allowed",
+            snapshots,
+            competition_allows_entry,
+            trade_usd=25,
+            take_profit_pct=1,
+            stop_loss_pct=1,
+            max_hold_minutes=60,
+            cooldown_minutes=0,
+            fee_bps=0,
+            require_signal_reset=True,
+        )
+
+        self.assertEqual(result["summary"]["entries"], 2)
+        self.assertEqual(
+            result["summary"]["blocked_reasons"]["waiting_for_signal_reset"],
+            1,
+        )
+
+    def test_open_mark_to_market_is_not_counted_as_closed(self):
+        result = replay_strategy(
+            "competition_allowed",
+            [make_snapshot(0, 2.0), make_snapshot(5, 2.01)],
+            competition_allows_entry,
+            trade_usd=25,
+            take_profit_pct=10,
+            stop_loss_pct=10,
+            max_hold_minutes=60,
+            cooldown_minutes=0,
+            fee_bps=40,
+        )
+
+        summary = result["summary"]
+        self.assertEqual(summary["closed_trades"], 0)
+        self.assertEqual(summary["open_trades"], 1)
+        self.assertEqual(summary["mark_to_market_count"], 1)
+        self.assertEqual(summary["realized_net_pnl_usd"], 0)
+        self.assertEqual(summary["net_pnl_usd"], summary["unrealized_net_pnl_usd"])
 
 
 if __name__ == "__main__":

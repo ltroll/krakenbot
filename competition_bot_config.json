@@ -11,5 +11,10 @@
   "backtest_take_profit_pct": 0.8,
   "backtest_stop_loss_pct": 0.8,
   "backtest_max_hold_minutes": 60,
-  "backtest_fee_bps": 40
+  "backtest_fee_bps": 40,
+  "backtest_fill_model": "taker",
+  "backtest_taker_fee_bps": 40,
+  "backtest_maker_fee_bps": 20,
+  "backtest_cooldown_minutes": 5,
+  "backtest_require_signal_reset": true
 }
