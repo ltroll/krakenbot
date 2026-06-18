@@ -135,27 +135,19 @@ class CompetitionBacktestTests(unittest.TestCase):
         self.assertEqual(competition["summary"]["entries"], 0)
         self.assertEqual(baseline["summary"]["entries"], 1)
 
-    def test_taker_fill_pays_spread_while_maker_model_captures_it(self):
-        snapshots = [make_snapshot(0, 2.0), make_snapshot(60, 2.0)]
+    def test_maker_entry_requires_later_trade_touch(self):
+        snapshots = [
+            make_snapshot(0, 2.00),
+            make_snapshot(1, 1.99),
+            make_snapshot(2, 2.03),
+        ]
 
-        taker = replay_strategy(
-            "taker",
-            snapshots,
-            competition_allows_entry,
-            trade_usd=25,
-            take_profit_pct=10,
-            stop_loss_pct=10,
-            max_hold_minutes=60,
-            cooldown_minutes=0,
-            fee_bps=0,
-            fill_model="taker",
-        )
         maker = replay_strategy(
             "maker",
             snapshots,
             competition_allows_entry,
             trade_usd=25,
-            take_profit_pct=10,
+            take_profit_pct=1,
             stop_loss_pct=10,
             max_hold_minutes=60,
             cooldown_minutes=0,
@@ -163,8 +155,46 @@ class CompetitionBacktestTests(unittest.TestCase):
             fill_model="maker",
         )
 
-        self.assertLess(taker["summary"]["net_pnl_usd"], 0)
+        self.assertEqual(maker["summary"]["maker_orders_placed"], 1)
+        self.assertEqual(maker["summary"]["maker_orders_filled"], 1)
+        self.assertEqual(maker["summary"]["entries"], 1)
+        self.assertEqual(maker["summary"]["take_profit_count"], 1)
         self.assertGreater(maker["summary"]["net_pnl_usd"], 0)
+
+    def test_maker_entry_expires_without_touch(self):
+        maker = replay_strategy(
+            "maker",
+            [make_snapshot(0, 2.0), make_snapshot(5, 2.01)],
+            competition_allows_entry,
+            trade_usd=25,
+            take_profit_pct=1,
+            stop_loss_pct=1,
+            max_hold_minutes=60,
+            cooldown_minutes=0,
+            fee_bps=0,
+            fill_model="maker",
+            maker_order_timeout_minutes=5,
+        )
+
+        self.assertEqual(maker["summary"]["entries"], 0)
+        self.assertEqual(maker["summary"]["maker_orders_expired"], 1)
+
+    def test_maker_entry_cancels_when_signal_blocks(self):
+        maker = replay_strategy(
+            "maker",
+            [make_snapshot(0, 2.0), make_snapshot(1, 2.0, decision="blocked")],
+            competition_allows_entry,
+            trade_usd=25,
+            take_profit_pct=1,
+            stop_loss_pct=1,
+            max_hold_minutes=60,
+            cooldown_minutes=0,
+            fee_bps=0,
+            fill_model="maker",
+        )
+
+        self.assertEqual(maker["summary"]["entries"], 0)
+        self.assertEqual(maker["summary"]["maker_orders_cancelled"], 1)
 
     def test_signal_reset_prevents_immediate_reentry(self):
         snapshots = [

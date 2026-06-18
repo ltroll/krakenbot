@@ -15,6 +15,8 @@
   "backtest_fill_model": "taker",
   "backtest_taker_fee_bps": 40,
   "backtest_maker_fee_bps": 20,
+  "backtest_maker_order_timeout_minutes": 5,
+  "backtest_maker_cancel_on_signal_block": true,
   "backtest_cooldown_minutes": 5,
   "backtest_require_signal_reset": true
 }

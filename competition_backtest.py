@@ -101,6 +101,15 @@ def parse_cli_args():
         help="After an exit, require a blocked snapshot before re-entry.",
     )
     parser.add_argument(
+        "--maker-order-timeout-minutes",
+        type=float,
+        help="Minutes before an unfilled post-only entry is cancelled.",
+    )
+    parser.add_argument(
+        "--maker-cancel-on-signal-block",
+        help="Cancel a pending maker entry when its entry signal becomes blocked.",
+    )
+    parser.add_argument(
         "--recent-limit",
         type=int,
         help="Number of recent simulated trades to include.",
@@ -224,6 +233,18 @@ def runtime_from_args(args):
             "COMPETITION_BACKTEST_REQUIRE_SIGNAL_RESET",
             "backtest_require_signal_reset",
             False,
+        )),
+        "maker_order_timeout_minutes": float(value(
+            args.maker_order_timeout_minutes,
+            "COMPETITION_BACKTEST_MAKER_ORDER_TIMEOUT_MINUTES",
+            "backtest_maker_order_timeout_minutes",
+            5,
+        )),
+        "maker_cancel_on_signal_block": parse_bool(value(
+            args.maker_cancel_on_signal_block,
+            "COMPETITION_BACKTEST_MAKER_CANCEL_ON_SIGNAL_BLOCK",
+            "backtest_maker_cancel_on_signal_block",
+            True,
         )),
         "recent_limit": int(value(
             args.recent_limit,
@@ -355,6 +376,11 @@ def snapshot_price(snapshot):
     )
 
 
+def snapshot_last_price(snapshot):
+    summary = decision_summary(snapshot)
+    return safe_float(summary.get("last_price")) or safe_float(summary.get("mid_price"))
+
+
 def snapshot_execution_price(snapshot, side, fill_model):
     price = snapshot_price(snapshot)
     if price is None or fill_model == "mid":
@@ -438,6 +464,11 @@ def empty_strategy_summary(name):
         "stop_loss_count": 0,
         "timeout_count": 0,
         "mark_to_market_count": 0,
+        "maker_orders_placed": 0,
+        "maker_orders_filled": 0,
+        "maker_orders_cancelled": 0,
+        "maker_orders_expired": 0,
+        "maker_orders_open": 0,
         "realized_gross_pnl_usd": 0.0,
         "realized_net_pnl_usd": 0.0,
         "unrealized_gross_pnl_usd": 0.0,
@@ -450,9 +481,19 @@ def empty_strategy_summary(name):
     }
 
 
-def close_trade(position, snapshot, exit_reason, fee_bps, fill_model):
+def close_trade(
+    position,
+    snapshot,
+    exit_reason,
+    fee_bps,
+    fill_model,
+    *,
+    exit_price_override=None,
+):
     exited_at = snapshot.get("captured_at")
-    exit_price = snapshot_execution_price(snapshot, "sell", fill_model)
+    exit_price = exit_price_override
+    if exit_price is None:
+        exit_price = snapshot_execution_price(snapshot, "sell", fill_model)
     if exit_price is None:
         return None
 
@@ -475,6 +516,8 @@ def close_trade(position, snapshot, exit_reason, fee_bps, fill_model):
         "net_pnl_usd": round(net_pnl, 8),
         "entry_decision": position["entry_decision"],
         "entry_reason": position["entry_reason"],
+        "entry_order_placed_at": position.get("entry_order_placed_at"),
+        "fee_bps": round(fee_bps, 6),
         "position_status": "open" if exit_reason == "mark_to_market" else "closed",
     }
 
@@ -537,27 +580,90 @@ def replay_strategy(
     fee_bps,
     fill_model="mid",
     require_signal_reset=False,
+    maker_order_timeout_minutes=5,
+    maker_cancel_on_signal_block=True,
+    maker_fee_bps=None,
+    taker_fee_bps=None,
 ):
     summary = empty_strategy_summary(name)
     trades = []
     position = None
+    pending_entry = None
     cooldown_until = None
     signal_armed = True
     blocked_reasons = Counter()
+    maker_fee_bps = fee_bps if maker_fee_bps is None else maker_fee_bps
+    taker_fee_bps = fee_bps if taker_fee_bps is None else taker_fee_bps
 
     for snapshot in snapshots:
         captured_at = snapshot_timestamp(snapshot)
-        price = snapshot_execution_price(snapshot, "sell", fill_model)
-        if captured_at is None or price is None or price <= 0:
+        reference_price = snapshot_price(snapshot)
+        if captured_at is None or reference_price is None or reference_price <= 0:
             continue
 
         summary["snapshots"] += 1
 
+        if pending_entry is not None:
+            allowed, reason = allow_entry(snapshot)
+            age_minutes = (
+                captured_at - pending_entry["placed_dt"]
+            ).total_seconds() / 60.0
+            if maker_cancel_on_signal_block and not allowed:
+                summary["maker_orders_cancelled"] += 1
+                blocked_reasons[reason or "maker_entry_signal_blocked"] += 1
+                pending_entry = None
+                signal_armed = True
+                continue
+            if age_minutes >= maker_order_timeout_minutes:
+                summary["maker_orders_expired"] += 1
+                pending_entry = None
+                continue
+
+            touch_price = snapshot_last_price(snapshot)
+            if (
+                captured_at > pending_entry["placed_dt"]
+                and touch_price is not None
+                and touch_price <= pending_entry["limit_price"]
+            ):
+                position = {
+                    **pending_entry,
+                    "entry_at": snapshot.get("captured_at"),
+                    "entry_dt": captured_at,
+                    "entry_price": pending_entry["limit_price"],
+                    "entry_order_placed_at": pending_entry["placed_at"],
+                }
+                pending_entry = None
+                summary["entries"] += 1
+                summary["maker_orders_filled"] += 1
+            else:
+                continue
+
         if position is not None:
             held_minutes = (captured_at - position["entry_dt"]).total_seconds() / 60.0
-            gross_return = return_pct(position["entry_price"], price)
+            exit_price = snapshot_execution_price(snapshot, "sell", fill_model)
+            if fill_model == "maker":
+                exit_price = snapshot_execution_price(snapshot, "sell", "taker")
+            if exit_price is None:
+                continue
+            gross_return = return_pct(position["entry_price"], exit_price)
             exit_reason = None
-            if gross_return >= take_profit_pct:
+            exit_price_override = None
+            trade_fee_bps = fee_bps
+            if fill_model == "maker":
+                target_price = position["entry_price"] * (1.0 + take_profit_pct / 100.0)
+                stop_price = position["entry_price"] * (1.0 - abs(stop_loss_pct) / 100.0)
+                touch_price = snapshot_last_price(snapshot)
+                if touch_price is not None and touch_price >= target_price:
+                    exit_reason = "take_profit"
+                    exit_price_override = target_price
+                    trade_fee_bps = maker_fee_bps
+                elif touch_price is not None and touch_price <= stop_price:
+                    exit_reason = "stop_loss"
+                    trade_fee_bps = (maker_fee_bps + taker_fee_bps) / 2.0
+                elif held_minutes >= max_hold_minutes:
+                    exit_reason = "timeout"
+                    trade_fee_bps = (maker_fee_bps + taker_fee_bps) / 2.0
+            elif gross_return >= take_profit_pct:
                 exit_reason = "take_profit"
             elif gross_return <= -abs(stop_loss_pct):
                 exit_reason = "stop_loss"
@@ -565,7 +671,14 @@ def replay_strategy(
                 exit_reason = "timeout"
 
             if exit_reason:
-                trade = close_trade(position, snapshot, exit_reason, fee_bps, fill_model)
+                trade = close_trade(
+                    position,
+                    snapshot,
+                    exit_reason,
+                    trade_fee_bps,
+                    "taker" if fill_model == "maker" else fill_model,
+                    exit_price_override=exit_price_override,
+                )
                 if trade:
                     update_summary_for_trade(summary, trade)
                     trades.append(trade)
@@ -595,22 +708,47 @@ def replay_strategy(
         if entry_price is None or entry_price <= 0:
             blocked_reasons["missing_spread_for_execution_model"] += 1
             continue
-        position = {
+        new_position = {
             "strategy": name,
-            "entry_at": snapshot.get("captured_at"),
-            "entry_dt": captured_at,
-            "entry_price": entry_price,
             "notional_usd": notional,
             "entry_decision": summary_info.get("decision"),
             "entry_reason": summary_info.get("reason"),
         }
-        summary["entries"] += 1
+        if fill_model == "maker":
+            pending_entry = {
+                **new_position,
+                "placed_at": snapshot.get("captured_at"),
+                "placed_dt": captured_at,
+                "limit_price": entry_price,
+            }
+            summary["maker_orders_placed"] += 1
+        else:
+            position = {
+                **new_position,
+                "entry_at": snapshot.get("captured_at"),
+                "entry_dt": captured_at,
+                "entry_price": entry_price,
+            }
+            summary["entries"] += 1
 
     if position is not None:
-        trade = close_trade(position, snapshots[-1], "mark_to_market", fee_bps, fill_model)
+        final_fee_bps = fee_bps
+        final_model = fill_model
+        if fill_model == "maker":
+            final_fee_bps = (maker_fee_bps + taker_fee_bps) / 2.0
+            final_model = "taker"
+        trade = close_trade(
+            position,
+            snapshots[-1],
+            "mark_to_market",
+            final_fee_bps,
+            final_model,
+        )
         if trade:
             update_summary_for_open_trade(summary, trade)
             trades.append(trade)
+    if pending_entry is not None:
+        summary["maker_orders_open"] = 1
 
     summary["blocked_reasons"] = blocked_reasons
     return {
@@ -668,6 +806,10 @@ def build_backtest(args):
             fee_bps=selected_fee_bps,
             fill_model=args.fill_model,
             require_signal_reset=args.require_signal_reset,
+            maker_order_timeout_minutes=args.maker_order_timeout_minutes,
+            maker_cancel_on_signal_block=args.maker_cancel_on_signal_block,
+            maker_fee_bps=args.maker_fee_bps,
+            taker_fee_bps=args.taker_fee_bps,
         ),
         "simulated_buy_allowed": replay_strategy(
             "simulated_buy_allowed",
@@ -681,6 +823,10 @@ def build_backtest(args):
             fee_bps=selected_fee_bps,
             fill_model=args.fill_model,
             require_signal_reset=False,
+            maker_order_timeout_minutes=args.maker_order_timeout_minutes,
+            maker_cancel_on_signal_block=args.maker_cancel_on_signal_block,
+            maker_fee_bps=args.maker_fee_bps,
+            taker_fee_bps=args.taker_fee_bps,
         ),
     }
 
@@ -709,9 +855,11 @@ def build_backtest(args):
             "fill_model_detail": {
                 "mid": "mid_or_last_price",
                 "taker": "buy_at_inferred_ask_sell_at_inferred_bid",
-                "maker": "optimistic_post_only_buy_at_inferred_bid_sell_at_inferred_ask",
+                "maker": "post_only_bid_requires_later_trade_touch; maker_target; taker_stop_timeout",
             }[args.fill_model],
             "competition_require_signal_reset": args.require_signal_reset,
+            "maker_order_timeout_minutes": args.maker_order_timeout_minutes,
+            "maker_cancel_on_signal_block": args.maker_cancel_on_signal_block,
         },
         "strategies": scenarios,
     }
