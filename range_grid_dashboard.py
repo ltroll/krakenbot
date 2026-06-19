@@ -328,6 +328,7 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="60">
   <title>Range Grid Bot Dashboard</title>
   <style>
     :root {{
