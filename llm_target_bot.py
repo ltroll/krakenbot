@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 import requests
 from dotenv import load_dotenv
 
+from fee_config import effective_round_trip_fee_pct
 from target_quality import (
     evaluate_quality_target,
     load_target_quality_snapshot,
@@ -154,7 +155,7 @@ MIN_TRADE_USD = profile_float("min_trade_usd", 20.0)
 POSITION_SIZE_PCT = profile_float("position_size_pct", 0.15)
 MAX_TRADE_USD = profile_float("max_trade_usd", 90.0)
 TARGET_PROFIT_PCT = profile_float("target_profit_pct", 0.005)
-ROUND_TRIP_FEE_PCT = profile_float("round_trip_fee_pct", 0.0032)
+ROUND_TRIP_FEE_PCT = effective_round_trip_fee_pct(strategy_config, 0.0032)
 MAX_OPEN_SELL_ORDERS = profile_int("max_open_sell_orders", 2)
 MAX_OPEN_BUY_ORDERS = profile_int("max_open_buy_orders", 2)
 MAX_INVENTORY_USD = profile_float("max_inventory_usd", 400.0)

@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 import requests
 from dotenv import load_dotenv
 
+from fee_config import effective_round_trip_fee_pct
 ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(dotenv_path=ENV_FILE, override=True)
 
@@ -405,7 +406,7 @@ SENTIMENT_BUY_THRESHOLD = profile_float("sentiment_buy_threshold", 0.03)
 POSITION_SIZE_PCT = profile_float("position_size_pct", 0.10)
 MAX_TRADE_USD = profile_float("max_trade_usd", 0)
 TARGET_PROFIT_PCT = profile_float("target_profit_pct", 0.006)
-ROUND_TRIP_FEE_PCT = profile_float("round_trip_fee_pct", 0.0032)
+ROUND_TRIP_FEE_PCT = effective_round_trip_fee_pct(strategy_config, 0.0032)
 DYNAMIC_PROFIT_TARGETS = profile_bool("dynamic_profit_targets", False)
 MIN_TARGET_PROFIT_PCT = profile_float("min_target_profit_pct", TARGET_PROFIT_PCT)
 BASE_TARGET_PROFIT_PCT = profile_float("base_target_profit_pct", TARGET_PROFIT_PCT)

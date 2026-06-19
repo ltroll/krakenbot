@@ -176,6 +176,19 @@ class LlmTargetBacktestTests(unittest.TestCase):
         self.assertIsNone(result["summary"]["fill_rate_after_approval"])
         self.assertEqual(result["summary"]["blocked_by_target_quality"], 1)
 
+    def test_effective_fee_bps_prefers_maker_taker_fee_fields(self):
+        snapshot = make_snapshot(
+            "2026-05-30T12:00:00+00:00",
+            101.0,
+            strategy_overrides={
+                "maker_fee_pct": 0.0025,
+                "taker_fee_pct": 0.004,
+                "round_trip_fee_pct": 0.0032,
+            },
+        )
+
+        self.assertAlmostEqual(backtest.effective_fee_bps(snapshot), 65.0, places=2)
+
     def test_backtest_derives_missing_targets_from_quality_targets(self):
         snapshots = [
             make_snapshot(

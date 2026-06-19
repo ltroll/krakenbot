@@ -20,6 +20,7 @@ from urllib.parse import urlencode
 import krakenex
 import requests
 from dotenv import load_dotenv
+from fee_config import effective_round_trip_fee_pct
 from range_grid_guardrails import (
     runtime_buy_block_reason,
     summarize_sell_backlog,
@@ -413,7 +414,7 @@ range_window_hours = profile_int("range_window_hours", 24)
 max_grid_size = profile_int("max_grid_size", 4)
 profit_target_pct = profile_float("profit_target_pct", 0.01)
 entry_step_pct = profile_float("entry_step_pct", profit_target_pct / 2)
-round_trip_fee_pct = profile_float("round_trip_fee_pct", 0.0032)
+round_trip_fee_pct = effective_round_trip_fee_pct(strategy, 0.0032)
 position_size_pct = profile_float("position_size_pct", 0.10)
 min_buy_notional_usd = profile_float("min_buy_notional_usd", 8.0)
 min_buy_volume_btc = profile_float("min_buy_volume_btc", 0.00010)

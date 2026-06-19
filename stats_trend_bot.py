@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 from dotenv import load_dotenv
+from fee_config import effective_round_trip_fee_pct
 
 load_dotenv()
 
@@ -297,7 +298,7 @@ MAX_INVENTORY_USD = profile_float("max_inventory_usd", 400)
 REBALANCE_COOLDOWN_MINUTES = profile_float("rebalance_cooldown_minutes", 15)
 COOLDOWN_OVERRIDE_SCORE = profile_float("cooldown_override_score", 0.85)
 TARGET_PROFIT_PCT = profile_float("target_profit_pct", 0.008)
-ROUND_TRIP_FEE_PCT = profile_float("round_trip_fee_pct", 0.006)
+ROUND_TRIP_FEE_PCT = effective_round_trip_fee_pct(strategy_config, 0.006)
 EXECUTION_BUFFER_PCT = profile_float("execution_buffer_pct", 0.0025)
 PREVENT_BUY_ABOVE_LAST_SELL = profile_bool("prevent_buy_above_last_sell", True)
 BUY_AFTER_SELL_DISCOUNT_PCT = profile_float("buy_after_sell_discount_pct", 0.001)

@@ -5,6 +5,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
+from fee_config import effective_round_trip_fee_pct
 
 from target_quality import (
     evaluate_quality_target,
@@ -353,8 +354,9 @@ def effective_fee_bps(snapshot=None):
     if snapshot is None:
         return BACKTEST_FEE_BPS
 
-    round_trip_fee_pct = numeric_or_none(
-        strategy_config(snapshot).get("round_trip_fee_pct")
+    round_trip_fee_pct = effective_round_trip_fee_pct(
+        strategy_config(snapshot),
+        None
     )
     if round_trip_fee_pct is None:
         return BACKTEST_FEE_BPS
