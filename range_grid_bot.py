@@ -1858,7 +1858,7 @@ def sentiment_buy_permissions(
         range_core_buys_allowed = True
         range_high_buys_allowed = True
     elif (
-        normalized == "blocked"
+        normalized in ("blocked", "contrarian_watch")
         and sentiment_control_mode == "risk_modulated"
         and not is_risk_off_block(action_recommendation, action_policy)
     ):

@@ -458,6 +458,20 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertFalse(permissions["range_high_buys_allowed"])
         self.assertTrue(permissions["range_buys_allowed"])
 
+    def test_risk_modulated_contrarian_watch_allows_core_range_but_not_high_or_llm(self):
+        permissions = backtest.sentiment_buy_permissions(
+            "contrarian_watch",
+            {
+                "reason": "Extreme bearish sentiment is watch-only; recent backtests show possible rebound or exhaustion risk.",
+            },
+            operating_mode="range_plus_llm",
+            sentiment_control_mode="risk_modulated",
+        )
+        self.assertFalse(permissions["llm_buys_allowed"])
+        self.assertTrue(permissions["range_core_buys_allowed"])
+        self.assertFalse(permissions["range_high_buys_allowed"])
+        self.assertTrue(permissions["range_buys_allowed"])
+
     def test_risk_modulated_risk_off_still_blocks_all_range_buys(self):
         permissions = backtest.sentiment_buy_permissions(
             "risk_off",
@@ -512,6 +526,28 @@ class RangeGridBacktestTests(unittest.TestCase):
         ]
         snapshots[0]["signal"]["payload"]["action_policy"] = {
             "reason": "BTC bullish utility is disabled by recent backtest calibration."
+        }
+
+        result = backtest.replay_from_snapshots(snapshots)
+
+        self.assertGreaterEqual(result["summary"]["raw_candidates"], 1)
+        self.assertGreaterEqual(result["summary"]["approved_candidates"], 1)
+
+    def test_replay_risk_modulated_allows_low_range_during_contrarian_watch(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                94.0,
+                action_recommendation="contrarian_watch",
+                strategy_modes=["low"],
+                strategy_overrides={
+                    "operating_mode": "range_plus_llm",
+                    "sentiment_control_mode": "risk_modulated",
+                },
+            )
+        ]
+        snapshots[0]["signal"]["payload"]["action_policy"] = {
+            "reason": "Extreme bearish sentiment is watch-only; recent backtests show possible rebound or exhaustion risk."
         }
 
         result = backtest.replay_from_snapshots(snapshots)
