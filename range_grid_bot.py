@@ -1711,8 +1711,41 @@ def compute_adjusted_profit_target(age_minutes, base_profit_target=None):
     return max(min_profit_target_pct, adjusted_profit)
 
 
-def sentiment_regime(execution_signal):
+def sentiment_regime(
+    execution_signal,
+    *,
+    action_recommendation="neutral",
+    action_policy=None,
+    operating_mode=None,
+    sentiment_control_mode=None
+):
+    normalized_recommendation = (
+        str(action_recommendation or "neutral").strip().lower()
+    )
+    normalized_control_mode = normalize_sentiment_control_mode(
+        sentiment_control_mode,
+        operating_mode
+    )
+    risk_modulated_core_override = (
+        execution_signal < execution_signal_threshold
+        and normalized_control_mode == "risk_modulated"
+        and operating_mode in ("range_plus_llm", "range_only")
+        and normalized_recommendation in ("blocked", "contrarian_watch")
+        and not is_risk_off_block(action_recommendation, action_policy)
+    )
+
     if execution_signal < execution_signal_threshold:
+        if risk_modulated_core_override:
+            return {
+                "name": "risk_modulated_defensive",
+                "position_size_multiplier": sentiment_defensive_size_multiplier,
+                "inventory_multiplier": sentiment_defensive_inventory_multiplier,
+                "open_sell_multiplier": sentiment_defensive_open_sell_multiplier,
+                "allow_high_anchor": False,
+                "extra_aging_reduction_pct": (
+                    sentiment_defensive_extra_aging_reduction_pct
+                )
+            }
         return {
             "name": "paused",
             "position_size_multiplier": 0.0,
@@ -2692,7 +2725,13 @@ def main():
                 price_regime_volatility_pct,
                 strategy_config
             )
-            regime = sentiment_regime(execution_signal)
+            regime = sentiment_regime(
+                execution_signal,
+                action_recommendation=action_recommendation,
+                action_policy=action_policy,
+                operating_mode=operating_mode,
+                sentiment_control_mode=sentiment_control_mode
+            )
             effective_position_size_pct = (
                 position_size_pct * regime["position_size_multiplier"]
             )
