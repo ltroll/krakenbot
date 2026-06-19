@@ -160,6 +160,14 @@ def runtime_status_summary(snapshot):
     return summary if isinstance(summary, dict) else {}
 
 
+def runtime_status_is_fresh(snapshot, event_ts, max_age_seconds=180):
+    runtime_status = runtime_status_summary(snapshot)
+    status_ts = parse_iso8601(runtime_status.get("timestamp"))
+    if status_ts is None or event_ts is None:
+        return False
+    return abs((event_ts - status_ts).total_seconds()) <= max_age_seconds
+
+
 def positive_or_default(value, default=None):
     numeric = safe_float(value)
     if numeric is None:
@@ -502,8 +510,13 @@ def infer_live_only_blockers(snapshot, event):
     state_info = state_summary(snapshot)
     runtime_status = runtime_status_summary(snapshot)
     captured_at = snapshot_timestamp(snapshot)
+    runtime_status_fresh = runtime_status_is_fresh(snapshot, captured_at)
 
-    runtime_block_reason = runtime_status.get("runtime_block_reason")
+    runtime_block_reason = (
+        runtime_status.get("runtime_block_reason")
+        if runtime_status_fresh
+        else None
+    )
     if runtime_block_reason:
         blockers.append(str(runtime_block_reason))
 
@@ -538,13 +551,19 @@ def infer_live_only_blockers(snapshot, event):
     effective_position_size_pct = safe_float(
         runtime_status.get("effective_position_size_pct")
     )
-    if effective_position_size_pct is not None and effective_position_size_pct <= 0:
+    if (
+        runtime_status_fresh
+        and effective_position_size_pct is not None
+        and effective_position_size_pct <= 0
+    ):
         blockers.append("effective_position_size_pct_zero")
 
     effective_max_inventory_usd = safe_float(
         runtime_status.get("effective_max_inventory_usd")
     )
     if (
+        runtime_status_fresh
+        and
         effective_max_inventory_usd is not None
         and effective_max_inventory_usd <= 0
     ):
@@ -560,6 +579,8 @@ def infer_live_only_blockers(snapshot, event):
         effective_max_open_sell_orders = None
 
     if (
+        runtime_status_fresh
+        and
         effective_max_open_sell_orders is not None
         and open_sell_count >= effective_max_open_sell_orders
     ):

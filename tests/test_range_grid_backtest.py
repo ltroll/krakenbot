@@ -86,6 +86,7 @@ def make_snapshot(
         },
         "runtime_status": {
             "summary": {
+                "timestamp": captured_at,
                 "operating_mode": strategy_payload.get("operating_mode", "range_plus_llm"),
                 "runtime_block_reason": None,
                 "open_sell_count": len(open_sell_orders or []),
@@ -815,6 +816,50 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(
             summary["recent_approved_but_not_placed"][0]["likely_live_blockers"],
             ["sell_backlog_count"],
+        )
+
+    def test_missed_opportunities_ignore_stale_runtime_execution_blockers(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                104.5,
+                action_recommendation="watch_only",
+                strategy_modes=["high"],
+                strategy_overrides={
+                    "operating_mode": "range_only",
+                },
+                runtime_status_overrides={
+                    "timestamp": "2026-06-13T11:50:00+00:00",
+                    "operating_mode": "range_only",
+                    "effective_position_size_pct": 0.0,
+                    "effective_max_inventory_usd": 0.0,
+                    "effective_max_open_sell_orders": 1,
+                    "open_sell_count": 1,
+                },
+            ),
+            make_snapshot(
+                "2026-06-13T12:10:00+00:00",
+                105.3,
+                action_recommendation="watch_only",
+                strategy_modes=["high"],
+            ),
+        ]
+        replay = backtest.replay_from_snapshots(snapshots)
+        actual = {
+            "buy_orders_placed": 0,
+            "buy_orders_placed_by_source": {},
+        }
+
+        summary = backtest.summarize_missed_approved_opportunities(
+            replay,
+            actual,
+            snapshots,
+        )
+
+        self.assertEqual(summary["likely_live_blockers"], {})
+        self.assertEqual(
+            summary["recent_approved_but_not_placed"][0]["likely_live_blockers"],
+            [],
         )
 
     def test_missed_opportunities_include_runtime_execution_blockers(self):
