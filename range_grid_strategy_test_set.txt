@@ -1,0 +1,8 @@
+# One strategy profile per line.
+# Relative paths resolve from the krakenbot repo root.
+# Blank lines and comment lines are ignored.
+
+range_grid_strategy_recovery_range_only.json
+range_grid_strategy_recovery_range_only_tighter_median.json
+range_grid_strategy_recovery_range_only_aggressive_median.json
+range_grid_strategy_recovery_range_only_high_probe.json

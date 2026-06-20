@@ -121,6 +121,19 @@ class RangeGridBacktestTests(unittest.TestCase):
 
             self.assertEqual(files, [os.path.abspath(june12), os.path.abspath(june13)])
 
+    def test_load_strategy_set_entries_supports_comment_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy_set = os.path.join(tmpdir, "strategy_set.txt")
+            with open(strategy_set, "w", encoding="utf-8") as f:
+                f.write("# comment\n")
+                f.write("\n")
+                f.write("foo.json\n")
+                f.write("bar.json\n")
+
+            entries = backtest.load_strategy_set_entries(strategy_set)
+
+            self.assertEqual(entries, ["foo.json", "bar.json"])
+
     def test_replay_blocks_when_sentiment_not_bullish(self):
         snapshots = [make_snapshot("2026-06-13T12:00:00+00:00", 100.0, action_recommendation="blocked")]
         snapshots[0]["signal"]["payload"]["action_policy"] = {
@@ -919,6 +932,150 @@ class RangeGridBacktestTests(unittest.TestCase):
                 "high_anchor_disabled",
             ],
         )
+
+    def test_build_strategy_comparison_rows_compares_variants(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                99.0,
+                action_recommendation="watch_only",
+                strategy_modes=["low", "median", "high"],
+                strategy_overrides={
+                    "grid_anchor": "low,median,high",
+                    "operating_mode": "range_only",
+                    "dynamic_anchor_mode": True,
+                    "dynamic_anchor_mid_mode": "median",
+                    "dynamic_anchor_low_band_max": 0.35,
+                    "dynamic_anchor_high_band_min": 0.75,
+                    "dynamic_anchor_midpoint_split": 0.5,
+                },
+            )
+        ]
+        snapshots[0]["signal"]["payload"]["price_regime"]["range_position_24h"] = 0.5
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_strategy = os.path.join(tmpdir, "base.json")
+            tighter_strategy = os.path.join(tmpdir, "tighter.json")
+            strategy_set = os.path.join(tmpdir, "strategy_set.txt")
+
+            with open(base_strategy, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "grid_anchor": "low,median,high",
+                        "operating_mode": "range_only",
+                        "dynamic_anchor_mode": True,
+                        "dynamic_anchor_mid_mode": "median",
+                        "dynamic_anchor_low_band_max": 0.35,
+                        "dynamic_anchor_high_band_min": 0.75,
+                        "dynamic_anchor_midpoint_split": 0.5,
+                        "entry_step_pct": 0.01,
+                        "max_grid_size": 2,
+                        "require_fresh_signal": True,
+                        "min_signal_status": "fresh",
+                        "mean_reversion_min_opportunity": 0.0,
+                        "prevent_buy_above_last_sell": True,
+                        "buy_after_sell_discount_pct": 0.001,
+                        "flow_defensive_threshold": -0.2,
+                        "flow_block_threshold": -0.4,
+                        "flow_defensive_size_multiplier": 0.75,
+                        "flow_block_high_only": True,
+                        "flow_block_llm_only_below": -0.5,
+                        "llm_buy_cooldown_minutes_after_sell": 30,
+                        "high_anchor_buy_cooldown_minutes": 15,
+                        "max_open_high_anchor_orders": 3,
+                        "max_open_sell_orders": 12,
+                        "max_inventory_usd": 750,
+                        "high_anchor_profit_target_pct": 0.006,
+                    },
+                    f,
+                )
+            with open(tighter_strategy, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "grid_anchor": "low,median,high",
+                        "operating_mode": "range_only",
+                        "dynamic_anchor_mode": True,
+                        "dynamic_anchor_mid_mode": "median",
+                        "dynamic_anchor_low_band_max": 0.35,
+                        "dynamic_anchor_high_band_min": 0.75,
+                        "dynamic_anchor_midpoint_split": 0.5,
+                        "entry_step_pct": 0.005,
+                        "max_grid_size": 2,
+                        "require_fresh_signal": True,
+                        "min_signal_status": "fresh",
+                        "mean_reversion_min_opportunity": 0.0,
+                        "prevent_buy_above_last_sell": True,
+                        "buy_after_sell_discount_pct": 0.001,
+                        "flow_defensive_threshold": -0.2,
+                        "flow_block_threshold": -0.4,
+                        "flow_defensive_size_multiplier": 0.75,
+                        "flow_block_high_only": True,
+                        "flow_block_llm_only_below": -0.5,
+                        "llm_buy_cooldown_minutes_after_sell": 30,
+                        "high_anchor_buy_cooldown_minutes": 15,
+                        "max_open_high_anchor_orders": 3,
+                        "max_open_sell_orders": 12,
+                        "max_inventory_usd": 750,
+                        "high_anchor_profit_target_pct": 0.006,
+                    },
+                    f,
+                )
+            with open(strategy_set, "w", encoding="utf-8") as f:
+                f.write(base_strategy + "\n")
+                f.write(tighter_strategy + "\n")
+
+            comparison = backtest.build_strategy_comparison_rows(
+                snapshots,
+                strategy_set,
+            )
+
+            self.assertEqual(comparison["count"], 2)
+            labels = [row["strategy_label"] for row in comparison["rows"]]
+            self.assertIn("base", labels)
+            self.assertIn("tighter", labels)
+            for row in comparison["rows"]:
+                self.assertIn("approved_candidates", row)
+                self.assertIn("potential_take_profit_reached_rate", row)
+
+    def test_write_strategy_comparison_csv_outputs_digestible_table(self):
+        comparison = {
+            "rows": [
+                {
+                    "strategy_label": "baseline",
+                    "strategy_file": "/tmp/baseline.json",
+                    "grid_anchor": "low,median,high",
+                    "operating_mode": "range_only",
+                    "sentiment_control_mode": "risk_modulated",
+                    "dynamic_anchor_mode": True,
+                    "entry_step_pct": 0.0045,
+                    "volatility_reference_pct": 0.02,
+                    "raw_candidates": 10,
+                    "approved_candidates": 2,
+                    "hold_snapshots": 5,
+                    "approved_llm_target": 0,
+                    "approved_range_low": 0,
+                    "approved_range_median": 2,
+                    "approved_range_high_band": 0,
+                    "blocked_price_above_level": 8,
+                    "blocked_sentiment_high": 0,
+                    "potential_evaluated_count": 2,
+                    "potential_take_profit_reached_rate": 0.5,
+                    "potential_avg_end_return_pct": 0.12,
+                    "potential_avg_max_runup_pct": 0.4,
+                    "potential_avg_max_drawdown_pct": -0.2,
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "compare.csv")
+            resolved = backtest.write_strategy_comparison_csv(comparison, output_path)
+
+            self.assertEqual(resolved, output_path)
+            with open(output_path, encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn("strategy_label", text)
+            self.assertIn("baseline", text)
+            self.assertIn("approved_candidates", text)
 
 
 if __name__ == "__main__":

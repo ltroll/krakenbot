@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import copy
+import csv
 import json
 import os
 import statistics
@@ -38,6 +40,14 @@ BACKTEST_WINDOW_HOURS = float(os.getenv("RANGE_GRID_BACKTEST_WINDOW_HOURS", "24"
 BACKTEST_RECENT_LIMIT = int(os.getenv("RANGE_GRID_BACKTEST_RECENT_LIMIT", "25"))
 BACKTEST_POTENTIAL_MAX_HOLD_HOURS = float(
     os.getenv("RANGE_GRID_BACKTEST_POTENTIAL_MAX_HOLD_HOURS", "24")
+)
+BACKTEST_STRATEGY_SET_FILE = os.getenv(
+    "RANGE_GRID_BACKTEST_STRATEGY_SET_FILE",
+    ""
+).strip()
+BACKTEST_STRATEGY_COMPARE_CSV_FILE = os.getenv(
+    "RANGE_GRID_BACKTEST_STRATEGY_COMPARE_CSV_FILE",
+    "/var/www/html/bot/range_grid_backtest_strategy_compare.csv"
 )
 
 
@@ -83,6 +93,13 @@ def load_jsonl(path):
     return rows
 
 
+def load_json_file(path):
+    if not path or not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
 def rotated_snapshot_path(base_path, dt):
     root, ext = os.path.splitext(base_path)
     suffix = dt.strftime("%Y%m%d")
@@ -118,6 +135,91 @@ def snapshot_source_files(base_path, since_dt, until_dt):
 
 def snapshot_timestamp(snapshot):
     return parse_iso8601(snapshot.get("captured_at"))
+
+
+def repo_root():
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def resolve_repo_path(path):
+    if not path:
+        return None
+    expanded = os.path.expanduser(str(path).strip())
+    if os.path.isabs(expanded):
+        return expanded
+    return os.path.abspath(os.path.join(repo_root(), expanded))
+
+
+def load_strategy_set_entries(path):
+    resolved = resolve_repo_path(path)
+    if not resolved or not os.path.exists(resolved):
+        return []
+
+    if resolved.endswith(".json"):
+        data = load_json_file(resolved)
+        if isinstance(data, list):
+            return [item for item in data if item]
+        if isinstance(data, dict):
+            items = data.get("strategies")
+            if isinstance(items, list):
+                return [item for item in items if item]
+        return []
+
+    entries = []
+    with open(resolved, encoding="utf-8") as f:
+        for line in f:
+            text = line.strip()
+            if not text or text.startswith("#"):
+                continue
+            entries.append(text)
+    return entries
+
+
+def parse_strategy_set_entry(entry):
+    if isinstance(entry, dict):
+        path = entry.get("path") or entry.get("file") or entry.get("strategy_file")
+        label = entry.get("label") or entry.get("name")
+    else:
+        path = str(entry).strip()
+        label = None
+
+    resolved_path = resolve_repo_path(path)
+    if not resolved_path:
+        return None
+    if not label:
+        label = os.path.splitext(os.path.basename(resolved_path))[0]
+    return {
+        "label": label,
+        "path": resolved_path,
+    }
+
+
+def load_strategy_profile_from_file(path):
+    resolved = resolve_repo_path(path)
+    payload = load_json_file(resolved)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid strategy profile: {path}")
+    return resolved, payload
+
+
+def strategy_modes_from_payload(payload):
+    return parse_strategy_modes(payload.get("grid_anchor"))
+
+
+def snapshot_with_strategy(snapshot, strategy_label, strategy_path, strategy_payload):
+    cloned = copy.deepcopy(snapshot)
+    cloned["strategy_profile"] = {
+        "path": strategy_path,
+        "label": strategy_label,
+        "payload": copy.deepcopy(strategy_payload),
+    }
+    context = cloned.get("strategy_context")
+    if not isinstance(context, dict):
+        context = {}
+    context["grid_anchor"] = strategy_payload.get("grid_anchor")
+    context["strategy_modes"] = strategy_modes_from_payload(strategy_payload)
+    cloned["strategy_context"] = context
+    return cloned
 
 
 def signal_payload(snapshot):
@@ -656,6 +758,193 @@ def simulate_missed_opportunity(snapshot, event, snapshots):
         "end_return_pct": round(end_return_pct, 6) if end_return_pct is not None else None,
         "hold_window_hours": BACKTEST_POTENTIAL_MAX_HOLD_HOURS,
     }
+
+
+def summarize_potential_from_approved_events(replay, snapshots):
+    snapshot_by_timestamp = {}
+    for snapshot in snapshots or []:
+        captured_at = snapshot.get("captured_at")
+        if captured_at:
+            snapshot_by_timestamp[captured_at] = snapshot
+
+    potential_results = []
+    for event in replay.get("approved_events") or []:
+        snapshot = snapshot_by_timestamp.get(event.get("captured_at"))
+        if not snapshot:
+            continue
+        potential = simulate_missed_opportunity(snapshot, event, snapshots or [])
+        if potential:
+            potential_results.append(potential)
+
+    end_returns = [
+        result["end_return_pct"]
+        for result in potential_results
+        if result.get("end_return_pct") is not None
+    ]
+    max_runups = [
+        result["max_runup_pct"]
+        for result in potential_results
+        if result.get("max_runup_pct") is not None
+    ]
+    max_drawdowns = [
+        result["max_drawdown_pct"]
+        for result in potential_results
+        if result.get("max_drawdown_pct") is not None
+    ]
+    take_profit_count = sum(
+        1 for result in potential_results if result.get("take_profit_reached")
+    )
+
+    return {
+        "evaluated_count": len(potential_results),
+        "take_profit_reached_count": take_profit_count,
+        "take_profit_reached_rate": (
+            round(take_profit_count / len(potential_results), 4)
+            if potential_results
+            else None
+        ),
+        "avg_end_return_pct": (
+            round(statistics.mean(end_returns), 6)
+            if end_returns
+            else None
+        ),
+        "median_end_return_pct": (
+            round(statistics.median(end_returns), 6)
+            if end_returns
+            else None
+        ),
+        "best_end_return_pct": max(end_returns) if end_returns else None,
+        "worst_end_return_pct": min(end_returns) if end_returns else None,
+        "avg_max_runup_pct": (
+            round(statistics.mean(max_runups), 6)
+            if max_runups
+            else None
+        ),
+        "avg_max_drawdown_pct": (
+            round(statistics.mean(max_drawdowns), 6)
+            if max_drawdowns
+            else None
+        ),
+    }
+
+
+def build_strategy_comparison_rows(snapshots, strategy_set_file):
+    entries = [
+        parsed
+        for parsed in (
+            parse_strategy_set_entry(entry)
+            for entry in load_strategy_set_entries(strategy_set_file)
+        )
+        if parsed
+    ]
+    rows = []
+    detailed = []
+
+    for entry in entries:
+        strategy_path, strategy_payload = load_strategy_profile_from_file(entry["path"])
+        variant_snapshots = [
+            snapshot_with_strategy(
+                snapshot,
+                entry["label"],
+                strategy_path,
+                strategy_payload,
+            )
+            for snapshot in snapshots
+        ]
+        replay = replay_from_snapshots(variant_snapshots)
+        potential = summarize_potential_from_approved_events(replay, variant_snapshots)
+        summary = replay["summary"]
+        row = {
+            "strategy_label": entry["label"],
+            "strategy_file": strategy_path,
+            "grid_anchor": strategy_payload.get("grid_anchor"),
+            "operating_mode": strategy_payload.get("operating_mode"),
+            "sentiment_control_mode": strategy_payload.get("sentiment_control_mode"),
+            "dynamic_anchor_mode": strategy_payload.get("dynamic_anchor_mode"),
+            "entry_step_pct": strategy_payload.get("entry_step_pct"),
+            "volatility_reference_pct": strategy_payload.get("volatility_reference_pct"),
+            "raw_candidates": summary.get("raw_candidates", 0),
+            "approved_candidates": summary.get("approved_candidates", 0),
+            "hold_snapshots": summary.get("hold_snapshots", 0),
+            "approved_llm_target": summary.get("approved_counts_by_source", {}).get("llm_target", 0),
+            "approved_range_low": summary.get("approved_counts_by_source", {}).get("range_low", 0),
+            "approved_range_median": summary.get("approved_counts_by_source", {}).get("range_median", 0),
+            "approved_range_high_band": summary.get("approved_counts_by_source", {}).get("range_high_band", 0),
+            "blocked_price_above_level": summary.get("blocked_reason_counts", {}).get("price_above_level", 0),
+            "blocked_sentiment_high": summary.get("blocked_reason_counts", {}).get("sentiment_action_not_high_range_permitted", 0),
+            "potential_evaluated_count": potential.get("evaluated_count"),
+            "potential_take_profit_reached_rate": potential.get("take_profit_reached_rate"),
+            "potential_avg_end_return_pct": potential.get("avg_end_return_pct"),
+            "potential_avg_max_runup_pct": potential.get("avg_max_runup_pct"),
+            "potential_avg_max_drawdown_pct": potential.get("avg_max_drawdown_pct"),
+        }
+        rows.append(row)
+        detailed.append({
+            "strategy_label": entry["label"],
+            "strategy_file": strategy_path,
+            "strategy_payload": strategy_payload,
+            "replay_summary": summary,
+            "potential_summary": potential,
+            "recent_replay_events": replay.get("recent_replay_events", []),
+            "recent_approved_events": replay.get("recent_approved_events", []),
+        })
+
+    rows.sort(
+        key=lambda row: (
+            -(row.get("approved_candidates") or 0),
+            -((row.get("potential_take_profit_reached_rate") or 0)),
+            -((row.get("potential_avg_end_return_pct") or -999999)),
+            row.get("strategy_label") or "",
+        )
+    )
+    return {
+        "strategy_set_file": resolve_repo_path(strategy_set_file),
+        "count": len(rows),
+        "rows": rows,
+        "details": detailed,
+    }
+
+
+def write_strategy_comparison_csv(comparison, output_path):
+    rows = comparison.get("rows") or []
+    if not rows:
+        return None
+
+    resolved = resolve_repo_path(output_path)
+    output_dir = os.path.dirname(resolved)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    fieldnames = [
+        "strategy_label",
+        "strategy_file",
+        "grid_anchor",
+        "operating_mode",
+        "sentiment_control_mode",
+        "dynamic_anchor_mode",
+        "entry_step_pct",
+        "volatility_reference_pct",
+        "raw_candidates",
+        "approved_candidates",
+        "hold_snapshots",
+        "approved_llm_target",
+        "approved_range_low",
+        "approved_range_median",
+        "approved_range_high_band",
+        "blocked_price_above_level",
+        "blocked_sentiment_high",
+        "potential_evaluated_count",
+        "potential_take_profit_reached_rate",
+        "potential_avg_end_return_pct",
+        "potential_avg_max_runup_pct",
+        "potential_avg_max_drawdown_pct",
+    ]
+    with open(resolved, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    return resolved
 
 
 def compute_high_anchor_grid(high, price, entry_step_pct):
@@ -1548,8 +1837,14 @@ def build_report():
     missed = summarize_missed_approved_opportunities(replay, actual, snapshots)
     replay_output = dict(replay)
     replay_output.pop("approved_events", None)
+    strategy_comparison = None
+    if BACKTEST_STRATEGY_SET_FILE:
+        strategy_comparison = build_strategy_comparison_rows(
+            snapshots,
+            BACKTEST_STRATEGY_SET_FILE,
+        )
 
-    return {
+    report = {
         "timestamp": now.isoformat(),
         "snapshot_file_base": os.path.abspath(SNAPSHOT_LOG_FILE),
         "snapshot_files": snapshot_files,
@@ -1576,6 +1871,9 @@ def build_report():
             ],
         },
     }
+    if strategy_comparison is not None:
+        report["strategy_comparison"] = strategy_comparison
+    return report
 
 
 def write_report(report):
@@ -1594,18 +1892,26 @@ def write_report(report):
     with open(archive_file, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
 
-    return archive_file
+    comparison_csv_file = None
+    if report.get("strategy_comparison"):
+        comparison_csv_file = write_strategy_comparison_csv(
+            report["strategy_comparison"],
+            BACKTEST_STRATEGY_COMPARE_CSV_FILE,
+        )
+
+    return archive_file, comparison_csv_file
 
 
 def main():
     report = build_report()
-    archive_file = write_report(report)
+    archive_file, comparison_csv_file = write_report(report)
     print(json.dumps({
         "timestamp": report["timestamp"],
         "output_file": BACKTEST_OUTPUT_FILE,
         "archive_file": archive_file,
         "snapshot_count": report["snapshot_count"],
         "trade_event_count": report["trade_event_count"],
+        "strategy_comparison_csv_file": comparison_csv_file,
     }))
 
 
