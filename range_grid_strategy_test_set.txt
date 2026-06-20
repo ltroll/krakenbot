@@ -2,6 +2,7 @@
 # Relative paths resolve from the krakenbot repo root.
 # Blank lines and comment lines are ignored.
 
+range_grid_strategy_production_high_reversion.json
 range_grid_strategy_recovery_range_only.json
 range_grid_strategy_recovery_range_only_low_bias.json
 range_grid_strategy_recovery_range_only_low_median_only.json
