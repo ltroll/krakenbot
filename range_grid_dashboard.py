@@ -239,10 +239,26 @@ def key_value_rows(mapping):
     return "\n".join(rows)
 
 
+def render_grid_levels_table(levels):
+    if not isinstance(levels, list) or not levels:
+        return '<tr><td colspan="2">No current grid levels</td></tr>'
+
+    rows = []
+    for idx, level in enumerate(levels, start=1):
+        rows.append(
+            "<tr>"
+            f"<th>Level {idx}</th>"
+            f"<td>${html.escape(fmt_number(level, 2))}</td>"
+            "</tr>"
+        )
+    return "\n".join(rows)
+
+
 def render_dashboard(status, state, recent_summary, recent_events, alert_summary, now=None):
     now = now or utc_now()
     health_state, health_message = classify_health(status, alert_summary["recent"], now)
     inventory_buckets = (status or {}).get("inventory_buckets_usd") or {}
+    grid_levels = (status or {}).get("grid_levels") or []
     status_timestamp = (status or {}).get("timestamp")
     last_alert_ts = alert_summary["recent"][-1]["ts"] if alert_summary["recent"] else None
     top_actions = ", ".join(
@@ -301,6 +317,7 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
         (bucket, f"${fmt_number(value, 2)}")
         for bucket, value in sorted(inventory_buckets.items())
     ]) or '<tr><th>Inventory Buckets</th><td>--</td></tr>'
+    grid_level_rows = render_grid_levels_table(grid_levels)
 
     alert_rows = "\n".join(
         "<tr>"
@@ -491,6 +508,10 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
     </section>
 
     <section class="two">
+      <div class="panel">
+        <h2>Current Grid Levels</h2>
+        <table>{grid_level_rows}</table>
+      </div>
       <div class="panel">
         <h2>Inventory Buckets</h2>
         <table>{bucket_rows}</table>

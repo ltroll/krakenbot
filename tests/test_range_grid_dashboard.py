@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import timedelta
 
 import range_grid_dashboard as dashboard
 
@@ -9,6 +10,11 @@ import range_grid_dashboard as dashboard
 class RangeGridDashboardTests(unittest.TestCase):
     def test_build_dashboard_renders_expected_content(self):
         with tempfile.TemporaryDirectory() as tmpdir:
+            now = dashboard.utc_now()
+            status_ts = (now - timedelta(minutes=2)).isoformat()
+            buy_ts = (now - timedelta(minutes=30)).isoformat()
+            sell_ts = (now - timedelta(minutes=20)).isoformat()
+            alert_ts = (now - timedelta(minutes=10)).isoformat()
             status_file = os.path.join(tmpdir, "status.json")
             state_file = os.path.join(tmpdir, "state.json")
             trade_log_file = os.path.join(tmpdir, "trade_log.jsonl")
@@ -18,7 +24,7 @@ class RangeGridDashboardTests(unittest.TestCase):
             with open(status_file, "w", encoding="utf-8") as f:
                 json.dump(
                     {
-                        "timestamp": "2026-06-13T12:00:00+00:00",
+                        "timestamp": status_ts,
                         "strategy_profile": "range_grid_strategy_recovery_range_only.json",
                         "operating_mode": "range_plus_llm",
                         "price": 76543.2,
@@ -33,6 +39,7 @@ class RangeGridDashboardTests(unittest.TestCase):
                         "strategy_modes": ["low", "high"],
                         "configured_strategy_modes": ["low", "high", "llm_target"],
                         "grid_anchor": "low,high",
+                        "grid_levels": [76100.5, 75750.25, 75400.0],
                         "range_fallback_active": False,
                         "realized_pnl_today": 1.25,
                         "sell_backlog_count": 3,
@@ -58,12 +65,12 @@ class RangeGridDashboardTests(unittest.TestCase):
 
             with open(trade_log_file, "w", encoding="utf-8") as f:
                 f.write(json.dumps({
-                    "ts": "2026-06-13T11:30:00+00:00",
+                    "ts": buy_ts,
                     "event": "BUY_ORDER_PLACED",
                     "message": "BUY placed @ 76000"
                 }) + "\n")
                 f.write(json.dumps({
-                    "ts": "2026-06-13T11:40:00+00:00",
+                    "ts": sell_ts,
                     "event": "SELL_ORDER_FILLED",
                     "estimated_net_pnl": 0.42,
                     "message": "SELL filled"
@@ -71,7 +78,7 @@ class RangeGridDashboardTests(unittest.TestCase):
 
             with open(alert_log_file, "w", encoding="utf-8") as f:
                 f.write(json.dumps({
-                    "ts": "2026-06-13T11:50:00+00:00",
+                    "ts": alert_ts,
                     "event": "ALERT",
                     "severity": "warning",
                     "alert_type": "order_tracker_error",
@@ -107,6 +114,9 @@ class RangeGridDashboardTests(unittest.TestCase):
             self.assertIn("range_grid_strategy_recovery_range_only.json", html_text)
             self.assertIn("Order tracker update failed", html_text)
             self.assertIn("250.55", html_text)
+            self.assertIn("Current Grid Levels", html_text)
+            self.assertIn("76,100.50", html_text)
+            self.assertIn("75,750.25", html_text)
 
     def test_build_dashboard_handles_missing_inputs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
