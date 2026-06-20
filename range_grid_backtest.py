@@ -988,7 +988,7 @@ def write_strategy_comparison_csv(comparison, output_path):
         "potential_avg_max_drawdown_pct",
     ]
     with open(resolved, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
@@ -1010,6 +1010,9 @@ def write_ranked_strategy_csv(comparison, output_path):
         "practical_score",
         "approved_candidates",
         "candidate_efficiency",
+        "approved_llm_target",
+        "dynamic_anchor_mode",
+        "potential_evaluated_count",
         "potential_take_profit_reached_rate",
         "potential_avg_end_return_pct",
         "potential_avg_max_runup_pct",
@@ -1029,7 +1032,7 @@ def write_ranked_strategy_csv(comparison, output_path):
         "strategy_file",
     ]
     with open(resolved, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
