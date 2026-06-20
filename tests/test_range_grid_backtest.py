@@ -1077,6 +1077,97 @@ class RangeGridBacktestTests(unittest.TestCase):
             self.assertIn("baseline", text)
             self.assertIn("approved_candidates", text)
 
+    def test_build_ranked_strategy_rows_sorts_best_candidate_first(self):
+        comparison = {
+            "rows": [
+                {
+                    "strategy_label": "slower",
+                    "strategy_file": "/tmp/slower.json",
+                    "grid_anchor": "low,median,high",
+                    "operating_mode": "range_only",
+                    "sentiment_control_mode": "risk_modulated",
+                    "entry_step_pct": 0.0045,
+                    "volatility_reference_pct": 0.02,
+                    "raw_candidates": 20,
+                    "approved_candidates": 1,
+                    "hold_snapshots": 10,
+                    "approved_range_low": 0,
+                    "approved_range_median": 1,
+                    "approved_range_high_band": 0,
+                    "blocked_price_above_level": 19,
+                    "blocked_sentiment_high": 0,
+                    "potential_take_profit_reached_rate": 0.25,
+                    "potential_avg_end_return_pct": 0.03,
+                    "potential_avg_max_runup_pct": 0.2,
+                    "potential_avg_max_drawdown_pct": -0.3,
+                },
+                {
+                    "strategy_label": "better",
+                    "strategy_file": "/tmp/better.json",
+                    "grid_anchor": "low,median,high",
+                    "operating_mode": "range_only",
+                    "sentiment_control_mode": "risk_modulated",
+                    "entry_step_pct": 0.0045,
+                    "volatility_reference_pct": 0.0235,
+                    "raw_candidates": 10,
+                    "approved_candidates": 3,
+                    "hold_snapshots": 5,
+                    "approved_range_low": 0,
+                    "approved_range_median": 3,
+                    "approved_range_high_band": 0,
+                    "blocked_price_above_level": 7,
+                    "blocked_sentiment_high": 0,
+                    "potential_take_profit_reached_rate": 0.66,
+                    "potential_avg_end_return_pct": 0.11,
+                    "potential_avg_max_runup_pct": 0.35,
+                    "potential_avg_max_drawdown_pct": -0.18,
+                },
+            ]
+        }
+
+        ranked = backtest.build_ranked_strategy_rows(comparison)
+
+        self.assertEqual(ranked[0]["strategy_label"], "better")
+        self.assertGreater(ranked[0]["practical_score"], ranked[1]["practical_score"])
+        self.assertIn("candidate_efficiency", ranked[0])
+
+    def test_write_ranked_strategy_csv_outputs_ranked_table(self):
+        comparison = {
+            "rows": [
+                {
+                    "strategy_label": "baseline",
+                    "strategy_file": "/tmp/baseline.json",
+                    "grid_anchor": "low,median,high",
+                    "operating_mode": "range_only",
+                    "sentiment_control_mode": "risk_modulated",
+                    "entry_step_pct": 0.0045,
+                    "volatility_reference_pct": 0.02,
+                    "raw_candidates": 10,
+                    "approved_candidates": 2,
+                    "hold_snapshots": 5,
+                    "approved_range_low": 0,
+                    "approved_range_median": 2,
+                    "approved_range_high_band": 0,
+                    "blocked_price_above_level": 8,
+                    "blocked_sentiment_high": 0,
+                    "potential_take_profit_reached_rate": 0.5,
+                    "potential_avg_end_return_pct": 0.12,
+                    "potential_avg_max_runup_pct": 0.4,
+                    "potential_avg_max_drawdown_pct": -0.2,
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "ranked.csv")
+            resolved = backtest.write_ranked_strategy_csv(comparison, output_path)
+
+            self.assertEqual(resolved, output_path)
+            with open(output_path, encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn("practical_score", text)
+            self.assertIn("candidate_efficiency", text)
+            self.assertIn("baseline", text)
+
 
 if __name__ == "__main__":
     unittest.main()

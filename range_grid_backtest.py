@@ -49,6 +49,10 @@ BACKTEST_STRATEGY_COMPARE_CSV_FILE = os.getenv(
     "RANGE_GRID_BACKTEST_STRATEGY_COMPARE_CSV_FILE",
     "/var/www/html/bot/range_grid_backtest_strategy_compare.csv"
 )
+BACKTEST_STRATEGY_RANKED_CSV_FILE = os.getenv(
+    "RANGE_GRID_BACKTEST_STRATEGY_RANKED_CSV_FILE",
+    "/var/www/html/bot/range_grid_backtest_strategy_ranked.csv"
+)
 
 
 def now_utc():
@@ -905,6 +909,50 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
     }
 
 
+def practical_strategy_score(row):
+    approved = row.get("approved_candidates") or 0
+    take_profit_rate = row.get("potential_take_profit_reached_rate") or 0.0
+    avg_end_return = row.get("potential_avg_end_return_pct")
+    avg_end_return = avg_end_return if avg_end_return is not None else -1.0
+    hold_snapshots = row.get("hold_snapshots") or 0
+    raw_candidates = row.get("raw_candidates") or 0
+    candidate_efficiency = (approved / raw_candidates) if raw_candidates > 0 else 0.0
+    blocked_high = row.get("blocked_sentiment_high") or 0
+
+    score = (
+        (approved * 10.0)
+        + (take_profit_rate * 100.0)
+        + (avg_end_return * 20.0)
+        + (candidate_efficiency * 50.0)
+        - (hold_snapshots * 0.01)
+        - (blocked_high * 0.005)
+    )
+    return round(score, 6)
+
+
+def build_ranked_strategy_rows(comparison):
+    ranked_rows = []
+    for row in comparison.get("rows") or []:
+        ranked = dict(row)
+        ranked["candidate_efficiency"] = round(
+            ((row.get("approved_candidates") or 0) / (row.get("raw_candidates") or 1)),
+            6,
+        ) if (row.get("raw_candidates") or 0) > 0 else 0.0
+        ranked["practical_score"] = practical_strategy_score(row)
+        ranked_rows.append(ranked)
+
+    ranked_rows.sort(
+        key=lambda row: (
+            -(row.get("practical_score") or -999999),
+            -(row.get("approved_candidates") or 0),
+            -((row.get("potential_take_profit_reached_rate") or 0)),
+            -((row.get("potential_avg_end_return_pct") or -999999)),
+            row.get("strategy_label") or "",
+        )
+    )
+    return ranked_rows
+
+
 def write_strategy_comparison_csv(comparison, output_path):
     rows = comparison.get("rows") or []
     if not rows:
@@ -938,6 +986,47 @@ def write_strategy_comparison_csv(comparison, output_path):
         "potential_avg_end_return_pct",
         "potential_avg_max_runup_pct",
         "potential_avg_max_drawdown_pct",
+    ]
+    with open(resolved, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    return resolved
+
+
+def write_ranked_strategy_csv(comparison, output_path):
+    rows = build_ranked_strategy_rows(comparison)
+    if not rows:
+        return None
+
+    resolved = resolve_repo_path(output_path)
+    output_dir = os.path.dirname(resolved)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    fieldnames = [
+        "strategy_label",
+        "practical_score",
+        "approved_candidates",
+        "candidate_efficiency",
+        "potential_take_profit_reached_rate",
+        "potential_avg_end_return_pct",
+        "potential_avg_max_runup_pct",
+        "potential_avg_max_drawdown_pct",
+        "raw_candidates",
+        "hold_snapshots",
+        "approved_range_low",
+        "approved_range_median",
+        "approved_range_high_band",
+        "blocked_price_above_level",
+        "blocked_sentiment_high",
+        "entry_step_pct",
+        "volatility_reference_pct",
+        "grid_anchor",
+        "operating_mode",
+        "sentiment_control_mode",
+        "strategy_file",
     ]
     with open(resolved, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1893,18 +1982,23 @@ def write_report(report):
         json.dump(report, f, indent=2)
 
     comparison_csv_file = None
+    ranked_comparison_csv_file = None
     if report.get("strategy_comparison"):
         comparison_csv_file = write_strategy_comparison_csv(
             report["strategy_comparison"],
             BACKTEST_STRATEGY_COMPARE_CSV_FILE,
         )
+        ranked_comparison_csv_file = write_ranked_strategy_csv(
+            report["strategy_comparison"],
+            BACKTEST_STRATEGY_RANKED_CSV_FILE,
+        )
 
-    return archive_file, comparison_csv_file
+    return archive_file, comparison_csv_file, ranked_comparison_csv_file
 
 
 def main():
     report = build_report()
-    archive_file, comparison_csv_file = write_report(report)
+    archive_file, comparison_csv_file, ranked_comparison_csv_file = write_report(report)
     print(json.dumps({
         "timestamp": report["timestamp"],
         "output_file": BACKTEST_OUTPUT_FILE,
@@ -1912,6 +2006,7 @@ def main():
         "snapshot_count": report["snapshot_count"],
         "trade_event_count": report["trade_event_count"],
         "strategy_comparison_csv_file": comparison_csv_file,
+        "strategy_ranked_csv_file": ranked_comparison_csv_file,
     }))
 
 
