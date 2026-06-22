@@ -555,6 +555,42 @@ max_consecutive_private_api_failures = profile_int(
     "max_consecutive_private_api_failures",
     10
 )
+execution_quality_alerts_enabled = profile_bool(
+    "execution_quality_alerts_enabled",
+    True
+)
+execution_quality_min_approved_candidates = profile_int(
+    "execution_quality_min_approved_candidates",
+    25
+)
+execution_quality_min_buy_orders_placed = profile_int(
+    "execution_quality_min_buy_orders_placed",
+    10
+)
+execution_quality_min_buy_orders_filled_for_exit_alert = profile_int(
+    "execution_quality_min_buy_orders_filled_for_exit_alert",
+    10
+)
+execution_quality_min_approval_to_placement_rate = profile_float(
+    "execution_quality_min_approval_to_placement_rate",
+    0.9
+)
+execution_quality_min_placement_to_fill_rate = profile_float(
+    "execution_quality_min_placement_to_fill_rate",
+    0.4
+)
+execution_quality_min_fill_to_exit_rate = profile_float(
+    "execution_quality_min_fill_to_exit_rate",
+    0.25
+)
+execution_quality_max_buy_rejections = profile_int(
+    "execution_quality_max_buy_rejections",
+    5
+)
+execution_quality_exit_backlog_min_age_minutes = profile_int(
+    "execution_quality_exit_backlog_min_age_minutes",
+    360
+)
 grid_anchor = strategy_config.get("grid_anchor", "low").strip().lower()
 operating_mode = normalize_operating_mode(
     strategy_config.get("operating_mode", "range_plus_llm")
@@ -720,6 +756,130 @@ def safe_rate(numerator, denominator):
         return round(float(numerator or 0) / denominator_value, 4)
     except Exception:
         return None
+
+
+def build_execution_quality_snapshot(stats):
+    stats = stats or {}
+    return {
+        "approval_to_placement_rate": safe_rate(
+            stats.get("buy_orders_placed"),
+            stats.get("approved_buy_candidates")
+        ),
+        "placement_to_fill_rate": safe_rate(
+            stats.get("buy_orders_filled"),
+            stats.get("buy_orders_placed")
+        ),
+        "fill_to_exit_rate": safe_rate(
+            stats.get("sell_orders_filled"),
+            stats.get("buy_orders_filled")
+        ),
+    }
+
+
+def emit_execution_quality_alerts(
+    *,
+    cycle_id,
+    stats,
+    execution_quality,
+    sell_backlog,
+):
+    if not execution_quality_alerts_enabled:
+        return
+
+    approved_candidates = int(stats.get("approved_buy_candidates", 0) or 0)
+    buy_rejections = int(stats.get("buy_order_rejections", 0) or 0)
+    buy_orders_placed = int(stats.get("buy_orders_placed", 0) or 0)
+    buy_orders_filled = int(stats.get("buy_orders_filled", 0) or 0)
+    sell_orders_filled = int(stats.get("sell_orders_filled", 0) or 0)
+
+    approval_to_placement_rate = execution_quality.get(
+        "approval_to_placement_rate"
+    )
+    placement_to_fill_rate = execution_quality.get("placement_to_fill_rate")
+    fill_to_exit_rate = execution_quality.get("fill_to_exit_rate")
+
+    if (
+        approved_candidates >= execution_quality_min_approved_candidates
+        and approval_to_placement_rate is not None
+        and approval_to_placement_rate < execution_quality_min_approval_to_placement_rate
+    ):
+        emit_alert(
+            "execution_quality_approval_to_placement",
+            "warning",
+            "Approval to placement conversion is below threshold",
+            cycle_id=cycle_id,
+            approved_buy_candidates=approved_candidates,
+            buy_orders_placed=buy_orders_placed,
+            buy_order_rejections=buy_rejections,
+            approval_to_placement_rate=approval_to_placement_rate,
+            min_approval_to_placement_rate=(
+                execution_quality_min_approval_to_placement_rate
+            ),
+        )
+
+    if (
+        buy_orders_placed >= execution_quality_min_buy_orders_placed
+        and placement_to_fill_rate is not None
+        and placement_to_fill_rate < execution_quality_min_placement_to_fill_rate
+    ):
+        emit_alert(
+            "execution_quality_placement_to_fill",
+            "warning",
+            "Placement to fill conversion is below threshold",
+            cycle_id=cycle_id,
+            buy_orders_placed=buy_orders_placed,
+            buy_orders_filled=buy_orders_filled,
+            placement_to_fill_rate=placement_to_fill_rate,
+            min_placement_to_fill_rate=(
+                execution_quality_min_placement_to_fill_rate
+            ),
+        )
+
+    if (
+        execution_quality_max_buy_rejections > 0
+        and buy_rejections >= execution_quality_max_buy_rejections
+    ):
+        emit_alert(
+            "execution_quality_buy_rejections",
+            "warning",
+            "Buy order rejections exceeded threshold",
+            cycle_id=cycle_id,
+            buy_order_rejections=buy_rejections,
+            max_buy_rejections=execution_quality_max_buy_rejections,
+            approved_buy_candidates=approved_candidates,
+            buy_orders_placed=buy_orders_placed,
+        )
+
+    if (
+        buy_orders_filled >= execution_quality_min_buy_orders_filled_for_exit_alert
+        and fill_to_exit_rate is not None
+        and fill_to_exit_rate < execution_quality_min_fill_to_exit_rate
+        and (
+            float(sell_backlog.get("oldest_age_minutes") or 0.0)
+            >= execution_quality_exit_backlog_min_age_minutes
+        )
+    ):
+        emit_alert(
+            "execution_quality_fill_to_exit",
+            "warning",
+            "Fill to exit conversion is below threshold with aged sell backlog",
+            cycle_id=cycle_id,
+            buy_orders_filled=buy_orders_filled,
+            sell_orders_filled=sell_orders_filled,
+            sell_backlog_count=sell_backlog.get("count"),
+            sell_backlog_oldest_minutes=round(
+                float(sell_backlog.get("oldest_age_minutes") or 0.0),
+                2
+            ),
+            fill_to_exit_rate=fill_to_exit_rate,
+            min_fill_to_exit_rate=execution_quality_min_fill_to_exit_rate,
+            min_buy_orders_filled=(
+                execution_quality_min_buy_orders_filled_for_exit_alert
+            ),
+            min_sell_backlog_oldest_minutes=(
+                execution_quality_exit_backlog_min_age_minutes
+            ),
+        )
 
 
 def key_fingerprint(value):
@@ -4213,6 +4373,15 @@ def main():
                 ),
                 actions=actions or ["no_action"]
             )
+            execution_quality = build_execution_quality_snapshot(
+                state["stats"]
+            )
+            emit_execution_quality_alerts(
+                cycle_id=cycle_id,
+                stats=state["stats"],
+                execution_quality=execution_quality,
+                sell_backlog=sell_backlog,
+            )
             write_status_snapshot({
                 "timestamp": cycle_id,
                 "operating_mode": operating_mode,
@@ -4297,20 +4466,7 @@ def main():
                         {}
                     ),
                 },
-                "execution_quality": {
-                    "approval_to_placement_rate": safe_rate(
-                        state["stats"]["buy_orders_placed"],
-                        state["stats"]["approved_buy_candidates"]
-                    ),
-                    "placement_to_fill_rate": safe_rate(
-                        state["stats"]["buy_orders_filled"],
-                        state["stats"]["buy_orders_placed"]
-                    ),
-                    "fill_to_exit_rate": safe_rate(
-                        state["stats"]["sell_orders_filled"],
-                        state["stats"]["buy_orders_filled"]
-                    ),
-                },
+                "execution_quality": execution_quality,
                 "actions": actions or ["no_action"],
             })
             if state.get("consecutive_loop_errors", 0):
