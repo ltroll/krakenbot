@@ -148,16 +148,22 @@ def compute_recent_metrics(trade_records, now=None):
     now = now or utc_now()
     lookback_cutoff = now - timedelta(hours=LOOKBACK_HOURS)
     summary = {
+        "approved_candidates": 0,
         "buys_placed": 0,
         "buys_filled": 0,
         "sells_placed": 0,
         "sells_filled": 0,
+        "buy_rejections": 0,
         "order_rejected": 0,
         "loop_errors": 0,
         "alerts": 0,
         "reconciliations": 0,
         "realized_net_pnl": 0.0,
         "actions": Counter(),
+        "approved_by_source": Counter(),
+        "placed_by_source": Counter(),
+        "filled_by_source": Counter(),
+        "exited_by_source": Counter(),
     }
     recent = []
 
@@ -166,20 +172,28 @@ def compute_recent_metrics(trade_records, now=None):
         if ts is None or ts < lookback_cutoff:
             continue
         event = record.get("event")
-        if event == "BUY_ORDER_PLACED":
+        if event == "TRADE_DECISION" and record.get("side") == "buy":
+            summary["approved_candidates"] += 1
+            summary["approved_by_source"][record.get("buy_source") or "unknown"] += 1
+        elif event == "BUY_ORDER_PLACED":
             summary["buys_placed"] += 1
+            summary["placed_by_source"][record.get("buy_source") or "unknown"] += 1
         elif event == "BUY_ORDER_FILLED":
             summary["buys_filled"] += 1
+            summary["filled_by_source"][record.get("buy_source") or "unknown"] += 1
         elif event == "SELL_ORDER_PLACED":
             summary["sells_placed"] += 1
         elif event == "SELL_ORDER_FILLED":
             summary["sells_filled"] += 1
+            summary["exited_by_source"][record.get("buy_source") or "unknown"] += 1
             try:
                 summary["realized_net_pnl"] += float(record.get("estimated_net_pnl") or 0.0)
             except Exception:
                 pass
         elif event == "ORDER_REJECTED":
             summary["order_rejected"] += 1
+            if record.get("side") == "buy":
+                summary["buy_rejections"] += 1
         elif event == "LOOP_ERROR":
             summary["loop_errors"] += 1
         elif event == "ALERT":
@@ -192,6 +206,78 @@ def compute_recent_metrics(trade_records, now=None):
             recent.append(record)
 
     return summary, recent[-RECENT_EVENT_LIMIT:]
+
+
+def render_source_counter(counter):
+    if not counter:
+        return "--"
+    return ", ".join(
+        f"{name} ({count})"
+        for name, count in counter.most_common()
+    )
+
+
+def execution_metric_rows(status, recent_summary):
+    lifetime_stats = ((status or {}).get("stats") or {})
+    lifetime_quality = ((status or {}).get("execution_quality") or {})
+
+    return key_value_rows([
+        ("Recent Approved Candidates", recent_summary.get("approved_candidates", 0)),
+        ("Recent Approval -> Placement", fmt_pct(
+            (
+                (recent_summary["buys_placed"] / recent_summary["approved_candidates"]) * 100
+                if recent_summary.get("approved_candidates")
+                else None
+            ),
+            1,
+        )),
+        ("Recent Placement -> Fill", fmt_pct(
+            (
+                (recent_summary["buys_filled"] / recent_summary["buys_placed"]) * 100
+                if recent_summary.get("buys_placed")
+                else None
+            ),
+            1,
+        )),
+        ("Recent Fill -> Exit", fmt_pct(
+            (
+                (recent_summary["sells_filled"] / recent_summary["buys_filled"]) * 100
+                if recent_summary.get("buys_filled")
+                else None
+            ),
+            1,
+        )),
+        ("Recent Buy Rejections", recent_summary.get("buy_rejections", 0)),
+        ("Recent Approved Sources", render_source_counter(recent_summary.get("approved_by_source"))),
+        ("Recent Placed Sources", render_source_counter(recent_summary.get("placed_by_source"))),
+        ("Recent Filled Sources", render_source_counter(recent_summary.get("filled_by_source"))),
+        ("Recent Exited Sources", render_source_counter(recent_summary.get("exited_by_source"))),
+        ("Lifetime Approved Candidates", lifetime_stats.get("approved_buy_candidates", "--")),
+        ("Lifetime Approval -> Placement", fmt_pct(
+            (
+                float(lifetime_quality.get("approval_to_placement_rate")) * 100
+                if lifetime_quality.get("approval_to_placement_rate") is not None
+                else None
+            ),
+            1,
+        )),
+        ("Lifetime Placement -> Fill", fmt_pct(
+            (
+                float(lifetime_quality.get("placement_to_fill_rate")) * 100
+                if lifetime_quality.get("placement_to_fill_rate") is not None
+                else None
+            ),
+            1,
+        )),
+        ("Lifetime Fill -> Exit", fmt_pct(
+            (
+                float(lifetime_quality.get("fill_to_exit_rate")) * 100
+                if lifetime_quality.get("fill_to_exit_rate") is not None
+                else None
+            ),
+            1,
+        )),
+    ])
 
 
 def compute_alert_metrics(alert_records, now=None):
@@ -303,15 +389,18 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
     ])
 
     kpi_rows = key_value_rows([
+        ("Approved Candidates", recent_summary["approved_candidates"]),
         ("Buys Placed", recent_summary["buys_placed"]),
         ("Buys Filled", recent_summary["buys_filled"]),
         ("Sells Placed", recent_summary["sells_placed"]),
         ("Sells Filled", recent_summary["sells_filled"]),
+        ("Buy Rejections", recent_summary["buy_rejections"]),
         ("Order Rejections", recent_summary["order_rejected"]),
         ("Loop Errors", recent_summary["loop_errors"]),
         ("Reconciliations", recent_summary["reconciliations"]),
         ("Top Recent Events", top_actions),
     ])
+    execution_rows = execution_metric_rows(status, recent_summary)
 
     bucket_rows = key_value_rows([
         (bucket, f"${fmt_number(value, 2)}")
@@ -511,6 +600,10 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
       <div class="panel">
         <h2>Current Grid Levels</h2>
         <table>{grid_level_rows}</table>
+      </div>
+      <div class="panel">
+        <h2>Execution Quality</h2>
+        <table>{execution_rows}</table>
       </div>
       <div class="panel">
         <h2>Inventory Buckets</h2>

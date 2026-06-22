@@ -703,6 +703,25 @@ def write_status_snapshot(payload):
         log_event("STATUS_FILE_WRITE_ERROR", message=str(e), status_file=os.path.abspath(STATUS_FILE))
 
 
+def increment_source_stat(stats, field, buy_source):
+    source_counts = stats.setdefault(field, {})
+    if not isinstance(source_counts, dict):
+        source_counts = {}
+        stats[field] = source_counts
+    source_key = str(buy_source or "unknown")
+    source_counts[source_key] = int(source_counts.get(source_key, 0) or 0) + 1
+
+
+def safe_rate(numerator, denominator):
+    try:
+        denominator_value = float(denominator or 0)
+        if denominator_value <= 0:
+            return None
+        return round(float(numerator or 0) / denominator_value, 4)
+    except Exception:
+        return None
+
+
 def key_fingerprint(value):
     if not value:
         return "missing"
@@ -1099,12 +1118,19 @@ def load_state():
         "consecutive_loop_errors": 0,
         "consecutive_private_api_failures": 0,
         "stats": {
+            "approved_buy_candidates": 0,
             "buy_orders_placed": 0,
             "buy_orders_filled": 0,
             "sell_orders_placed": 0,
             "sell_orders_filled": 0,
+            "buy_order_rejections": 0,
             "realized_gross_pnl": 0.0,
-            "realized_estimated_net_pnl": 0.0
+            "realized_estimated_net_pnl": 0.0,
+            "approved_counts_by_source": {},
+            "buy_orders_placed_by_source": {},
+            "buy_orders_filled_by_source": {},
+            "sell_orders_placed_by_source": {},
+            "sell_orders_filled_by_source": {}
         }
     }
 
@@ -1146,12 +1172,19 @@ def normalize_state(state):
             state["processed_fills"][side] = {}
 
     for key, default_value in {
+        "approved_buy_candidates": 0,
         "buy_orders_placed": 0,
         "buy_orders_filled": 0,
         "sell_orders_placed": 0,
         "sell_orders_filled": 0,
+        "buy_order_rejections": 0,
         "realized_gross_pnl": 0.0,
-        "realized_estimated_net_pnl": 0.0
+        "realized_estimated_net_pnl": 0.0,
+        "approved_counts_by_source": {},
+        "buy_orders_placed_by_source": {},
+        "buy_orders_filled_by_source": {},
+        "sell_orders_placed_by_source": {},
+        "sell_orders_filled_by_source": {}
     }.items():
         state["stats"].setdefault(key, default_value)
 
@@ -2921,6 +2954,11 @@ def main():
                     if order.get("buy_source") == "llm_target":
                         state["last_llm_sell_at"] = cycle_id
                     state["stats"]["sell_orders_filled"] += 1
+                    increment_source_stat(
+                        state["stats"],
+                        "sell_orders_filled_by_source",
+                        order.get("buy_source")
+                    )
                     if gross_pnl is not None:
                         state["stats"]["realized_gross_pnl"] += gross_pnl
                     if estimated_net_pnl is not None:
@@ -3205,6 +3243,11 @@ def main():
                 first_buy_fill_processing = not fill_already_processed("buy", txid)
                 if first_buy_fill_processing:
                     state["stats"]["buy_orders_filled"] += 1
+                    increment_source_stat(
+                        state["stats"],
+                        "buy_orders_filled_by_source",
+                        buy_source
+                    )
                     order["filled_at"] = cycle_id
                     mark_fill_processed("buy", txid, cycle_id)
                     actions.append("buy_filled")
@@ -3410,6 +3453,11 @@ def main():
                 }
                 del state["open_buy_orders"][level]
                 state["stats"]["sell_orders_placed"] += 1
+                increment_source_stat(
+                    state["stats"],
+                    "sell_orders_placed_by_source",
+                    buy_source
+                )
                 save_state(state)
                 actions.append("sell_placed")
 
@@ -3858,6 +3906,12 @@ def main():
                         sell_pct_override=active_sell_pct_override
                     )
 
+                    state["stats"]["approved_buy_candidates"] += 1
+                    increment_source_stat(
+                        state["stats"],
+                        "approved_counts_by_source",
+                        buy_source
+                    )
                     buy_resp = kraken_call(
                         "BUY",
                         place_buy,
@@ -3867,6 +3921,8 @@ def main():
 
                     if not buy_resp or buy_resp.get("error"):
                         actions.append("buy_rejected")
+                        state["stats"]["buy_order_rejections"] += 1
+                        save_state(state)
                         log_event(
                             "ORDER_REJECTED",
                             cycle_id=cycle_id,
@@ -3900,6 +3956,11 @@ def main():
                             high_anchor_buy_cooldown_minutes
                         )
                     state["stats"]["buy_orders_placed"] += 1
+                    increment_source_stat(
+                        state["stats"],
+                        "buy_orders_placed_by_source",
+                        buy_source
+                    )
                     save_state(state)
                     actions.append("buy_placed")
                     deployed_inventory_usd = projected_inventory_usd
@@ -4199,15 +4260,55 @@ def main():
                     for bucket, value in inventory_usd_by_bucket(price).items()
                 },
                 "stats": {
+                    "approved_buy_candidates": state["stats"][
+                        "approved_buy_candidates"
+                    ],
                     "buy_orders_placed": state["stats"]["buy_orders_placed"],
                     "buy_orders_filled": state["stats"]["buy_orders_filled"],
                     "sell_orders_placed": state["stats"]["sell_orders_placed"],
                     "sell_orders_filled": state["stats"]["sell_orders_filled"],
+                    "buy_order_rejections": state["stats"][
+                        "buy_order_rejections"
+                    ],
                     "realized_gross_pnl": round(
                         state["stats"]["realized_gross_pnl"], 8
                     ),
                     "realized_estimated_net_pnl": round(
                         state["stats"]["realized_estimated_net_pnl"], 8
+                    ),
+                    "approved_counts_by_source": state["stats"].get(
+                        "approved_counts_by_source",
+                        {}
+                    ),
+                    "buy_orders_placed_by_source": state["stats"].get(
+                        "buy_orders_placed_by_source",
+                        {}
+                    ),
+                    "buy_orders_filled_by_source": state["stats"].get(
+                        "buy_orders_filled_by_source",
+                        {}
+                    ),
+                    "sell_orders_placed_by_source": state["stats"].get(
+                        "sell_orders_placed_by_source",
+                        {}
+                    ),
+                    "sell_orders_filled_by_source": state["stats"].get(
+                        "sell_orders_filled_by_source",
+                        {}
+                    ),
+                },
+                "execution_quality": {
+                    "approval_to_placement_rate": safe_rate(
+                        state["stats"]["buy_orders_placed"],
+                        state["stats"]["approved_buy_candidates"]
+                    ),
+                    "placement_to_fill_rate": safe_rate(
+                        state["stats"]["buy_orders_filled"],
+                        state["stats"]["buy_orders_placed"]
+                    ),
+                    "fill_to_exit_rate": safe_rate(
+                        state["stats"]["sell_orders_filled"],
+                        state["stats"]["buy_orders_filled"]
                     ),
                 },
                 "actions": actions or ["no_action"],

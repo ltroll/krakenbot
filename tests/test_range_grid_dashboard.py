@@ -40,6 +40,11 @@ class RangeGridDashboardTests(unittest.TestCase):
                         "configured_strategy_modes": ["low", "high", "llm_target"],
                         "grid_anchor": "low,high",
                         "grid_levels": [76100.5, 75750.25, 75400.0],
+                        "execution_quality": {
+                            "approval_to_placement_rate": 0.8,
+                            "placement_to_fill_rate": 0.5,
+                            "fill_to_exit_rate": 0.75,
+                        },
                         "range_fallback_active": False,
                         "realized_pnl_today": 1.25,
                         "sell_backlog_count": 3,
@@ -52,10 +57,12 @@ class RangeGridDashboardTests(unittest.TestCase):
                 json.dump(
                     {
                         "stats": {
+                            "approved_buy_candidates": 15,
                             "buy_orders_placed": 12,
                             "buy_orders_filled": 8,
                             "sell_orders_placed": 7,
                             "sell_orders_filled": 5,
+                            "buy_order_rejections": 2,
                             "realized_gross_pnl": 1.75,
                             "realized_estimated_net_pnl": 1.22,
                         }
@@ -66,12 +73,27 @@ class RangeGridDashboardTests(unittest.TestCase):
             with open(trade_log_file, "w", encoding="utf-8") as f:
                 f.write(json.dumps({
                     "ts": buy_ts,
+                    "event": "TRADE_DECISION",
+                    "side": "buy",
+                    "buy_source": "range_high_band",
+                    "message": ""
+                }) + "\n")
+                f.write(json.dumps({
+                    "ts": buy_ts,
                     "event": "BUY_ORDER_PLACED",
+                    "buy_source": "range_high_band",
                     "message": "BUY placed @ 76000"
+                }) + "\n")
+                f.write(json.dumps({
+                    "ts": buy_ts,
+                    "event": "BUY_ORDER_FILLED",
+                    "buy_source": "range_high_band",
+                    "message": "BUY filled @ 76000"
                 }) + "\n")
                 f.write(json.dumps({
                     "ts": sell_ts,
                     "event": "SELL_ORDER_FILLED",
+                    "buy_source": "range_high_band",
                     "estimated_net_pnl": 0.42,
                     "message": "SELL filled"
                 }) + "\n")
@@ -115,6 +137,10 @@ class RangeGridDashboardTests(unittest.TestCase):
             self.assertIn("Order tracker update failed", html_text)
             self.assertIn("250.55", html_text)
             self.assertIn("Current Grid Levels", html_text)
+            self.assertIn("Execution Quality", html_text)
+            self.assertIn("Recent Approved Candidates", html_text)
+            self.assertIn("Lifetime Approved Candidates", html_text)
+            self.assertIn("80.0%", html_text)
             self.assertIn("76,100.50", html_text)
             self.assertIn("75,750.25", html_text)
 
