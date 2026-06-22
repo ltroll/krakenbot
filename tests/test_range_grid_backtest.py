@@ -175,6 +175,33 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(result["summary"]["approved_candidates"], 1)
         self.assertEqual(result["summary"]["approved_counts_by_source"]["llm_target"], 1)
 
+    def test_approved_event_profit_target_pct_uses_source_and_regime_policy(self):
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            104.5,
+            action_recommendation="watch_only",
+            strategy_modes=["high"],
+            strategy_overrides={
+                "profit_target_pct": 0.01,
+                "min_profit_target_pct": 0.004,
+                "sentiment_defensive_threshold": 0.03,
+                "sentiment_risk_on_threshold": 0.12,
+                "sentiment_defensive_profit_target_offset_pct": -0.0005,
+                "sell_target_offset_pct_by_source": {
+                    "range_high_band": -0.0015,
+                },
+            },
+        )
+        snapshot["signal"]["payload"]["execution_signal"] = 0.02
+        event = {
+            "buy_source": "range_high_band",
+            "sell_pct_override": 0.006,
+        }
+
+        result = backtest.approved_event_profit_target_pct(snapshot, event)
+
+        self.assertAlmostEqual(result, 0.004, places=6)
+
     def test_replay_accepts_multi_asset_signal_payload(self):
         snapshot = make_snapshot(
             "2026-06-13T12:00:00+00:00",

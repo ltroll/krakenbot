@@ -20,6 +20,14 @@ class RangeGridGuardrailsTests(unittest.TestCase):
         })
         self.assertTrue(any("max_inventory_usd_by_bucket.llm_target" in error for error in errors))
 
+    def test_validate_strategy_config_rejects_bad_sell_policy_source_map(self):
+        errors = guardrails.validate_strategy_config({
+            "grid_anchor": "low,high",
+            "operating_mode": "range_plus_llm",
+            "aging_start_minutes_by_source": {"banana": 30},
+        })
+        self.assertTrue(any("aging_start_minutes_by_source.banana" in error for error in errors))
+
     def test_summarize_sell_backlog_counts_and_ages(self):
         now = datetime(2026, 6, 13, 12, 0, tzinfo=timezone.utc)
         summary = guardrails.summarize_sell_backlog(

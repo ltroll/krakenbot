@@ -295,6 +295,198 @@ def positive_or_default(value, default=None):
     return numeric
 
 
+def normalized_source_config_map(config, key):
+    raw_value = config.get(key, {})
+    if not isinstance(raw_value, dict):
+        return {}
+
+    normalized = {}
+    for source, value in raw_value.items():
+        source_key = str(source or "").strip().lower()
+        try:
+            normalized[source_key] = float(value)
+        except Exception:
+            continue
+    return normalized
+
+
+def source_sell_policy(config, buy_source):
+    source_key = str(buy_source or "").strip().lower()
+    configured_profit_target = safe_float(config.get("profit_target_pct")) or 0.0
+    configured_min_profit_target = safe_float(
+        config.get("min_profit_target_pct", configured_profit_target)
+    ) or 0.0
+    return {
+        "profit_target_offset_pct": normalized_source_config_map(
+            config,
+            "sell_target_offset_pct_by_source",
+        ).get(source_key, 0.0),
+        "aging_start_minutes": normalized_source_config_map(
+            config,
+            "aging_start_minutes_by_source",
+        ).get(
+            source_key,
+            int(config.get("aging_start_minutes", 999999) or 999999),
+        ),
+        "aging_step_minutes": normalized_source_config_map(
+            config,
+            "aging_step_minutes_by_source",
+        ).get(
+            source_key,
+            int(config.get("aging_step_minutes", 60) or 60),
+        ),
+        "aging_profit_reduction_pct": normalized_source_config_map(
+            config,
+            "aging_profit_reduction_pct_by_source",
+        ).get(
+            source_key,
+            safe_float(config.get("aging_profit_reduction_pct")) or 0.0,
+        ),
+        "min_profit_target_pct": normalized_source_config_map(
+            config,
+            "min_profit_target_pct_by_source",
+        ).get(
+            source_key,
+            configured_min_profit_target,
+        ),
+    }
+
+
+def sell_policy_regime(config, signal):
+    action_recommendation = signal.get("action_recommendation") or "neutral"
+    action_policy = signal.get("action_policy")
+    operating_mode = str(
+        config.get("operating_mode", "range_plus_llm") or "range_plus_llm"
+    ).strip().lower()
+    sentiment_control_mode = normalize_sentiment_control_mode(
+        config.get("sentiment_control_mode"),
+        operating_mode,
+    )
+    execution_signal = safe_float(signal.get("execution_signal")) or 0.0
+    execution_signal_threshold = (
+        safe_float(config.get("execution_signal_threshold")) or 0.0
+    )
+    sentiment_defensive_threshold = (
+        safe_float(config.get("sentiment_defensive_threshold")) or 0.03
+    )
+    sentiment_risk_on_threshold = (
+        safe_float(config.get("sentiment_risk_on_threshold")) or 0.12
+    )
+    normalized_recommendation = str(action_recommendation).strip().lower()
+    risk_modulated_core_override = (
+        execution_signal < execution_signal_threshold
+        and sentiment_control_mode == "risk_modulated"
+        and operating_mode in ("range_plus_llm", "range_only")
+        and normalized_recommendation in ("blocked", "contrarian_watch")
+        and not is_risk_off_block(action_recommendation, action_policy)
+    )
+
+    if execution_signal < execution_signal_threshold:
+        if risk_modulated_core_override:
+            return {
+                "name": "risk_modulated_defensive",
+                "profit_target_offset_pct": (
+                    safe_float(
+                        config.get("sentiment_defensive_profit_target_offset_pct")
+                    )
+                    or -0.0005
+                ),
+                "extra_aging_reduction_pct": (
+                    safe_float(
+                        config.get("sentiment_defensive_extra_aging_reduction_pct")
+                    )
+                    or 0.001
+                ),
+            }
+        return {
+            "name": "paused",
+            "profit_target_offset_pct": (
+                safe_float(config.get("sentiment_paused_profit_target_offset_pct"))
+                or -0.001
+            ),
+            "extra_aging_reduction_pct": (
+                safe_float(
+                    config.get("sentiment_defensive_extra_aging_reduction_pct")
+                )
+                or 0.001
+            ),
+        }
+
+    if execution_signal < sentiment_defensive_threshold:
+        return {
+            "name": "defensive",
+            "profit_target_offset_pct": (
+                safe_float(
+                    config.get("sentiment_defensive_profit_target_offset_pct")
+                )
+                or -0.0005
+            ),
+            "extra_aging_reduction_pct": (
+                safe_float(
+                    config.get("sentiment_defensive_extra_aging_reduction_pct")
+                )
+                or 0.001
+            ),
+        }
+
+    if execution_signal >= sentiment_risk_on_threshold:
+        return {
+            "name": "risk_on",
+            "profit_target_offset_pct": (
+                safe_float(config.get("sentiment_risk_on_profit_target_offset_pct"))
+                or 0.0005
+            ),
+            "extra_aging_reduction_pct": 0.0,
+        }
+
+    return {
+        "name": "neutral",
+        "profit_target_offset_pct": 0.0,
+        "extra_aging_reduction_pct": 0.0,
+    }
+
+
+def effective_sell_profit_target_pct(
+    config,
+    *,
+    buy_source=None,
+    base_profit_target=None,
+    age_minutes=0,
+    regime=None,
+):
+    regime = regime or {}
+    policy = source_sell_policy(config, buy_source)
+    starting_profit_target = (
+        safe_float(config.get("profit_target_pct")) or 0.0
+        if base_profit_target is None
+        else float(base_profit_target)
+    )
+    starting_profit_target += policy["profit_target_offset_pct"]
+    starting_profit_target += float(regime.get("profit_target_offset_pct", 0.0) or 0.0)
+    starting_profit_target = max(policy["min_profit_target_pct"], starting_profit_target)
+
+    if (
+        age_minutes is None
+        or policy["aging_profit_reduction_pct"] <= 0
+        or age_minutes < policy["aging_start_minutes"]
+    ):
+        return starting_profit_target
+
+    reduction_steps = (
+        int(
+            (age_minutes - policy["aging_start_minutes"])
+            // max(1, int(policy["aging_step_minutes"]))
+        )
+        + 1
+    )
+    adjusted_profit = (
+        starting_profit_target
+        - reduction_steps * policy["aging_profit_reduction_pct"]
+        - float(regime.get("extra_aging_reduction_pct", 0.0) or 0.0)
+    )
+    return max(policy["min_profit_target_pct"], adjusted_profit)
+
+
 def source_status_allows_trading(signal_status, source_status, require_fresh_signal, min_signal_status):
     if not require_fresh_signal:
         return True, None
@@ -614,14 +806,15 @@ def sell_backlog_oldest_minutes(snapshot):
 
 
 def approved_event_profit_target_pct(snapshot, event):
-    configured_profit_target = safe_float(
-        strategy_payload(snapshot).get("profit_target_pct")
-    ) or 0.0
-    if event.get("buy_source") == "range_high_band":
-        return safe_float(
-            strategy_payload(snapshot).get("high_anchor_profit_target_pct")
-        ) or configured_profit_target
-    return safe_float(event.get("sell_pct_override")) or configured_profit_target
+    config = strategy_payload(snapshot)
+    signal = signal_payload(snapshot)
+    return effective_sell_profit_target_pct(
+        config,
+        buy_source=event.get("buy_source"),
+        base_profit_target=safe_float(event.get("sell_pct_override")),
+        age_minutes=0,
+        regime=sell_policy_regime(config, signal),
+    )
 
 
 def infer_live_only_blockers(snapshot, event):

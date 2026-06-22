@@ -496,11 +496,43 @@ llm_buy_cooldown_minutes_after_sell = profile_int(
     "llm_buy_cooldown_minutes_after_sell",
     30
 )
+source_profit_target_offset_pct_by_source = normalized_source_config_map(
+    strategy_config,
+    "sell_target_offset_pct_by_source"
+)
+source_aging_start_minutes_by_source = normalized_source_config_map(
+    strategy_config,
+    "aging_start_minutes_by_source"
+)
+source_aging_step_minutes_by_source = normalized_source_config_map(
+    strategy_config,
+    "aging_step_minutes_by_source"
+)
+source_aging_profit_reduction_pct_by_source = normalized_source_config_map(
+    strategy_config,
+    "aging_profit_reduction_pct_by_source"
+)
+source_min_profit_target_pct_by_source = normalized_source_config_map(
+    strategy_config,
+    "min_profit_target_pct_by_source"
+)
 sentiment_defensive_threshold = profile_float(
     "sentiment_defensive_threshold",
     max(0.03, execution_signal_threshold)
 )
 sentiment_risk_on_threshold = profile_float("sentiment_risk_on_threshold", 0.12)
+sentiment_paused_profit_target_offset_pct = profile_float(
+    "sentiment_paused_profit_target_offset_pct",
+    -0.001
+)
+sentiment_defensive_profit_target_offset_pct = profile_float(
+    "sentiment_defensive_profit_target_offset_pct",
+    -0.0005
+)
+sentiment_risk_on_profit_target_offset_pct = profile_float(
+    "sentiment_risk_on_profit_target_offset_pct",
+    0.0005
+)
 sentiment_defensive_size_multiplier = profile_float(
     "sentiment_defensive_size_multiplier",
     0.65
@@ -756,6 +788,89 @@ def safe_rate(numerator, denominator):
         return round(float(numerator or 0) / denominator_value, 4)
     except Exception:
         return None
+
+
+def normalized_source_config_map(config, key):
+    raw_value = config.get(key, {})
+    if not isinstance(raw_value, dict):
+        return {}
+
+    normalized = {}
+    for source, value in raw_value.items():
+        source_key = str(source or "").strip().lower()
+        try:
+            normalized[source_key] = float(value)
+        except Exception:
+            continue
+    return normalized
+
+
+def source_sell_policy(buy_source):
+    source_key = str(buy_source or "").strip().lower()
+    return {
+        "profit_target_offset_pct": source_profit_target_offset_pct_by_source.get(
+            source_key,
+            0.0
+        ),
+        "aging_start_minutes": source_aging_start_minutes_by_source.get(
+            source_key,
+            aging_start_minutes
+        ),
+        "aging_step_minutes": source_aging_step_minutes_by_source.get(
+            source_key,
+            aging_step_minutes
+        ),
+        "aging_profit_reduction_pct": (
+            source_aging_profit_reduction_pct_by_source.get(
+                source_key,
+                aging_profit_reduction_pct
+            )
+        ),
+        "min_profit_target_pct": source_min_profit_target_pct_by_source.get(
+            source_key,
+            min_profit_target_pct
+        ),
+    }
+
+
+def effective_sell_profit_target(
+    *,
+    age_minutes,
+    base_profit_target=None,
+    buy_source=None,
+    regime=None
+):
+    regime = regime or {}
+    policy = source_sell_policy(buy_source)
+    starting_profit_target = (
+        profit_target_pct
+        if base_profit_target is None
+        else base_profit_target
+    )
+    starting_profit_target += policy["profit_target_offset_pct"]
+    starting_profit_target += float(regime.get("profit_target_offset_pct", 0.0) or 0.0)
+    starting_profit_target = max(policy["min_profit_target_pct"], starting_profit_target)
+
+    if (
+        age_minutes is None
+        or policy["aging_profit_reduction_pct"] <= 0
+        or age_minutes < policy["aging_start_minutes"]
+    ):
+        return starting_profit_target
+
+    reduction_steps = (
+        int(
+            (age_minutes - policy["aging_start_minutes"])
+            // max(1, int(policy["aging_step_minutes"]))
+        )
+        + 1
+    )
+    adjusted_profit = (
+        starting_profit_target
+        - reduction_steps * policy["aging_profit_reduction_pct"]
+        - float(regime.get("extra_aging_reduction_pct", 0.0) or 0.0)
+    )
+    return max(policy["min_profit_target_pct"], adjusted_profit)
 
 
 def build_execution_quality_snapshot(stats):
@@ -1881,27 +1996,10 @@ def numeric_or_default(value, default):
 
 
 def compute_adjusted_profit_target(age_minutes, base_profit_target=None):
-    starting_profit_target = (
-        profit_target_pct
-        if base_profit_target is None
-        else base_profit_target
+    return effective_sell_profit_target(
+        age_minutes=age_minutes,
+        base_profit_target=base_profit_target,
     )
-
-    if (
-        age_minutes is None
-        or aging_profit_reduction_pct <= 0
-        or age_minutes < aging_start_minutes
-    ):
-        return starting_profit_target
-
-    reduction_steps = (
-        int((age_minutes - aging_start_minutes) // max(1, aging_step_minutes))
-        + 1
-    )
-    adjusted_profit = (
-        starting_profit_target - reduction_steps * aging_profit_reduction_pct
-    )
-    return max(min_profit_target_pct, adjusted_profit)
 
 
 def sentiment_regime(
@@ -1935,6 +2033,9 @@ def sentiment_regime(
                 "inventory_multiplier": sentiment_defensive_inventory_multiplier,
                 "open_sell_multiplier": sentiment_defensive_open_sell_multiplier,
                 "allow_high_anchor": False,
+                "profit_target_offset_pct": (
+                    sentiment_defensive_profit_target_offset_pct
+                ),
                 "extra_aging_reduction_pct": (
                     sentiment_defensive_extra_aging_reduction_pct
                 )
@@ -1945,6 +2046,9 @@ def sentiment_regime(
             "inventory_multiplier": 0.0,
             "open_sell_multiplier": 0.0,
             "allow_high_anchor": False,
+            "profit_target_offset_pct": (
+                sentiment_paused_profit_target_offset_pct
+            ),
             "extra_aging_reduction_pct": sentiment_defensive_extra_aging_reduction_pct
         }
 
@@ -1957,6 +2061,9 @@ def sentiment_regime(
             "allow_high_anchor": (
                 execution_signal >= sentiment_disable_high_anchor_below
             ),
+            "profit_target_offset_pct": (
+                sentiment_defensive_profit_target_offset_pct
+            ),
             "extra_aging_reduction_pct": sentiment_defensive_extra_aging_reduction_pct
         }
 
@@ -1967,6 +2074,9 @@ def sentiment_regime(
             "inventory_multiplier": sentiment_risk_on_inventory_multiplier,
             "open_sell_multiplier": sentiment_risk_on_open_sell_multiplier,
             "allow_high_anchor": True,
+            "profit_target_offset_pct": (
+                sentiment_risk_on_profit_target_offset_pct
+            ),
             "extra_aging_reduction_pct": 0.0
         }
 
@@ -1976,6 +2086,7 @@ def sentiment_regime(
         "inventory_multiplier": 1.0,
         "open_sell_multiplier": 1.0,
         "allow_high_anchor": True,
+        "profit_target_offset_pct": 0.0,
         "extra_aging_reduction_pct": 0.0
     }
 
@@ -3170,19 +3281,12 @@ def main():
                             now - placed_at
                         ).total_seconds() / 60
 
-                    adjusted_profit_target = compute_adjusted_profit_target(
-                        age_minutes,
-                        sell_pct_override
+                    adjusted_profit_target = effective_sell_profit_target(
+                        age_minutes=age_minutes,
+                        base_profit_target=sell_pct_override,
+                        buy_source=order.get("buy_source"),
+                        regime=regime,
                     )
-                    if (
-                        age_minutes is not None
-                        and age_minutes >= aging_start_minutes
-                    ):
-                        adjusted_profit_target = max(
-                            min_profit_target_pct,
-                            adjusted_profit_target
-                            - regime["extra_aging_reduction_pct"]
-                        )
 
                     if buy_price is None or current_sell_price is None:
                         continue
@@ -3389,9 +3493,15 @@ def main():
                 buy_price = float(level)
                 sell_pct_override = order.get("sell_pct_override")
                 buy_source = order.get("buy_source")
+                target_profit_pct = effective_sell_profit_target(
+                    age_minutes=0,
+                    base_profit_target=sell_pct_override,
+                    buy_source=buy_source,
+                    regime=regime,
+                )
                 sell_price = compute_sell_target_price(
                     buy_price,
-                    sell_pct_override
+                    target_profit_pct
                 )
                 placed_at = parse_iso8601(order.get("placed_at"))
                 hold_minutes = None
@@ -3443,11 +3553,11 @@ def main():
                     cycle_id=cycle_id,
                     side="sell",
                     volume=round(order["volume"], VOLUME_DECIMALS),
-                    price=round(sell_price, PRICE_DECIMALS),
-                    buy_price=round(buy_price, PRICE_DECIMALS),
-                    sell_pct_override=sell_pct_override,
-                    buy_source=buy_source
-                )
+                        price=round(sell_price, PRICE_DECIMALS),
+                        buy_price=round(buy_price, PRICE_DECIMALS),
+                        sell_pct_override=target_profit_pct,
+                        buy_source=buy_source
+                    )
 
                 existing_sell_txid, existing_sell_order, match_reason = (
                     find_existing_sell_for_buy(level, order)
@@ -3607,7 +3717,7 @@ def main():
                     "buy_price": buy_price,
                     "sell_price": sell_price,
                     "placed_at": cycle_id,
-                    "sell_pct_override": sell_pct_override,
+                    "sell_pct_override": target_profit_pct,
                     "buy_source": buy_source,
                     "trade_id": order.get("trade_id") or order.get("txid")
                 }

@@ -24,6 +24,14 @@ VALID_GRID_MODE_TOKENS = {
     "",
 }
 
+VALID_BUY_SOURCES = {
+    "llm_target",
+    "range_low",
+    "range_mean",
+    "range_median",
+    "range_high_band",
+}
+
 
 def parse_iso8601(value):
     if not value:
@@ -144,6 +152,37 @@ def validate_strategy_config(strategy_config):
                     continue
                 if numeric <= 0:
                     errors.append(f"max_inventory_usd_by_bucket.{bucket} must be > 0")
+
+    source_numeric_maps = {
+        "sell_target_offset_pct_by_source": ("numeric", None),
+        "aging_start_minutes_by_source": ("positive", None),
+        "aging_step_minutes_by_source": ("positive", None),
+        "aging_profit_reduction_pct_by_source": ("non_negative", None),
+        "min_profit_target_pct_by_source": ("non_negative", None),
+    }
+    for field, (kind, _) in source_numeric_maps.items():
+        value = strategy_config.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            errors.append(f"{field} must be an object")
+            continue
+        for source, raw in value.items():
+            normalized_source = str(source or "").strip().lower()
+            if normalized_source not in VALID_BUY_SOURCES:
+                errors.append(
+                    f"{field}.{source} must use a supported source key"
+                )
+                continue
+            try:
+                numeric = float(raw)
+            except Exception:
+                errors.append(f"{field}.{source} must be numeric")
+                continue
+            if kind == "positive" and numeric <= 0:
+                errors.append(f"{field}.{source} must be > 0")
+            elif kind == "non_negative" and numeric < 0:
+                errors.append(f"{field}.{source} must be >= 0")
 
     return errors
 
