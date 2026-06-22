@@ -1,0 +1,30 @@
+{
+  "schema_version": "altcoin-strategy-v1",
+  "assets": {
+    "SOL": {"enabled": true, "kraken_pair": "SOLUSD"},
+    "ETH": {"enabled": false, "kraken_pair": "ETHUSD"}
+  },
+  "direction": "long_only",
+  "take_profit_pct": 0.015,
+  "stop_loss_pct": 0.005,
+  "maximum_hold_minutes": 1440,
+  "maximum_signal_age_minutes": 20,
+  "entry_plan_max_rest_minutes": 20,
+  "poll_interval_seconds": 60,
+  "fees_bps": {
+    "source": "static",
+    "maker_entry": 40,
+    "maker_take_profit": 40,
+    "taker_exit": 80
+  },
+  "cost_model": {"fallback_spread_bps": 10, "fallback_slippage_bps": 10},
+  "limits": {
+    "maximum_position_usd": 25,
+    "maximum_open_positions": 1,
+    "maximum_filled_trades_per_utc_day": 3,
+    "maximum_daily_loss_usd": 5,
+    "cooldown_minutes": 60,
+    "maximum_consecutive_errors": 5
+  },
+  "dry_run": {"entry_fill_fraction_per_cycle": 1.0}
+}
