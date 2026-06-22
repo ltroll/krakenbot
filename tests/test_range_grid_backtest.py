@@ -134,6 +134,10 @@ class RangeGridBacktestTests(unittest.TestCase):
 
             self.assertEqual(entries, ["foo.json", "bar.json"])
 
+    def test_parse_args_accepts_window_hours_override(self):
+        args = backtest.parse_args(["--window-hours", "48"])
+        self.assertEqual(args.window_hours, 48.0)
+
     def test_replay_blocks_when_sentiment_not_bullish(self):
         snapshots = [make_snapshot("2026-06-13T12:00:00+00:00", 100.0, action_recommendation="blocked")]
         snapshots[0]["signal"]["payload"]["action_policy"] = {

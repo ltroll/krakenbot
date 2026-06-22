@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import copy
 import csv
 import json
@@ -57,6 +58,19 @@ BACKTEST_STRATEGY_RANKED_CSV_FILE = os.getenv(
 
 def now_utc():
     return datetime.now(timezone.utc)
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Replay and summarize range grid backtest snapshots."
+    )
+    parser.add_argument(
+        "--window-hours",
+        type=float,
+        default=None,
+        help="Override the backtest lookback window in hours.",
+    )
+    return parser.parse_args(argv)
 
 
 def parse_iso8601(value):
@@ -1903,9 +1917,14 @@ def summarize_missed_approved_opportunities(replay, actual, snapshots=None):
     }
 
 
-def build_report():
+def build_report(window_hours=None):
     now = now_utc()
-    since_dt = now - timedelta(hours=BACKTEST_WINDOW_HOURS)
+    effective_window_hours = (
+        BACKTEST_WINDOW_HOURS
+        if window_hours is None
+        else float(window_hours)
+    )
+    since_dt = now - timedelta(hours=effective_window_hours)
     snapshot_files = snapshot_source_files(SNAPSHOT_LOG_FILE, since_dt, now)
     all_snapshots = []
     for path in snapshot_files:
@@ -2000,7 +2019,8 @@ def write_report(report):
 
 
 def main():
-    report = build_report()
+    args = parse_args()
+    report = build_report(window_hours=args.window_hours)
     archive_file, comparison_csv_file, ranked_comparison_csv_file = write_report(report)
     print(json.dumps({
         "timestamp": report["timestamp"],
@@ -2008,6 +2028,7 @@ def main():
         "archive_file": archive_file,
         "snapshot_count": report["snapshot_count"],
         "trade_event_count": report["trade_event_count"],
+        "window_hours": args.window_hours if args.window_hours is not None else BACKTEST_WINDOW_HOURS,
         "strategy_comparison_csv_file": comparison_csv_file,
         "strategy_ranked_csv_file": ranked_comparison_csv_file,
     }))
