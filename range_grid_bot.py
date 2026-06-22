@@ -154,6 +154,21 @@ def strategy_float(config, key, default):
         return float(default)
 
 
+def normalized_source_config_map(config, key):
+    raw_value = config.get(key, {})
+    if not isinstance(raw_value, dict):
+        return {}
+
+    normalized = {}
+    for source, value in raw_value.items():
+        source_key = str(source or "").strip().lower()
+        try:
+            normalized[source_key] = float(value)
+        except Exception:
+            continue
+    return normalized
+
+
 def effective_entry_step_pct(base_entry_step_pct, volatility_pct, config):
     base_step = numeric_or_default(base_entry_step_pct, 0.0)
     if base_step <= 0:
@@ -788,21 +803,6 @@ def safe_rate(numerator, denominator):
         return round(float(numerator or 0) / denominator_value, 4)
     except Exception:
         return None
-
-
-def normalized_source_config_map(config, key):
-    raw_value = config.get(key, {})
-    if not isinstance(raw_value, dict):
-        return {}
-
-    normalized = {}
-    for source, value in raw_value.items():
-        source_key = str(source or "").strip().lower()
-        try:
-            normalized[source_key] = float(value)
-        except Exception:
-            continue
-    return normalized
 
 
 def source_sell_policy(buy_source):
