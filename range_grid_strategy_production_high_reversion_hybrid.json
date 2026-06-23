@@ -1,8 +1,7 @@
 {
   "range_window_hours": 24,
-  "grid_anchor": "llm,low,median,high",
-  "paper_trading_enabled": true,
-  "operating_mode": "range_plus_llm",
+  "grid_anchor": "low,median,high",
+  "operating_mode": "range_only",
   "sentiment_control_mode": "price_first",
   "allow_range_buy_on_confidence_block": true,
   "dynamic_anchor_mode": true,
