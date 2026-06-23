@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import csv
+import hashlib
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -19,11 +21,25 @@ from signal_normalizer import normalize_signal_payload, selected_signal_asset_id
 
 ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(dotenv_path=ENV_FILE, override=True)
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
-SNAPSHOT_LOG_FILE = os.getenv(
-    "LLM_TARGET_BACKTEST_SNAPSHOT_FILE",
-    "llm_target_backtest_snapshot_log.jsonl"
-)
+
+def configured_snapshot_log_file():
+    snapshot_dir = os.getenv("LLM_TARGET_BACKTEST_SNAPSHOT_DIR")
+    if snapshot_dir:
+        basename = os.getenv(
+            "LLM_TARGET_BACKTEST_SNAPSHOT_BASENAME",
+            "llm_target_backtest_snapshot_log.jsonl"
+        )
+        return os.path.join(os.path.expanduser(snapshot_dir), basename)
+
+    return os.getenv(
+        "LLM_TARGET_BACKTEST_SNAPSHOT_FILE",
+        "llm_target_backtest_snapshot_log.jsonl"
+    )
+
+
+SNAPSHOT_LOG_FILE = configured_snapshot_log_file()
 SIGNAL_ASSET_ID = selected_signal_asset_id(
     pair=os.getenv("KRAKEN_PAIR", "XXBTZUSD")
 )
@@ -48,6 +64,18 @@ BACKTEST_COOLDOWN_MINUTES = float(
 )
 BACKTEST_FEE_BPS = float(os.getenv("LLM_TARGET_BACKTEST_FEE_BPS", "0.0"))
 BACKTEST_RECENT_LIMIT = int(os.getenv("LLM_TARGET_BACKTEST_RECENT_LIMIT", "25"))
+BACKTEST_STRATEGY_SET_FILE = os.getenv(
+    "LLM_TARGET_BACKTEST_STRATEGY_SET_FILE",
+    ""
+)
+BACKTEST_STRATEGY_COMPARE_CSV_FILE = os.getenv(
+    "LLM_TARGET_BACKTEST_STRATEGY_COMPARE_CSV_FILE",
+    "llm_target_strategy_comparison.csv"
+)
+BACKTEST_STRATEGY_RANKED_CSV_FILE = os.getenv(
+    "LLM_TARGET_BACKTEST_STRATEGY_RANKED_CSV_FILE",
+    "llm_target_strategy_ranked.csv"
+)
 SNAPSHOT_ROTATE_DAILY = os.getenv(
     "LLM_TARGET_BACKTEST_ROTATE_DAILY",
     "true"
@@ -170,6 +198,61 @@ def load_jsonl(path):
             except Exception:
                 continue
     return rows
+
+
+def resolve_repo_path(path):
+    if not path:
+        return path
+    expanded = os.path.expanduser(path)
+    if os.path.isabs(expanded):
+        return expanded
+    return os.path.join(REPO_DIR, expanded)
+
+
+def load_json_file(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_strategy_set(path):
+    resolved = resolve_repo_path(path)
+    if not resolved or not os.path.exists(resolved):
+        return []
+
+    entries = []
+    with open(resolved, encoding="utf-8") as f:
+        for line in f:
+            text = line.strip()
+            if not text or text.startswith("#"):
+                continue
+            if "," in text:
+                label, strategy_path = [part.strip() for part in text.split(",", 1)]
+            else:
+                strategy_path = text
+                label = os.path.splitext(os.path.basename(strategy_path))[0]
+            entries.append({
+                "label": label,
+                "path": resolve_repo_path(strategy_path),
+            })
+    return entries
+
+
+def strategy_sha256(payload):
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def snapshot_with_strategy(snapshot, strategy_path, strategy_payload):
+    cloned = dict(snapshot)
+    cloned["strategy_profile"] = {
+        **(snapshot.get("strategy_profile") or {}),
+        "exists": True,
+        "error": None,
+        "path": strategy_path,
+        "sha256": strategy_sha256(strategy_payload),
+        "payload": strategy_payload,
+    }
+    return cloned
 
 
 def rotated_snapshot_path(base_path, dt):
@@ -1203,6 +1286,192 @@ def top_summary(strategies):
     }
 
 
+def strategy_comparison_score(row):
+    trades = row.get("trades") or 0
+    approved = row.get("approved_candidates") or 0
+    raw_candidates = row.get("raw_candidates") or 0
+    win_rate = row.get("win_rate") or 0.0
+    total_net = row.get("total_net_return_pct")
+    marked_to_market = row.get("marked_to_market_net_return_pct")
+    open_count = row.get("open_position_count") or 0
+    fill_rate = row.get("fill_rate_after_approval") or 0.0
+    terminal_rate = row.get("terminal_rate_after_approval") or 0.0
+    candidate_efficiency = approved / raw_candidates if raw_candidates else 0.0
+
+    total_net = total_net if total_net is not None else -1.0
+    marked_to_market = (
+        marked_to_market
+        if marked_to_market is not None else
+        total_net
+    )
+    score = (
+        (trades * 10.0)
+        + (approved * 2.0)
+        + (win_rate * 20.0)
+        + (total_net * 8.0)
+        + (marked_to_market * 12.0)
+        + (fill_rate * 5.0)
+        + (terminal_rate * 5.0)
+        + (candidate_efficiency * 10.0)
+        - (open_count * 8.0)
+    )
+    return round(score, 6)
+
+
+def build_strategy_comparison_rows(snapshots, strategy_set_file):
+    rows = []
+    details = []
+    for entry in load_strategy_set(strategy_set_file):
+        strategy_path = entry["path"]
+        try:
+            strategy_payload = load_json_file(strategy_path)
+        except Exception as e:
+            rows.append({
+                "strategy_label": entry["label"],
+                "strategy_file": strategy_path,
+                "error": str(e),
+            })
+            continue
+
+        variant = str(
+            strategy_payload.get("backtest_strategy_variant")
+            or "with_target_quality"
+        )
+        variant_snapshots = [
+            snapshot_with_strategy(snapshot, strategy_path, strategy_payload)
+            for snapshot in snapshots
+        ]
+        result = simulate_strategy(variant, variant_snapshots)
+        summary = result["summary"]
+        row = {
+            "strategy_label": entry["label"],
+            "strategy_file": strategy_path,
+            "backtest_strategy_variant": variant,
+            "target_profit_pct": strategy_payload.get("target_profit_pct"),
+            "target_quality_enabled": strategy_payload.get("target_quality_enabled"),
+            "target_quality_fail_closed": strategy_payload.get("target_quality_fail_closed"),
+            "target_quality_min_samples": strategy_payload.get("target_quality_min_samples"),
+            "target_quality_min_ev_pct": strategy_payload.get("target_quality_min_ev_pct"),
+            "target_quality_min_4h_fill_probability": strategy_payload.get("target_quality_min_4h_fill_probability"),
+            "target_quality_allowed_recommendations": strategy_payload.get("target_quality_allowed_recommendations"),
+            "sentiment_discount_watch_pct": strategy_payload.get("sentiment_discount_watch_pct"),
+            "sentiment_discount_bearish_pct": strategy_payload.get("sentiment_discount_bearish_pct"),
+            "raw_candidates": summary.get("raw_candidates"),
+            "approved_candidates": summary.get("approved_candidates"),
+            "trades": summary.get("trades"),
+            "win_rate": summary.get("win_rate"),
+            "total_net_return_pct": summary.get("total_net_return_pct"),
+            "marked_to_market_net_return_pct": summary.get("marked_to_market_net_return_pct"),
+            "open_position_count": summary.get("open_position_count"),
+            "open_position_unrealized_net_pct": summary.get("open_position_unrealized_net_pct"),
+            "take_profit_count": summary.get("take_profit_count"),
+            "stop_loss_count": summary.get("stop_loss_count"),
+            "timeout_count": summary.get("timeout_count"),
+            "blocked_by_sentiment": summary.get("blocked_by_sentiment"),
+            "blocked_by_target_quality": summary.get("blocked_by_target_quality"),
+            "shadow_target_quality_approved": summary.get("shadow_target_quality_approved"),
+            "shadow_target_quality_rejected": summary.get("shadow_target_quality_rejected"),
+            "no_target": summary.get("no_target"),
+            "not_filled": summary.get("not_filled"),
+            "fill_rate_after_approval": summary.get("fill_rate_after_approval"),
+            "terminal_rate_after_approval": summary.get("terminal_rate_after_approval"),
+        }
+        row["candidate_efficiency"] = round(
+            (row["approved_candidates"] or 0) / (row["raw_candidates"] or 1),
+            6,
+        ) if row.get("raw_candidates") else 0.0
+        row["practical_score"] = strategy_comparison_score(row)
+        rows.append(row)
+        details.append({
+            "strategy_label": entry["label"],
+            "strategy_file": strategy_path,
+            "strategy_payload": strategy_payload,
+            "backtest_strategy_variant": variant,
+            "summary": summary,
+            "recent_decisions": result.get("recent_decisions", []),
+            "recent_trades": result.get("recent_trades", []),
+            "open_positions": result.get("open_positions", []),
+        })
+
+    rows.sort(
+        key=lambda row: (
+            -(row.get("practical_score") or -999999),
+            -(row.get("approved_candidates") or 0),
+            -((row.get("marked_to_market_net_return_pct") or -999999)),
+            row.get("strategy_label") or "",
+        )
+    )
+    return {
+        "strategy_set_file": resolve_repo_path(strategy_set_file),
+        "count": len(rows),
+        "rows": rows,
+        "details": details,
+    }
+
+
+def write_strategy_comparison_csv(comparison, output_path, ranked=False):
+    rows = comparison.get("rows") or []
+    if not rows:
+        return None
+
+    output_file = resolve_repo_path(output_path)
+    output_dir = os.path.dirname(output_file)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    fieldnames = [
+        "strategy_label",
+        "practical_score",
+        "backtest_strategy_variant",
+        "trades",
+        "win_rate",
+        "total_net_return_pct",
+        "marked_to_market_net_return_pct",
+        "open_position_count",
+        "approved_candidates",
+        "candidate_efficiency",
+        "raw_candidates",
+        "fill_rate_after_approval",
+        "terminal_rate_after_approval",
+        "take_profit_count",
+        "stop_loss_count",
+        "timeout_count",
+        "blocked_by_sentiment",
+        "blocked_by_target_quality",
+        "shadow_target_quality_approved",
+        "shadow_target_quality_rejected",
+        "no_target",
+        "not_filled",
+        "target_profit_pct",
+        "target_quality_enabled",
+        "target_quality_fail_closed",
+        "target_quality_min_samples",
+        "target_quality_min_ev_pct",
+        "target_quality_min_4h_fill_probability",
+        "target_quality_allowed_recommendations",
+        "sentiment_discount_watch_pct",
+        "sentiment_discount_bearish_pct",
+        "strategy_file",
+    ]
+    output_rows = list(rows)
+    if ranked:
+        output_rows.sort(
+            key=lambda row: (
+                -(row.get("practical_score") or -999999),
+                -(row.get("approved_candidates") or 0),
+                -((row.get("marked_to_market_net_return_pct") or -999999)),
+                row.get("strategy_label") or "",
+            )
+        )
+
+    with open(output_file, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in output_rows:
+            writer.writerow({field: row.get(field) for field in fieldnames})
+    return output_file
+
+
 def build_report():
     now = now_utc()
     since_dt = now - timedelta(hours=BACKTEST_WINDOW_HOURS)
@@ -1227,8 +1496,14 @@ def build_report():
         name: simulate_strategy(name, snapshots)
         for name in BACKTEST_STRATEGIES
     }
+    strategy_comparison = None
+    if BACKTEST_STRATEGY_SET_FILE:
+        strategy_comparison = build_strategy_comparison_rows(
+            snapshots,
+            BACKTEST_STRATEGY_SET_FILE,
+        )
 
-    return {
+    report = {
         "timestamp": now.isoformat(),
         "snapshot_file": os.path.abspath(SNAPSHOT_LOG_FILE),
         "snapshot_files": snapshot_files,
@@ -1281,6 +1556,9 @@ def build_report():
             for name, payload in strategies.items()
         }
     }
+    if strategy_comparison is not None:
+        report["strategy_comparison"] = strategy_comparison
+    return report
 
 
 def write_report(report):
@@ -1299,17 +1577,41 @@ def write_report(report):
     with open(archive_file, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
 
+    comparison_csv_file = None
+    ranked_comparison_csv_file = None
+    if report.get("strategy_comparison"):
+        comparison_csv_file = write_strategy_comparison_csv(
+            report["strategy_comparison"],
+            BACKTEST_STRATEGY_COMPARE_CSV_FILE,
+        )
+        ranked_comparison_csv_file = write_strategy_comparison_csv(
+            report["strategy_comparison"],
+            BACKTEST_STRATEGY_RANKED_CSV_FILE,
+            ranked=True,
+        )
+    report["written_outputs"] = {
+        "strategy_comparison_csv_file": comparison_csv_file,
+        "strategy_ranked_csv_file": ranked_comparison_csv_file,
+    }
+
     return archive_file
 
 
 def main():
     report = build_report()
     archive_file = write_report(report)
+    written_outputs = report.get("written_outputs", {})
     print(json.dumps({
         "timestamp": report["timestamp"],
         "output_file": BACKTEST_OUTPUT_FILE,
         "archive_file": archive_file,
-        "snapshot_count": report["snapshot_count"]
+        "snapshot_count": report["snapshot_count"],
+        "strategy_comparison_csv_file": written_outputs.get(
+            "strategy_comparison_csv_file"
+        ),
+        "strategy_ranked_csv_file": written_outputs.get(
+            "strategy_ranked_csv_file"
+        ),
     }))
 
 

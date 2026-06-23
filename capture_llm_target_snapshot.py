@@ -31,10 +31,24 @@ LLM_TARGET_STRATEGY_PROFILE = (
     or os.getenv("STRATEGY_PROFILE")
     or "llm_target_strategy_default.json"
 )
-SNAPSHOT_LOG_FILE = os.getenv(
-    "LLM_TARGET_BACKTEST_SNAPSHOT_FILE",
-    "llm_target_backtest_snapshot_log.jsonl"
-)
+
+
+def configured_snapshot_log_file():
+    snapshot_dir = os.getenv("LLM_TARGET_BACKTEST_SNAPSHOT_DIR")
+    if snapshot_dir:
+        basename = os.getenv(
+            "LLM_TARGET_BACKTEST_SNAPSHOT_BASENAME",
+            "llm_target_backtest_snapshot_log.jsonl"
+        )
+        return os.path.join(os.path.expanduser(snapshot_dir), basename)
+
+    return os.getenv(
+        "LLM_TARGET_BACKTEST_SNAPSHOT_FILE",
+        "llm_target_backtest_snapshot_log.jsonl"
+    )
+
+
+SNAPSHOT_LOG_FILE = configured_snapshot_log_file()
 SNAPSHOT_ROTATE_DAILY = os.getenv(
     "LLM_TARGET_BACKTEST_ROTATE_DAILY",
     "true"

@@ -489,6 +489,12 @@ LLM_TARGET_BACKTEST_STRATEGY_SET_FILE=llm_target_strategy_test_set.txt ./venv/bi
 The report includes `strategy_comparison`; ranked CSV output defaults to
 `llm_target_strategy_ranked.csv`.
 
+Snapshot rotation is configured with `LLM_TARGET_BACKTEST_SNAPSHOT_DIR` and
+`LLM_TARGET_BACKTEST_SNAPSHOT_BASENAME`. For example, with
+`LLM_TARGET_BACKTEST_SNAPSHOT_DIR=/home/ben/krakenbot/backtests` and
+`LLM_TARGET_BACKTEST_SNAPSHOT_BASENAME=llm_target_snapshots.jsonl`, daily rotation
+writes files such as `/home/ben/krakenbot/backtests/llm_target_snapshots_20260623.jsonl`.
+
 ## Running the project
 
 Install dependencies:
