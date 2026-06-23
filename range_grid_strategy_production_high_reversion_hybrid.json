@@ -1,7 +1,8 @@
 {
   "range_window_hours": 24,
-  "grid_anchor": "low,median,high",
-  "operating_mode": "range_only",
+  "grid_anchor": "llm,low,median,high",
+  "paper_trading_enabled": true,
+  "operating_mode": "range_plus_llm",
   "sentiment_control_mode": "price_first",
   "allow_range_buy_on_confidence_block": true,
   "dynamic_anchor_mode": true,
@@ -95,11 +96,11 @@
   "range_refresh_interval_minutes": 15,
   "reconcile_state_interval_minutes": 30,
   "max_daily_loss_usd": 25,
-  "disable_new_buys_on_sell_backlog_count": 0,
+  "disable_new_buys_on_sell_backlog_count": 9,
   "disable_new_buys_on_sell_backlog_minutes": 0,
   "max_consecutive_loop_errors": 5,
   "max_consecutive_private_api_failures": 5,
   "order_tracker_symbol": "BTCUSD",
   "order_tracker_timeout_seconds": 5,
-  "order_tracker_checkin_timeout_seconds": 3
+  "order_tracker_checkin_timeout_seconds": 5
 }
