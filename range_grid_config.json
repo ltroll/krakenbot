@@ -2,7 +2,8 @@
   "strategy_profiles": {
     "default": {
       "range_window_hours": 24,
-      "grid_anchor": "low,high",
+      "grid_anchor": "llm,low,high",
+      "paper_trading_enabled": true,
       "max_grid_size": 4,
       "profit_target_pct": 0.01,
       "entry_step_pct": 0.0045,

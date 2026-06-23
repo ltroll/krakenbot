@@ -295,6 +295,7 @@ Important values in the selected strategy file, such as [`range_grid_strategy_de
 - `profit_target_pct`: sell markup after a filled buy
 - `entry_step_pct`: spacing between buy levels below the selected anchor
 - `llm_target_proximity_pct`: how close market price must be to an LLM-provided target before the bot will act on it
+- `paper_trading_enabled`: logs approved buy orders without placing new Kraken buy orders
 - `high_anchor_buy_cooldown_minutes`: minimum minutes between `grid_anchor: "high"` buys
 - `max_open_high_anchor_orders`: cap on active high-anchor buys and sells
 - `high_anchor_profit_target_pct`: profit target used for high-anchor buys before fees
@@ -400,6 +401,8 @@ Backtest-specific outputs default to:
 ## Logging
 
 Bots are expected to write structured JSONL logs to `trade_log.jsonl`.
+The range-grid bot also writes trading-focused records to `range_grid_activity.jsonl`
+or the file pointed to by `RANGE_GRID_ACTIVITY_LOG_FILE`.
 
 Each line is one JSON object, for example:
 
@@ -521,3 +524,30 @@ If the grid feels too aggressive or too passive:
 
 This README describes the repo based on the code and support-file notes currently present in the workspace.
 Some helper scripts may still be experimental or partially wired together, but the config, logging, and workflow sections above match the current code paths in the active bot.
+# Altcoin scout bot foundation
+
+`altcoin_bot.py` is the fail-closed SOL observer/paper-trading foundation. It accepts
+only the versioned top-level scout decision documented in
+`docs/asset_scout_decision_contract.md`; adaptive overlays and the three supporting
+feeds are never authorization inputs. The Kraken integration is read-only and exposes
+no order mutation methods. `live` is intentionally rejected even if live-related
+environment settings are present.
+
+Copy the values from `env.altcoin` into the instance `.env`, then start with:
+
+```bash
+python altcoin_bot.py --env-file .env --once
+python altcoin_bot.py --env-file .env
+```
+
+Strategy/risk/fee knobs live in `altcoin_strategy_default.json`. Runtime paths, URLs,
+credentials, mode, and safety files live in `.env`. Keep
+`ALTCOIN_READ_ONLY_RECONCILIATION=false` until a Kraken key with query-only permissions
+is configured. The dry-run mode uses public ticker/pair metadata but never calls Kraken
+order submission or cancellation endpoints.
+
+Run its tests with:
+
+```bash
+python -m unittest tests.test_altcoin_bot -v
+```

@@ -54,6 +54,10 @@ LOG_FILE = (
     or os.getenv("TRADE_LOG_FILE")
     or "trade_log.jsonl"
 )
+ACTIVITY_LOG_FILE = (
+    os.getenv("RANGE_GRID_ACTIVITY_LOG_FILE")
+    or "range_grid_activity.jsonl"
+)
 INSTANCE_LOCK_FILE = (
     os.getenv("RANGE_GRID_LOCK_FILE")
     or os.getenv("BOT_LOCK_FILE")
@@ -642,6 +646,7 @@ grid_anchor = strategy_config.get("grid_anchor", "low").strip().lower()
 operating_mode = normalize_operating_mode(
     strategy_config.get("operating_mode", "range_plus_llm")
 )
+paper_trading_enabled = profile_bool("paper_trading_enabled", False)
 configured_strategy_modes = parse_strategy_modes(grid_anchor)
 strategy_modes = apply_operating_mode_to_strategy_modes(
     configured_strategy_modes,
@@ -712,6 +717,19 @@ def append_jsonl(path, record):
         os.makedirs(directory, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
+
+
+def log_trade_activity(event, **kwargs):
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event": event,
+    }
+    record.update(kwargs)
+
+    try:
+        append_jsonl(ACTIVITY_LOG_FILE, record)
+    except Exception as e:
+        log_event("ACTIVITY_LOG_WRITE_ERROR", message=str(e), activity_event=event)
 
 
 def write_json_file(path, payload):
@@ -2725,6 +2743,7 @@ def main():
         **instance_identity,
         config_file=CONFIG_FILE,
         operating_mode=operating_mode,
+        paper_trading_enabled=paper_trading_enabled,
         grid_anchor=grid_anchor,
         configured_strategy_modes=configured_strategy_modes,
         strategy_modes=strategy_modes,
@@ -2750,6 +2769,7 @@ def main():
         require_fresh_signal=require_fresh_signal,
         status_file=os.path.abspath(STATUS_FILE),
         alert_log_file=os.path.abspath(ALERT_LOG_FILE),
+        activity_log_file=os.path.abspath(ACTIVITY_LOG_FILE),
         max_daily_loss_usd=max_daily_loss_usd,
         disable_new_buys_on_sell_backlog_count=(
             disable_new_buys_on_sell_backlog_count
@@ -3254,6 +3274,20 @@ def main():
                         estimated_net_pnl=estimated_net_pnl,
                         hold_minutes=hold_minutes
                     )
+                    log_trade_activity(
+                        "SELL_ORDER_FILLED",
+                        mode="live",
+                        cycle_id=cycle_id,
+                        txid=txid,
+                        level=sell_level,
+                        volume=volume,
+                        buy_price=buy_price,
+                        sell_price=sell_price,
+                        buy_source=order.get("buy_source"),
+                        gross_pnl=gross_pnl,
+                        estimated_net_pnl=estimated_net_pnl,
+                        hold_minutes=hold_minutes
+                    )
                     continue
 
                 if status == "open":
@@ -3410,6 +3444,17 @@ def main():
                         buy_price=order.get("buy_price"),
                         sell_price=order.get("sell_price")
                     )
+                    log_trade_activity(
+                        "SELL_ORDER_" + status.upper(),
+                        mode="live",
+                        cycle_id=cycle_id,
+                        txid=txid,
+                        level=sell_level,
+                        volume=order.get("volume"),
+                        buy_price=order.get("buy_price"),
+                        sell_price=order.get("sell_price"),
+                        buy_source=order.get("buy_source")
+                    )
                     notify_order_tracker(
                         trade_id=order.get("trade_id") or txid,
                         side="sell",
@@ -3443,6 +3488,16 @@ def main():
                         level=level,
                         volume=order.get("volume"),
                         price=order.get("price", float(level))
+                    )
+                    log_trade_activity(
+                        "BUY_ORDER_" + status.upper(),
+                        mode="live",
+                        cycle_id=cycle_id,
+                        txid=txid,
+                        level=level,
+                        volume=order.get("volume"),
+                        price=order.get("price", float(level)),
+                        buy_source=order.get("buy_source")
                     )
                     notify_order_tracker(
                         trade_id=order.get("trade_id") or txid,
@@ -3530,6 +3585,18 @@ def main():
                         level=level,
                         volume=round(order["volume"], VOLUME_DECIMALS),
                         price=round(buy_price, PRICE_DECIMALS),
+                        hold_minutes=hold_minutes,
+                        sell_pct_override=sell_pct_override
+                    )
+                    log_trade_activity(
+                        "BUY_ORDER_FILLED",
+                        mode="live",
+                        cycle_id=cycle_id,
+                        txid=txid,
+                        level=level,
+                        volume=round(order["volume"], VOLUME_DECIMALS),
+                        price=round(buy_price, PRICE_DECIMALS),
+                        buy_source=buy_source,
                         hold_minutes=hold_minutes,
                         sell_pct_override=sell_pct_override
                     )
@@ -3734,6 +3801,17 @@ def main():
                 log_and_console(
                     "SELL_ORDER_PLACED",
                     message=f"SELL placed @ {round(sell_price, PRICE_DECIMALS)}",
+                    cycle_id=cycle_id,
+                    txid=txid,
+                    volume=round(order["volume"], VOLUME_DECIMALS),
+                    price=round(sell_price, PRICE_DECIMALS),
+                    buy_price=round(buy_price, PRICE_DECIMALS),
+                    sell_pct_override=sell_pct_override,
+                    buy_source=buy_source
+                )
+                log_trade_activity(
+                    "SELL_ORDER_PLACED",
+                    mode="live",
                     cycle_id=cycle_id,
                     txid=txid,
                     volume=round(order["volume"], VOLUME_DECIMALS),
@@ -4182,6 +4260,39 @@ def main():
                         "approved_counts_by_source",
                         buy_source
                     )
+                    if paper_trading_enabled:
+                        actions.append("paper_buy_planned")
+                        log_event(
+                            "PAPER_BUY_ORDER_PLANNED",
+                            cycle_id=cycle_id,
+                            level=round(level, PRICE_DECIMALS),
+                            volume=round(volume, VOLUME_DECIMALS),
+                            trade_notional_usd=round(trade_notional_usd, 8),
+                            market_price=price,
+                            execution_signal=execution_signal,
+                            buy_source=buy_source,
+                            sell_pct_override=active_sell_pct_override,
+                            operating_mode=operating_mode,
+                            llm_target_active=(buy_source == "llm_target"),
+                            paper_trading_enabled=True
+                        )
+                        log_trade_activity(
+                            "PAPER_BUY_ORDER_PLANNED",
+                            mode="paper",
+                            cycle_id=cycle_id,
+                            level=round(level, PRICE_DECIMALS),
+                            volume=round(volume, VOLUME_DECIMALS),
+                            trade_notional_usd=round(trade_notional_usd, 8),
+                            market_price=price,
+                            execution_signal=execution_signal,
+                            buy_source=buy_source,
+                            sell_pct_override=active_sell_pct_override,
+                            operating_mode=operating_mode,
+                        )
+                        reserved_buy_usd += level * volume
+                        available_usd = max(0.0, usd - reserved_buy_usd)
+                        continue
+
                     buy_resp = kraken_call(
                         "BUY",
                         place_buy,
@@ -4247,6 +4358,17 @@ def main():
                         txid=txid,
                         volume=round(volume, VOLUME_DECIMALS),
                         price=round(level, PRICE_DECIMALS),
+                        buy_source=buy_source,
+                        sell_pct_override=active_sell_pct_override
+                    )
+                    log_trade_activity(
+                        "BUY_ORDER_PLACED",
+                        mode="live",
+                        cycle_id=cycle_id,
+                        txid=txid,
+                        volume=round(volume, VOLUME_DECIMALS),
+                        price=round(level, PRICE_DECIMALS),
+                        trade_notional_usd=round(level * volume, 8),
                         buy_source=buy_source,
                         sell_pct_override=active_sell_pct_override
                     )
