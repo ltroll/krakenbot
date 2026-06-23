@@ -468,6 +468,27 @@ The repo includes helpers for summarizing trade actions with an LLM and sending 
 
 These helpers are optional. The support-file notes explicitly say not to assume Discord is always wanted.
 
+## Standalone LLM Target Bot
+
+`llm_target_bot.py` uses its own strategy file via `LLM_TARGET_STRATEGY_PROFILE`.
+Keep these settings separate from the range-grid strategy profiles.
+
+Useful strategy files:
+
+- `llm_target_strategy_conservative.json`: strict quality gates and small exposure
+- `llm_target_strategy_balanced.json`: default-quality gates with paper-trade sizing
+- `llm_target_strategy_extreme_rebound.json`: contrarian rebound test profile, paper only
+
+Compare LLM target strategy files with:
+
+```bash
+source env.llm-target-backtest
+LLM_TARGET_BACKTEST_STRATEGY_SET_FILE=llm_target_strategy_test_set.txt ./venv/bin/python llm_target_backtest.py
+```
+
+The report includes `strategy_comparison`; ranked CSV output defaults to
+`llm_target_strategy_ranked.csv`.
+
 ## Running the project
 
 Install dependencies:
