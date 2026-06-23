@@ -478,6 +478,9 @@ Useful strategy files:
 - `llm_target_strategy_conservative.json`: strict quality gates and small exposure
 - `llm_target_strategy_balanced.json`: default-quality gates with paper-trade sizing
 - `llm_target_strategy_extreme_rebound.json`: contrarian rebound test profile, paper only
+- `llm_target_strategy_quality_only_probe.json`: ignores sentiment in backtest and measures quality-approved targets
+- `llm_target_strategy_sentiment_discount_loose.json`: allows watch/bearish setups only after a smaller discount
+- `llm_target_strategy_price_target_probe.json`: ignores sentiment and quality in backtest to benchmark raw targets
 
 Compare LLM target strategy files with:
 
