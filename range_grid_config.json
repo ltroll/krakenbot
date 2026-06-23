@@ -28,6 +28,8 @@
       "min_buy_volume_btc": 0.0001,
       "max_open_sell_orders": 12,
       "max_inventory_usd": 750,
+      "disable_new_buys_on_sell_backlog_count": 9,
+      "disable_new_buys_on_sell_backlog_minutes": 0,
       "aging_start_minutes": 360,
       "aging_step_minutes": 180,
       "aging_profit_reduction_pct": 0.001,
@@ -53,7 +55,7 @@
       "range_refresh_interval_minutes": 15,
       "order_tracker_symbol": "BTCUSD",
       "order_tracker_timeout_seconds": 5,
-      "order_tracker_checkin_timeout_seconds": 3
+      "order_tracker_checkin_timeout_seconds": 5
     }
   }
 }
