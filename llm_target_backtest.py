@@ -1505,6 +1505,27 @@ def build_report():
 
     report = {
         "timestamp": now.isoformat(),
+        "resolved_inputs": {
+            "env_file": os.path.abspath(ENV_FILE),
+            "env_file_exists": os.path.exists(ENV_FILE),
+            "snapshot_file_base": os.path.abspath(SNAPSHOT_LOG_FILE),
+            "snapshot_dir": os.path.dirname(os.path.abspath(SNAPSHOT_LOG_FILE)) or ".",
+            "snapshot_basename": os.path.basename(SNAPSHOT_LOG_FILE),
+            "rotate_daily": SNAPSHOT_ROTATE_DAILY,
+            "strategy_set_file": (
+                resolve_repo_path(BACKTEST_STRATEGY_SET_FILE)
+                if BACKTEST_STRATEGY_SET_FILE else
+                None
+            ),
+            "output_file": os.path.abspath(BACKTEST_OUTPUT_FILE),
+            "archive_dir": os.path.abspath(BACKTEST_ARCHIVE_DIR),
+            "strategy_comparison_csv_file": resolve_repo_path(
+                BACKTEST_STRATEGY_COMPARE_CSV_FILE
+            ),
+            "strategy_ranked_csv_file": resolve_repo_path(
+                BACKTEST_STRATEGY_RANKED_CSV_FILE
+            ),
+        },
         "snapshot_file": os.path.abspath(SNAPSHOT_LOG_FILE),
         "snapshot_files": snapshot_files,
         "snapshot_diagnostics": {

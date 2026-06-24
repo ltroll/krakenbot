@@ -482,6 +482,9 @@ Useful strategy files:
 - `llm_target_strategy_sentiment_discount_loose.json`: allows watch/bearish setups only after a smaller discount
 - `llm_target_strategy_price_target_probe.json`: ignores sentiment and quality in backtest to benchmark raw targets
 
+Probe profiles should include `probe_only: true`; `llm_target_bot.py` refuses to
+start with `probe_only: true` unless `dry_run: true`.
+
 Compare LLM target strategy files with:
 
 ```bash

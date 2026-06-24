@@ -20,6 +20,7 @@
   "dry_run": true,
   "execution_buffer_pct": 0.001,
   "target_quality_file": "http://screenpi.local/bot/target_price_quality.json",
+  "probe_only": true,
   "target_quality_enabled": true,
   "target_quality_fail_closed": true,
   "target_quality_max_age_minutes": 20,

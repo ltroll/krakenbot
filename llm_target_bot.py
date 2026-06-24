@@ -117,6 +117,12 @@ def load_strategy_config():
 strategy_config = load_strategy_config()
 
 
+def resolved_strategy_profile_path():
+    if strategy_profile_is_file():
+        return os.path.abspath(os.path.expanduser(STRATEGY_PROFILE))
+    return f"{os.path.abspath(CONFIG_FILE)}::{STRATEGY_PROFILE}"
+
+
 def profile_float(name, default):
     value = strategy_config.get(name, default)
     return default if value is None else float(value)
@@ -174,6 +180,7 @@ TARGET_LIMIT_MAX_PREMIUM_PCT = profile_float(
     0.0005
 )
 DRY_RUN = profile_bool("dry_run", False)
+PROBE_ONLY = profile_bool("probe_only", False)
 EXECUTION_BUFFER_PCT = profile_float("execution_buffer_pct", 0.0025)
 
 TARGET_QUALITY_FILE = env_or_profile(
@@ -454,6 +461,11 @@ state = load_state()
 
 
 def require_runtime_config():
+    if PROBE_ONLY and not DRY_RUN:
+        raise RuntimeError(
+            "Strategy is marked probe_only=true and cannot run with dry_run=false"
+        )
+
     required = {
         "KRAKEN_API_KEY": KRAKEN_API_KEY,
         "KRAKEN_API_SECRET": KRAKEN_API_SECRET,
@@ -1412,14 +1424,20 @@ def main():
     log_and_console(
         "BOT_START",
         message="LLM target bot starting",
-        config_file=CONFIG_FILE,
+        env_file=os.path.abspath(ENV_FILE),
+        env_file_exists=os.path.exists(ENV_FILE),
+        config_file=os.path.abspath(CONFIG_FILE),
         strategy_profile=STRATEGY_PROFILE,
-        state_file=STATE_FILE,
-        log_file=LOG_FILE,
+        strategy_profile_path=resolved_strategy_profile_path(),
+        state_file=os.path.abspath(STATE_FILE),
+        log_file=os.path.abspath(LOG_FILE),
+        signal_source=SIGNAL_FILE or LLM_SIGNAL_URL,
+        ticker_source=KRAKEN_TICKER_URL or f"{KRAKEN_API_URL.rstrip('/')}/0/public/Ticker",
         pair=KRAKEN_PAIR,
         kraken_api_url=KRAKEN_API_URL,
         kraken_key_fingerprint=key_fingerprint(KRAKEN_API_KEY),
         dry_run=DRY_RUN,
+        probe_only=PROBE_ONLY,
         min_trade_usd=MIN_TRADE_USD,
         position_size_pct=POSITION_SIZE_PCT,
         max_trade_usd=MAX_TRADE_USD,
