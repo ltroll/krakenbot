@@ -1120,18 +1120,39 @@ def practical_strategy_score(row):
     approved = row.get("approved_candidates") or 0
     take_profit_rate = row.get("potential_take_profit_reached_rate") or 0.0
     avg_end_return = row.get("potential_avg_end_return_pct")
-    avg_end_return = avg_end_return if avg_end_return is not None else -1.0
+    avg_drawdown = row.get("potential_avg_max_drawdown_pct")
     hold_snapshots = row.get("hold_snapshots") or 0
     raw_candidates = row.get("raw_candidates") or 0
     candidate_efficiency = (approved / raw_candidates) if raw_candidates > 0 else 0.0
     blocked_high = row.get("blocked_sentiment_high") or 0
 
+    if approved <= 0:
+        # A strategy that stays out should not rank below strategies that prove
+        # negative expectancy in the same window.
+        return round(
+            0.0
+            - (hold_snapshots * 0.002)
+            - (blocked_high * 0.005),
+            6,
+        )
+
+    avg_end_return = avg_end_return if avg_end_return is not None else -2.0
+    avg_drawdown = avg_drawdown if avg_drawdown is not None else min(avg_end_return, 0.0)
+    positive_expectancy = avg_end_return > 0
+    activity_reward = (
+        min(approved, 50) * 0.25
+        if positive_expectancy else
+        -min(approved, 50) * 0.1
+    )
+    efficiency_reward = candidate_efficiency * (20.0 if positive_expectancy else 5.0)
+
     score = (
-        (approved * 10.0)
-        + (take_profit_rate * 100.0)
-        + (avg_end_return * 20.0)
-        + (candidate_efficiency * 50.0)
-        - (hold_snapshots * 0.01)
+        (avg_end_return * 120.0)
+        + (avg_drawdown * 35.0)
+        + (take_profit_rate * 30.0)
+        + activity_reward
+        + efficiency_reward
+        - (hold_snapshots * 0.002)
         - (blocked_high * 0.005)
     )
     return round(score, 6)

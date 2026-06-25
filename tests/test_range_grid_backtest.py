@@ -1162,6 +1162,39 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertGreater(ranked[0]["practical_score"], ranked[1]["practical_score"])
         self.assertIn("candidate_efficiency", ranked[0])
 
+    def test_ranked_strategy_rows_prefer_no_trade_over_negative_expectancy(self):
+        comparison = {
+            "rows": [
+                {
+                    "strategy_label": "churns_badly",
+                    "strategy_file": "/tmp/churns_badly.json",
+                    "raw_candidates": 5120,
+                    "approved_candidates": 896,
+                    "hold_snapshots": 160,
+                    "potential_take_profit_reached_rate": 0.3025,
+                    "potential_avg_end_return_pct": -5.179573,
+                    "potential_avg_max_runup_pct": 0.649959,
+                    "potential_avg_max_drawdown_pct": -5.316685,
+                },
+                {
+                    "strategy_label": "stays_out",
+                    "strategy_file": "/tmp/stays_out.json",
+                    "raw_candidates": 2976,
+                    "approved_candidates": 0,
+                    "hold_snapshots": 696,
+                    "potential_take_profit_reached_rate": None,
+                    "potential_avg_end_return_pct": None,
+                    "potential_avg_max_runup_pct": None,
+                    "potential_avg_max_drawdown_pct": None,
+                },
+            ]
+        }
+
+        ranked = backtest.build_ranked_strategy_rows(comparison)
+
+        self.assertEqual(ranked[0]["strategy_label"], "stays_out")
+        self.assertGreater(ranked[0]["practical_score"], ranked[1]["practical_score"])
+
     def test_write_ranked_strategy_csv_outputs_ranked_table(self):
         comparison = {
             "rows": [
