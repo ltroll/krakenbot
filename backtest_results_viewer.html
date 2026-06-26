@@ -1,0 +1,946 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Backtest Results Viewer</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --panel-2: #eef4f1;
+      --text: #182126;
+      --muted: #637079;
+      --line: #d9e0e4;
+      --blue: #2563eb;
+      --blue-soft: #e7efff;
+      --green: #15803d;
+      --green-soft: #e9f7ee;
+      --red: #b42318;
+      --red-soft: #fff0ed;
+      --amber: #a16207;
+      --amber-soft: #fff6df;
+      --shadow: 0 12px 34px rgba(28, 39, 49, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+      font: inherit;
+    }
+
+    button {
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel);
+      color: var(--text);
+      cursor: pointer;
+      padding: 0 12px;
+    }
+
+    button:hover {
+      border-color: #aab7c0;
+      background: #f9fbfc;
+    }
+
+    button.primary {
+      border-color: var(--blue);
+      background: var(--blue);
+      color: white;
+    }
+
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 4;
+      border-bottom: 1px solid var(--line);
+      background: rgba(246, 247, 249, 0.95);
+      backdrop-filter: blur(14px);
+    }
+
+    .bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      width: min(1480px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 14px 0;
+    }
+
+    .title {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      min-width: 230px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: 0;
+    }
+
+    .source-label {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .file-button {
+      position: relative;
+      overflow: hidden;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel);
+      padding: 0 12px;
+      cursor: pointer;
+    }
+
+    .file-button input {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+    }
+
+    main {
+      width: min(1480px, calc(100vw - 32px));
+      margin: 18px auto 40px;
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(150px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .metric {
+      min-height: 86px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      padding: 13px 14px;
+    }
+
+    .metric .label {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 9px;
+    }
+
+    .metric .value {
+      overflow-wrap: anywhere;
+      font-size: 24px;
+      font-weight: 750;
+      letter-spacing: 0;
+      line-height: 1.05;
+    }
+
+    .metric .sub {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 6px;
+      overflow-wrap: anywhere;
+    }
+
+    .decision {
+      display: grid;
+      grid-template-columns: minmax(260px, 1.2fr) minmax(260px, 2fr);
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      padding: 14px;
+    }
+
+    .panel h2 {
+      margin: 0 0 9px;
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+
+    .readout {
+      display: grid;
+      gap: 7px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .readout strong {
+      color: var(--text);
+      font-weight: 700;
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) 170px 160px 170px auto;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .toolbar input,
+    .toolbar select {
+      min-height: 38px;
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel);
+      color: var(--text);
+      padding: 0 11px;
+    }
+
+    .table-shell {
+      overflow: auto;
+      max-height: calc(100vh - 315px);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    table {
+      width: 100%;
+      min-width: 1180px;
+      border-collapse: separate;
+      border-spacing: 0;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid var(--line);
+      padding: 9px 10px;
+      text-align: left;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: #edf1f4;
+      color: #39454d;
+      font-size: 12px;
+      font-weight: 750;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    tr:hover td {
+      background: #fbfcfd;
+    }
+
+    tr.selected td {
+      background: var(--blue-soft);
+    }
+
+    td.strategy {
+      min-width: 300px;
+      max-width: 420px;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      font-weight: 650;
+    }
+
+    td.path {
+      max-width: 360px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .num {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      max-width: 100%;
+      border-radius: 999px;
+      padding: 0 8px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .good {
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .bad {
+      background: var(--red-soft);
+      color: var(--red);
+    }
+
+    .warn {
+      background: var(--amber-soft);
+      color: var(--amber);
+    }
+
+    .neutral {
+      background: #eef1f3;
+      color: #46535c;
+    }
+
+    .empty {
+      border: 1px dashed #b8c3ca;
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--muted);
+      padding: 30px;
+      text-align: center;
+    }
+
+    .paste {
+      display: none;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    .paste.open {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto;
+    }
+
+    .paste textarea {
+      min-height: 110px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: var(--panel);
+      color: var(--text);
+    }
+
+    @media (max-width: 1040px) {
+      .bar,
+      main {
+        width: min(100vw - 20px, 1480px);
+      }
+
+      .bar,
+      .decision,
+      .toolbar,
+      .paste.open {
+        grid-template-columns: 1fr;
+      }
+
+      .bar {
+        display: grid;
+      }
+
+      .actions {
+        justify-content: flex-start;
+      }
+
+      .summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .table-shell {
+        max-height: calc(100vh - 445px);
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="bar">
+      <div class="title">
+        <h1>Backtest Results</h1>
+        <span class="source-label" id="sourceLabel">No CSV loaded</span>
+      </div>
+      <div class="actions">
+        <button type="button" id="rangeBtn">Range Ranked</button>
+        <button type="button" id="llmBtn">LLM Ranked</button>
+        <label class="file-button">
+          Open CSV
+          <input type="file" id="fileInput" accept=".csv,text/csv">
+        </label>
+        <button type="button" id="pasteBtn">Paste</button>
+        <button type="button" id="copyBtn">Copy Visible CSV</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="paste" id="pastePanel">
+      <textarea id="pasteText" spellcheck="false" placeholder="strategy_label,practical_score,..."></textarea>
+      <button type="button" class="primary" id="loadPasteBtn">Load</button>
+    </section>
+
+    <section class="summary" id="summary"></section>
+
+    <section class="decision">
+      <div class="panel">
+        <h2>Top Result</h2>
+        <div class="readout" id="topReadout"></div>
+      </div>
+      <div class="panel">
+        <h2>Run Read</h2>
+        <div class="readout" id="runReadout"></div>
+      </div>
+    </section>
+
+    <section class="toolbar">
+      <input type="search" id="searchInput" placeholder="Search strategy, mode, anchor, file">
+      <select id="typeFilter">
+        <option value="all">All outcomes</option>
+        <option value="approved">Approved only</option>
+        <option value="no_approved">No approvals</option>
+        <option value="positive">Positive expectancy</option>
+        <option value="negative">Negative expectancy</option>
+      </select>
+      <input type="number" id="minApproved" min="0" step="1" placeholder="Min approved">
+      <select id="columnMode">
+        <option value="focus">Focused columns</option>
+        <option value="all">All columns</option>
+      </select>
+      <button type="button" id="resetBtn">Reset</button>
+    </section>
+
+    <section class="table-shell" id="tableShell">
+      <div class="empty">Load a ranked backtest CSV to inspect the results.</div>
+    </section>
+  </main>
+
+  <script>
+    const RANGE_DEFAULT = "range_grid_backtest_strategy_ranked.csv";
+    const LLM_DEFAULT = "llm_target_strategy_ranked.csv";
+
+    const state = {
+      rows: [],
+      columns: [],
+      filtered: [],
+      source: "",
+      sortKey: "practical_score",
+      sortDir: -1,
+      selectedIndex: null,
+    };
+
+    const preferredColumns = {
+      range: [
+        "strategy_label",
+        "practical_score",
+        "approved_candidates",
+        "candidate_efficiency",
+        "potential_take_profit_reached_rate",
+        "potential_avg_end_return_pct",
+        "potential_avg_max_runup_pct",
+        "potential_avg_max_drawdown_pct",
+        "raw_candidates",
+        "approved_range_low",
+        "approved_range_median",
+        "approved_range_high_band",
+        "blocked_price_above_level",
+        "entry_step_pct",
+        "volatility_reference_pct",
+        "grid_anchor",
+        "operating_mode",
+        "sentiment_control_mode",
+        "strategy_file",
+      ],
+      llm: [
+        "strategy_label",
+        "practical_score",
+        "backtest_strategy_variant",
+        "trades",
+        "win_rate",
+        "total_net_return_pct",
+        "marked_to_market_net_return_pct",
+        "approved_candidates",
+        "candidate_efficiency",
+        "raw_candidates",
+        "fill_rate_after_approval",
+        "terminal_rate_after_approval",
+        "take_profit_count",
+        "stop_loss_count",
+        "timeout_count",
+        "blocked_by_sentiment",
+        "blocked_by_target_quality",
+        "target_profit_pct",
+        "target_quality_enabled",
+        "strategy_file",
+      ],
+    };
+
+    const els = {
+      sourceLabel: document.getElementById("sourceLabel"),
+      rangeBtn: document.getElementById("rangeBtn"),
+      llmBtn: document.getElementById("llmBtn"),
+      fileInput: document.getElementById("fileInput"),
+      pasteBtn: document.getElementById("pasteBtn"),
+      copyBtn: document.getElementById("copyBtn"),
+      pastePanel: document.getElementById("pastePanel"),
+      pasteText: document.getElementById("pasteText"),
+      loadPasteBtn: document.getElementById("loadPasteBtn"),
+      summary: document.getElementById("summary"),
+      topReadout: document.getElementById("topReadout"),
+      runReadout: document.getElementById("runReadout"),
+      searchInput: document.getElementById("searchInput"),
+      typeFilter: document.getElementById("typeFilter"),
+      minApproved: document.getElementById("minApproved"),
+      columnMode: document.getElementById("columnMode"),
+      resetBtn: document.getElementById("resetBtn"),
+      tableShell: document.getElementById("tableShell"),
+    };
+
+    function parseCsv(text) {
+      const rows = [];
+      let row = [];
+      let field = "";
+      let quoted = false;
+
+      for (let i = 0; i < text.length; i += 1) {
+        const char = text[i];
+        const next = text[i + 1];
+
+        if (quoted) {
+          if (char === '"' && next === '"') {
+            field += '"';
+            i += 1;
+          } else if (char === '"') {
+            quoted = false;
+          } else {
+            field += char;
+          }
+        } else if (char === '"') {
+          quoted = true;
+        } else if (char === ",") {
+          row.push(field);
+          field = "";
+        } else if (char === "\n") {
+          row.push(field);
+          rows.push(row);
+          row = [];
+          field = "";
+        } else if (char !== "\r") {
+          field += char;
+        }
+      }
+
+      if (field.length || row.length) {
+        row.push(field);
+        rows.push(row);
+      }
+
+      const headers = (rows.shift() || []).map((item) => item.trim());
+      const data = rows
+        .filter((items) => items.some((item) => String(item).trim() !== ""))
+        .map((items) => {
+          const record = {};
+          headers.forEach((header, index) => {
+            record[header] = normalizeValue(items[index] ?? "");
+          });
+          return record;
+        });
+
+      return { headers, data };
+    }
+
+    function normalizeValue(value) {
+      const text = String(value).trim();
+      if (text === "") return "";
+      if (/^(true|false)$/i.test(text)) return /^true$/i.test(text);
+      const numeric = Number(text);
+      if (!Number.isNaN(numeric) && /^[-+]?\d*\.?\d+(e[-+]?\d+)?$/i.test(text)) {
+        return numeric;
+      }
+      return text;
+    }
+
+    function csvEscape(value) {
+      const text = value == null ? "" : String(value);
+      return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+    }
+
+    function detectKind() {
+      if (state.columns.includes("potential_avg_end_return_pct")) return "range";
+      if (state.columns.includes("marked_to_market_net_return_pct")) return "llm";
+      return "range";
+    }
+
+    function numberValue(row, key) {
+      const value = row[key];
+      return typeof value === "number" && Number.isFinite(value) ? value : null;
+    }
+
+    function displayValue(value, key) {
+      if (value === true) return "true";
+      if (value === false) return "false";
+      if (value === "" || value == null) return "";
+      if (typeof value !== "number") return value;
+
+      if (key.includes("rate") || key === "win_rate") {
+        return Math.abs(value) <= 1 ? `${(value * 100).toFixed(1)}%` : `${value.toFixed(2)}%`;
+      }
+      if (key.includes("pct") || key.includes("return")) {
+        return `${value.toFixed(Math.abs(value) < 1 ? 4 : 2)}%`;
+      }
+      if (key.includes("efficiency")) {
+        return value.toFixed(5);
+      }
+      if (Math.abs(value) >= 100) return value.toFixed(0);
+      if (Number.isInteger(value)) return String(value);
+      return value.toFixed(4);
+    }
+
+    function formatPlain(value, digits = 2) {
+      if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
+      return value.toFixed(digits);
+    }
+
+    function classForValue(value, key) {
+      if (typeof value !== "number") return "";
+      if (key.includes("drawdown") || key.includes("stop_loss") || key.includes("blocked")) {
+        if (value > 0) return "warn";
+        return "";
+      }
+      if (key.includes("score") || key.includes("return") || key.includes("end_return") || key.includes("runup")) {
+        if (value > 0) return "good";
+        if (value < 0) return "bad";
+      }
+      if (key.includes("take_profit_reached_rate") || key === "win_rate") {
+        if (value >= 0.5) return "good";
+        if (value > 0) return "warn";
+      }
+      return "";
+    }
+
+    function loadCsv(text, source) {
+      const parsed = parseCsv(text);
+      state.rows = parsed.data;
+      state.columns = parsed.headers;
+      state.source = source;
+      state.sortKey = state.columns.includes("practical_score") ? "practical_score" : state.columns[0];
+      state.sortDir = -1;
+      state.selectedIndex = null;
+      els.sourceLabel.textContent = `${source} - ${state.rows.length} rows`;
+      render();
+    }
+
+    async function loadUrl(path) {
+      try {
+        const response = await fetch(path, { cache: "no-store" });
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        loadCsv(await response.text(), path);
+      } catch (error) {
+        els.sourceLabel.textContent = `Could not load ${path}`;
+        els.tableShell.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
+      }
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function filteredRows() {
+      const search = els.searchInput.value.trim().toLowerCase();
+      const outcome = els.typeFilter.value;
+      const minApproved = Number(els.minApproved.value || 0);
+      const kind = detectKind();
+      const expectancyKey = kind === "llm" ? "marked_to_market_net_return_pct" : "potential_avg_end_return_pct";
+
+      return state.rows.filter((row) => {
+        const approved = numberValue(row, "approved_candidates") || 0;
+        const expectancy = numberValue(row, expectancyKey);
+        const textMatches = !search || state.columns.some((key) => String(row[key] ?? "").toLowerCase().includes(search));
+        const approvedMatches = approved >= minApproved;
+        let outcomeMatches = true;
+
+        if (outcome === "approved") outcomeMatches = approved > 0;
+        if (outcome === "no_approved") outcomeMatches = approved === 0;
+        if (outcome === "positive") outcomeMatches = expectancy != null && expectancy > 0;
+        if (outcome === "negative") outcomeMatches = expectancy != null && expectancy < 0;
+
+        return textMatches && approvedMatches && outcomeMatches;
+      }).sort((a, b) => {
+        const av = a[state.sortKey];
+        const bv = b[state.sortKey];
+        if (typeof av === "number" && typeof bv === "number") return (av - bv) * state.sortDir;
+        return String(av ?? "").localeCompare(String(bv ?? "")) * state.sortDir;
+      });
+    }
+
+    function render() {
+      if (!state.rows.length) {
+        els.summary.innerHTML = "";
+        els.topReadout.innerHTML = "";
+        els.runReadout.innerHTML = "";
+        els.tableShell.innerHTML = '<div class="empty">Load a ranked backtest CSV to inspect the results.</div>';
+        return;
+      }
+
+      state.filtered = filteredRows();
+      renderSummary();
+      renderReadouts();
+      renderTable();
+    }
+
+    function renderSummary() {
+      const kind = detectKind();
+      const scoreValues = state.rows.map((row) => numberValue(row, "practical_score")).filter((value) => value != null);
+      const approvedTotal = state.rows.reduce((sum, row) => sum + (numberValue(row, "approved_candidates") || 0), 0);
+      const rawTotal = state.rows.reduce((sum, row) => sum + (numberValue(row, "raw_candidates") || 0), 0);
+      const top = [...state.rows].sort((a, b) => (numberValue(b, "practical_score") ?? -Infinity) - (numberValue(a, "practical_score") ?? -Infinity))[0];
+      const expectancyKey = kind === "llm" ? "marked_to_market_net_return_pct" : "potential_avg_end_return_pct";
+      const expectancyValues = state.rows.map((row) => numberValue(row, expectancyKey)).filter((value) => value != null);
+      const tpKey = kind === "llm" ? "win_rate" : "potential_take_profit_reached_rate";
+      const positiveCount = state.rows.filter((row) => (numberValue(row, expectancyKey) || 0) > 0).length;
+
+      const cards = [
+        ["Rows", state.rows.length, `${state.filtered.length} visible`],
+        ["Top score", formatPlain(numberValue(top, "practical_score"), 3), top?.strategy_label || ""],
+        ["Approved", approvedTotal, `${rawTotal} raw candidates`],
+        ["Avg expectancy", `${formatPlain(avg(expectancyValues), 3)}%`, expectancyKey],
+        ["Positive rows", positiveCount, `${state.rows.length - positiveCount} neutral or negative`],
+        [kind === "llm" ? "Avg win rate" : "Avg TP hit", `${formatRate(avg(state.rows.map((row) => numberValue(row, tpKey)).filter((value) => value != null)))}`, tpKey],
+      ];
+
+      els.summary.innerHTML = cards.map(([label, value, sub]) => `
+        <article class="metric">
+          <div class="label">${escapeHtml(label)}</div>
+          <div class="value">${escapeHtml(value)}</div>
+          <div class="sub">${escapeHtml(sub)}</div>
+        </article>
+      `).join("");
+    }
+
+    function renderReadouts() {
+      const kind = detectKind();
+      const top = [...state.rows].sort((a, b) => (numberValue(b, "practical_score") ?? -Infinity) - (numberValue(a, "practical_score") ?? -Infinity))[0];
+      const active = state.rows.find((row) => String(row.strategy_label || "").includes("production_high_reversion_hybrid"));
+      const expectancyKey = kind === "llm" ? "marked_to_market_net_return_pct" : "potential_avg_end_return_pct";
+      const approved = numberValue(top, "approved_candidates") || 0;
+      const expectancy = numberValue(top, expectancyKey);
+      const score = numberValue(top, "practical_score");
+      const bestIsNoTrade = approved === 0;
+      const positiveRows = state.rows.filter((row) => (numberValue(row, expectancyKey) || 0) > 0);
+
+      els.topReadout.innerHTML = `
+        <div><strong>${escapeHtml(top.strategy_label || "n/a")}</strong></div>
+        <div>Score ${badge(score, "practical_score")} with ${badge(approved, "approved_candidates")} approvals.</div>
+        <div>${escapeHtml(expectancyKey)} ${badge(expectancy, expectancyKey)}</div>
+        <div>${bestIsNoTrade ? "Best row is defensive/no-entry in this window." : "Best row took entries in this window."}</div>
+      `;
+
+      const activeLine = active
+        ? `Production hybrid score ${formatPlain(numberValue(active, "practical_score"), 3)} with ${numberValue(active, "approved_candidates") || 0} approvals.`
+        : "Production hybrid was not present in this CSV.";
+      const signalLine = positiveRows.length
+        ? `${positiveRows.length} row(s) show positive expectancy.`
+        : "No rows show positive expectancy.";
+      const biasLine = kind === "range"
+        ? summarizeRangeBias()
+        : summarizeLlmBias();
+
+      els.runReadout.innerHTML = `
+        <div>${escapeHtml(activeLine)}</div>
+        <div>${escapeHtml(signalLine)}</div>
+        <div>${escapeHtml(biasLine)}</div>
+      `;
+    }
+
+    function renderTable() {
+      if (!state.filtered.length) {
+        els.tableShell.innerHTML = '<div class="empty">No rows match the current filters.</div>';
+        return;
+      }
+
+      const kind = detectKind();
+      const columns = els.columnMode.value === "all"
+        ? state.columns
+        : preferredColumns[kind].filter((key) => state.columns.includes(key));
+
+      const headerHtml = columns.map((key) => {
+        const arrow = state.sortKey === key ? (state.sortDir === -1 ? " ↓" : " ↑") : "";
+        return `<th data-key="${escapeHtml(key)}">${escapeHtml(labelFor(key))}${arrow}</th>`;
+      }).join("");
+
+      const bodyHtml = state.filtered.map((row, index) => {
+        const cells = columns.map((key) => cellHtml(row, key)).join("");
+        const selected = state.selectedIndex === index ? " selected" : "";
+        return `<tr class="${selected}" data-index="${index}">${cells}</tr>`;
+      }).join("");
+
+      els.tableShell.innerHTML = `<table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table>`;
+
+      els.tableShell.querySelectorAll("th").forEach((th) => {
+        th.addEventListener("click", () => {
+          const key = th.dataset.key;
+          if (state.sortKey === key) {
+            state.sortDir *= -1;
+          } else {
+            state.sortKey = key;
+            state.sortDir = typeof state.rows[0]?.[key] === "number" ? -1 : 1;
+          }
+          render();
+        });
+      });
+
+      els.tableShell.querySelectorAll("tbody tr").forEach((tr) => {
+        tr.addEventListener("click", () => {
+          state.selectedIndex = Number(tr.dataset.index);
+          renderTable();
+        });
+      });
+    }
+
+    function cellHtml(row, key) {
+      const value = row[key];
+      const classes = [];
+      if (typeof value === "number") classes.push("num");
+      if (key === "strategy_label") classes.push("strategy");
+      if (key === "strategy_file") classes.push("path");
+      const className = classes.length ? ` class="${classes.join(" ")}"` : "";
+      const rendered = key === "strategy_label" ? strategyCell(row) : valueCell(value, key);
+      return `<td${className}>${rendered}</td>`;
+    }
+
+    function strategyCell(row) {
+      const approved = numberValue(row, "approved_candidates") || 0;
+      const label = escapeHtml(row.strategy_label || "");
+      const chip = approved > 0
+        ? `<span class="pill good">${approved} approved</span>`
+        : `<span class="pill neutral">no entry</span>`;
+      return `<div>${label}</div><div style="margin-top:6px">${chip}</div>`;
+    }
+
+    function valueCell(value, key) {
+      if (typeof value === "number") {
+        const cls = classForValue(value, key);
+        const text = displayValue(value, key);
+        if (cls) return `<span class="pill ${cls}">${escapeHtml(text)}</span>`;
+        return escapeHtml(text);
+      }
+      return escapeHtml(displayValue(value, key));
+    }
+
+    function badge(value, key) {
+      if (typeof value !== "number" || !Number.isFinite(value)) return '<span class="pill neutral">n/a</span>';
+      const cls = classForValue(value, key) || "neutral";
+      return `<span class="pill ${cls}">${escapeHtml(displayValue(value, key))}</span>`;
+    }
+
+    function labelFor(key) {
+      return key.replaceAll("_", " ");
+    }
+
+    function avg(values) {
+      if (!values.length) return null;
+      return values.reduce((sum, value) => sum + value, 0) / values.length;
+    }
+
+    function formatRate(value) {
+      if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
+      return `${(Math.abs(value) <= 1 ? value * 100 : value).toFixed(1)}%`;
+    }
+
+    function summarizeRangeBias() {
+      const approvedLow = state.rows.reduce((sum, row) => sum + (numberValue(row, "approved_range_low") || 0), 0);
+      const approvedMedian = state.rows.reduce((sum, row) => sum + (numberValue(row, "approved_range_median") || 0), 0);
+      const approvedHigh = state.rows.reduce((sum, row) => sum + (numberValue(row, "approved_range_high_band") || 0), 0);
+      const blocked = state.rows.reduce((sum, row) => sum + (numberValue(row, "blocked_price_above_level") || 0), 0);
+      return `Anchor mix: low ${approvedLow}, median ${approvedMedian}, high ${approvedHigh}; price-above-level blocks ${blocked}.`;
+    }
+
+    function summarizeLlmBias() {
+      const sentiment = state.rows.reduce((sum, row) => sum + (numberValue(row, "blocked_by_sentiment") || 0), 0);
+      const quality = state.rows.reduce((sum, row) => sum + (numberValue(row, "blocked_by_target_quality") || 0), 0);
+      const trades = state.rows.reduce((sum, row) => sum + (numberValue(row, "trades") || 0), 0);
+      return `LLM mix: ${trades} trades, ${sentiment} sentiment blocks, ${quality} target-quality blocks.`;
+    }
+
+    function copyVisibleCsv() {
+      if (!state.filtered.length) return;
+      const columns = els.columnMode.value === "all"
+        ? state.columns
+        : preferredColumns[detectKind()].filter((key) => state.columns.includes(key));
+      const text = [
+        columns.map(csvEscape).join(","),
+        ...state.filtered.map((row) => columns.map((key) => csvEscape(row[key])).join(",")),
+      ].join("\n");
+      navigator.clipboard.writeText(text).then(() => {
+        els.copyBtn.textContent = "Copied";
+        setTimeout(() => { els.copyBtn.textContent = "Copy Visible CSV"; }, 1200);
+      });
+    }
+
+    els.rangeBtn.addEventListener("click", () => loadUrl(RANGE_DEFAULT));
+    els.llmBtn.addEventListener("click", () => loadUrl(LLM_DEFAULT));
+    els.fileInput.addEventListener("change", async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      loadCsv(await file.text(), file.name);
+    });
+    els.pasteBtn.addEventListener("click", () => {
+      els.pastePanel.classList.toggle("open");
+      if (els.pastePanel.classList.contains("open")) els.pasteText.focus();
+    });
+    els.loadPasteBtn.addEventListener("click", () => loadCsv(els.pasteText.value, "pasted CSV"));
+    els.copyBtn.addEventListener("click", copyVisibleCsv);
+    els.searchInput.addEventListener("input", render);
+    els.typeFilter.addEventListener("change", render);
+    els.minApproved.addEventListener("input", render);
+    els.columnMode.addEventListener("change", render);
+    els.resetBtn.addEventListener("click", () => {
+      els.searchInput.value = "";
+      els.typeFilter.value = "all";
+      els.minApproved.value = "";
+      els.columnMode.value = "focus";
+      state.selectedIndex = null;
+      render();
+    });
+
+    if (location.protocol.startsWith("http")) {
+      loadUrl(RANGE_DEFAULT);
+    }
+  </script>
+</body>
+</html>
