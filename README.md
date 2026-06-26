@@ -519,6 +519,14 @@ router, but it is off by default:
 ```bash
 RANGE_GRID_ANCHOR_ROUTER_ENABLED=true
 RANGE_GRID_ANCHOR_ROUTER_FILE=/var/www/html/bot/range_grid_anchor_winners.json
+RANGE_GRID_ANCHOR_ROUTER_TIMEOUT_SECONDS=5
+```
+
+`RANGE_GRID_ANCHOR_ROUTER_FILE` may also be an HTTP(S) URL, which is useful when
+backtesting runs on a separate host:
+
+```bash
+RANGE_GRID_ANCHOR_ROUTER_FILE=http://192.168.50.211/bot/range_grid_anchor_winners.json
 ```
 
 When enabled, low/median/high candidates use the selected route's entry spacing,

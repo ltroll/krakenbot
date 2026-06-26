@@ -403,6 +403,10 @@ def env_default_bool(name, default=False):
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def is_http_url(value):
+    return str(value or "").strip().lower().startswith(("http://", "https://"))
+
+
 def profile_int(name, default):
     value = strategy_config.get(name, default)
     return default if value is None else int(value)
@@ -688,6 +692,10 @@ anchor_strategy_router_refresh_seconds = profile_int(
     "anchor_strategy_router_refresh_seconds",
     300
 )
+anchor_strategy_router_timeout_seconds = profile_float(
+    "anchor_strategy_router_timeout_seconds",
+    float(os.getenv("RANGE_GRID_ANCHOR_ROUTER_TIMEOUT_SECONDS", "5"))
+)
 anchor_strategy_router_fail_closed = profile_bool(
     "anchor_strategy_router_fail_closed",
     False
@@ -792,12 +800,28 @@ def write_json_file(path, payload):
         json.dump(payload, f, indent=2)
 
 
+def load_anchor_router_payload(source):
+    if is_http_url(source):
+        response = requests.get(
+            source,
+            timeout=anchor_strategy_router_timeout_seconds
+        )
+        response.raise_for_status()
+        return response.json()
+
+    return load_json_file(resolve_local_path(source))
+
+
 def load_anchor_strategy_routes(force=False):
     if not anchor_strategy_router_enabled:
         return {}
 
     now = time.time()
-    path = resolve_local_path(anchor_strategy_router_file)
+    path = (
+        anchor_strategy_router_file
+        if is_http_url(anchor_strategy_router_file)
+        else resolve_local_path(anchor_strategy_router_file)
+    )
     cache_age = now - anchor_strategy_router_cache.get("loaded_at", 0)
     if (
         not force
@@ -809,7 +833,7 @@ def load_anchor_strategy_routes(force=False):
     routes = {}
     error = None
     try:
-        payload = load_json_file(path)
+        payload = load_anchor_router_payload(path)
         winners = payload.get("winners", {}) if isinstance(payload, dict) else {}
         if not isinstance(winners, dict):
             raise RuntimeError("anchor router file winners must be an object")
