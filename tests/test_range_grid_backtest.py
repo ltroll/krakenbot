@@ -1232,6 +1232,123 @@ class RangeGridBacktestTests(unittest.TestCase):
             self.assertIn("candidate_efficiency", text)
             self.assertIn("baseline", text)
 
+    def test_build_anchor_winners_selects_top_eligible_per_anchor(self):
+        comparison = {
+            "rows": [
+                {
+                    "strategy_label": "low_winner",
+                    "strategy_file": "/tmp/low.json",
+                    "grid_anchor": "low",
+                    "raw_candidates": 20,
+                    "approved_candidates": 3,
+                    "approved_range_low": 3,
+                    "approved_range_median": 0,
+                    "approved_range_high_band": 0,
+                    "potential_take_profit_reached_rate": 1.0,
+                    "potential_avg_end_return_pct": 1.2,
+                    "potential_avg_max_runup_pct": 2.0,
+                    "potential_avg_max_drawdown_pct": -0.4,
+                },
+                {
+                    "strategy_label": "median_winner",
+                    "strategy_file": "/tmp/median.json",
+                    "grid_anchor": "median",
+                    "raw_candidates": 25,
+                    "approved_candidates": 4,
+                    "approved_range_low": 0,
+                    "approved_range_median": 4,
+                    "approved_range_high_band": 0,
+                    "potential_take_profit_reached_rate": 0.75,
+                    "potential_avg_end_return_pct": 0.8,
+                    "potential_avg_max_runup_pct": 1.4,
+                    "potential_avg_max_drawdown_pct": -0.8,
+                },
+                {
+                    "strategy_label": "bad_high",
+                    "strategy_file": "/tmp/high.json",
+                    "grid_anchor": "high",
+                    "raw_candidates": 15,
+                    "approved_candidates": 2,
+                    "approved_range_low": 0,
+                    "approved_range_median": 0,
+                    "approved_range_high_band": 2,
+                    "potential_take_profit_reached_rate": 0.1,
+                    "potential_avg_end_return_pct": -0.2,
+                    "potential_avg_max_runup_pct": 0.2,
+                    "potential_avg_max_drawdown_pct": -0.9,
+                },
+            ],
+            "details": [
+                {
+                    "strategy_file": "/tmp/low.json",
+                    "strategy_payload": {"grid_anchor": "low"},
+                },
+                {
+                    "strategy_file": "/tmp/median.json",
+                    "strategy_payload": {"grid_anchor": "median"},
+                },
+                {
+                    "strategy_file": "/tmp/high.json",
+                    "strategy_payload": {"grid_anchor": "high"},
+                },
+            ],
+        }
+
+        winners = backtest.build_anchor_winners(comparison)
+
+        self.assertEqual(
+            winners["winners"]["low"]["selected"]["strategy_label"],
+            "low_winner",
+        )
+        self.assertEqual(
+            winners["winners"]["median"]["selected"]["strategy_label"],
+            "median_winner",
+        )
+        self.assertIsNone(winners["winners"]["high"]["selected"])
+        self.assertIn(
+            "avg_end_return_below_min",
+            winners["winners"]["high"]["candidates"][0]["rejection_reasons"],
+        )
+
+    def test_write_anchor_winners_json_outputs_router_payload(self):
+        comparison = {
+            "strategy_set_file": "/tmp/strategies.txt",
+            "rows": [
+                {
+                    "strategy_label": "baseline",
+                    "strategy_file": "/tmp/baseline.json",
+                    "grid_anchor": "low",
+                    "raw_candidates": 10,
+                    "approved_candidates": 2,
+                    "approved_range_low": 2,
+                    "approved_range_median": 0,
+                    "approved_range_high_band": 0,
+                    "potential_take_profit_reached_rate": 0.5,
+                    "potential_avg_end_return_pct": 0.12,
+                    "potential_avg_max_runup_pct": 0.4,
+                    "potential_avg_max_drawdown_pct": -0.2,
+                }
+            ],
+            "details": [
+                {
+                    "strategy_file": "/tmp/baseline.json",
+                    "strategy_payload": {"grid_anchor": "low"},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "anchor_winners.json")
+            resolved = backtest.write_anchor_winners_json(comparison, output_path)
+
+            self.assertEqual(resolved, output_path)
+            with open(output_path, encoding="utf-8") as f:
+                payload = json.load(f)
+            self.assertIn("criteria", payload)
+            self.assertEqual(
+                payload["winners"]["low"]["selected"]["strategy_label"],
+                "baseline",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

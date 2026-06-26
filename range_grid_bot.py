@@ -73,6 +73,10 @@ ALERT_LOG_FILE = (
     or os.getenv("BOT_ALERT_LOG_FILE")
     or "range_grid_alerts.jsonl"
 )
+ANCHOR_STRATEGY_ROUTER_FILE = (
+    os.getenv("RANGE_GRID_ANCHOR_ROUTER_FILE")
+    or "/var/www/html/bot/range_grid_anchor_winners.json"
+)
 
 KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
@@ -171,6 +175,15 @@ def normalized_source_config_map(config, key):
         except Exception:
             continue
     return normalized
+
+
+def anchor_for_buy_source(buy_source):
+    return {
+        "range_low": "low",
+        "range_mean": "median",
+        "range_median": "median",
+        "range_high_band": "high",
+    }.get(buy_source)
 
 
 def effective_entry_step_pct(base_entry_step_pct, volatility_pct, config):
@@ -372,6 +385,22 @@ def load_strategy_config():
         return load_json_file(path)
 
     return select_strategy_profile(load_config())
+
+
+def resolve_local_path(path):
+    expanded = os.path.expanduser(str(path or ""))
+    if not expanded:
+        return ""
+    if os.path.isabs(expanded):
+        return expanded
+    return os.path.abspath(expanded)
+
+
+def env_default_bool(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
 def profile_int(name, default):
@@ -647,11 +676,33 @@ operating_mode = normalize_operating_mode(
     strategy_config.get("operating_mode", "range_plus_llm")
 )
 paper_trading_enabled = profile_bool("paper_trading_enabled", False)
+anchor_strategy_router_enabled = profile_bool(
+    "anchor_strategy_router_enabled",
+    env_default_bool("RANGE_GRID_ANCHOR_ROUTER_ENABLED", False)
+)
+anchor_strategy_router_file = (
+    os.getenv("RANGE_GRID_ANCHOR_ROUTER_FILE")
+    or profile_str("anchor_strategy_router_file", ANCHOR_STRATEGY_ROUTER_FILE)
+)
+anchor_strategy_router_refresh_seconds = profile_int(
+    "anchor_strategy_router_refresh_seconds",
+    300
+)
+anchor_strategy_router_fail_closed = profile_bool(
+    "anchor_strategy_router_fail_closed",
+    False
+)
 configured_strategy_modes = parse_strategy_modes(grid_anchor)
 strategy_modes = apply_operating_mode_to_strategy_modes(
     configured_strategy_modes,
     operating_mode
 )
+anchor_strategy_router_cache = {
+    "loaded_at": 0,
+    "path": None,
+    "routes": {},
+    "error": None,
+}
 
 # ----------------------
 # KRAKEN INIT
@@ -739,6 +790,161 @@ def write_json_file(path, payload):
         os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+
+
+def load_anchor_strategy_routes(force=False):
+    if not anchor_strategy_router_enabled:
+        return {}
+
+    now = time.time()
+    path = resolve_local_path(anchor_strategy_router_file)
+    cache_age = now - anchor_strategy_router_cache.get("loaded_at", 0)
+    if (
+        not force
+        and anchor_strategy_router_cache.get("path") == path
+        and cache_age < anchor_strategy_router_refresh_seconds
+    ):
+        return anchor_strategy_router_cache.get("routes", {})
+
+    routes = {}
+    error = None
+    try:
+        payload = load_json_file(path)
+        winners = payload.get("winners", {}) if isinstance(payload, dict) else {}
+        if not isinstance(winners, dict):
+            raise RuntimeError("anchor router file winners must be an object")
+
+        for anchor in ("low", "median", "high"):
+            selected = (winners.get(anchor) or {}).get("selected")
+            if not isinstance(selected, dict) or not selected.get("eligible"):
+                continue
+
+            strategy_payload = selected.get("strategy_payload")
+            if not isinstance(strategy_payload, dict):
+                log_event(
+                    "ANCHOR_STRATEGY_ROUTE_SKIPPED",
+                    anchor=anchor,
+                    strategy_label=selected.get("strategy_label"),
+                    reason="missing_strategy_payload",
+                    router_file=path,
+                )
+                continue
+
+            errors = validate_strategy_config(strategy_payload)
+            if errors:
+                log_event(
+                    "ANCHOR_STRATEGY_ROUTE_SKIPPED",
+                    anchor=anchor,
+                    strategy_label=selected.get("strategy_label"),
+                    reason="invalid_strategy_payload",
+                    validation_errors=errors,
+                    router_file=path,
+                )
+                continue
+
+            if (
+                not paper_trading_enabled
+                and (
+                    strategy_bool(strategy_payload, "paper_trading_enabled", False)
+                    or strategy_bool(strategy_payload, "probe_only", False)
+                )
+            ):
+                log_event(
+                    "ANCHOR_STRATEGY_ROUTE_SKIPPED",
+                    anchor=anchor,
+                    strategy_label=selected.get("strategy_label"),
+                    reason="paper_or_probe_profile_on_live_bot",
+                    router_file=path,
+                )
+                continue
+
+            route = dict(selected)
+            route["anchor"] = anchor
+            route["strategy_config"] = strategy_payload
+            routes[anchor] = route
+    except Exception as exc:
+        error = str(exc)
+
+    previous_error = anchor_strategy_router_cache.get("error")
+    anchor_strategy_router_cache.update({
+        "loaded_at": now,
+        "path": path,
+        "routes": routes,
+        "error": error,
+    })
+
+    if error and error != previous_error:
+        log_event(
+            "ANCHOR_STRATEGY_ROUTER_LOAD_ERROR",
+            message=error,
+            router_file=path,
+            fail_closed=anchor_strategy_router_fail_closed,
+        )
+    elif not error:
+        log_event(
+            "ANCHOR_STRATEGY_ROUTER_LOADED",
+            router_file=path,
+            route_count=len(routes),
+            anchors=sorted(routes),
+        )
+
+    return routes
+
+
+def anchor_strategy_route_for_source(buy_source):
+    anchor = anchor_for_buy_source(buy_source)
+    if not anchor or not anchor_strategy_router_enabled:
+        return {
+            "anchor": anchor,
+            "route": None,
+            "block_reason": None,
+        }
+
+    routes = load_anchor_strategy_routes()
+    route = routes.get(anchor)
+    block_reason = None
+    if route is None and anchor_strategy_router_fail_closed:
+        block_reason = "anchor_strategy_router_no_route"
+
+    return {
+        "anchor": anchor,
+        "route": route,
+        "block_reason": block_reason,
+    }
+
+
+def routed_effective_entry_step_pct(route_config, volatility_pct):
+    return effective_entry_step_pct(
+        strategy_float(route_config, "entry_step_pct", entry_step_pct),
+        volatility_pct,
+        route_config,
+    )
+
+
+def routed_effective_limits(route_config, regime, risk_multiplier):
+    route_position_size_pct = (
+        strategy_float(route_config, "position_size_pct", position_size_pct)
+        * regime["position_size_multiplier"]
+        * risk_multiplier
+    )
+    route_max_inventory_usd = (
+        strategy_float(route_config, "max_inventory_usd", max_inventory_usd)
+        * regime["inventory_multiplier"]
+        * risk_multiplier
+    )
+    route_max_open_sell_orders = max(
+        1,
+        int(round(
+            strategy_float(route_config, "max_open_sell_orders", max_open_sell_orders)
+            * regime["open_sell_multiplier"]
+            * risk_multiplier
+        ))
+    )
+    return {
+        "position_size_pct": route_position_size_pct,
+        "max_inventory_usd": route_max_inventory_usd,
+        "max_open_sell_orders": route_max_open_sell_orders,
+    }
 
 
 def emit_alert(alert_type, severity, message, **kwargs):
@@ -3861,46 +4067,124 @@ def main():
                         if strategy_mode == "llm_target":
                             continue
                         if strategy_mode == "mean":
+                            buy_source = "range_mean"
+                            route_context = anchor_strategy_route_for_source(
+                                buy_source
+                            )
+                            route = route_context["route"]
+                            route_config = (
+                                route.get("strategy_config")
+                                if route else strategy_config
+                            )
+                            route_entry_step_pct = routed_effective_entry_step_pct(
+                                route_config,
+                                price_regime_volatility_pct,
+                            )
                             grid = compute_grid(
                                 mean,
-                                current_entry_step_pct,
-                                max_grid_size
+                                route_entry_step_pct,
+                                int(strategy_float(
+                                    route_config,
+                                    "max_grid_size",
+                                    max_grid_size,
+                                ))
                             )
                             sell_pct_override = None
-                            buy_source = "range_mean"
                         elif strategy_mode == "median" and median is not None:
+                            buy_source = "range_median"
+                            route_context = anchor_strategy_route_for_source(
+                                buy_source
+                            )
+                            route = route_context["route"]
+                            route_config = (
+                                route.get("strategy_config")
+                                if route else strategy_config
+                            )
+                            route_entry_step_pct = routed_effective_entry_step_pct(
+                                route_config,
+                                price_regime_volatility_pct,
+                            )
                             grid = compute_grid(
                                 median,
-                                current_entry_step_pct,
-                                max_grid_size
+                                route_entry_step_pct,
+                                int(strategy_float(
+                                    route_config,
+                                    "max_grid_size",
+                                    max_grid_size,
+                                ))
                             )
                             sell_pct_override = None
-                            buy_source = "range_median"
                         elif strategy_mode == "high":
                             if not regime["allow_high_anchor"]:
                                 continue
+                            buy_source = "range_high_band"
+                            route_context = anchor_strategy_route_for_source(
+                                buy_source
+                            )
+                            route = route_context["route"]
+                            route_config = (
+                                route.get("strategy_config")
+                                if route else strategy_config
+                            )
+                            route_entry_step_pct = routed_effective_entry_step_pct(
+                                route_config,
+                                price_regime_volatility_pct,
+                            )
                             grid = compute_high_anchor_grid(
                                 high,
                                 price,
-                                current_entry_step_pct
+                                route_entry_step_pct,
                             )
-                            sell_pct_override = high_anchor_profit_target_pct
-                            buy_source = "range_high_band"
+                            sell_pct_override = strategy_float(
+                                route_config,
+                                "high_anchor_profit_target_pct",
+                                high_anchor_profit_target_pct,
+                            )
                         else:
+                            buy_source = "range_low"
+                            route_context = anchor_strategy_route_for_source(
+                                buy_source
+                            )
+                            route = route_context["route"]
+                            route_config = (
+                                route.get("strategy_config")
+                                if route else strategy_config
+                            )
+                            route_entry_step_pct = routed_effective_entry_step_pct(
+                                route_config,
+                                price_regime_volatility_pct,
+                            )
                             grid = compute_grid(
                                 low,
-                                current_entry_step_pct,
-                                max_grid_size
+                                route_entry_step_pct,
+                                int(strategy_float(
+                                    route_config,
+                                    "max_grid_size",
+                                    max_grid_size,
+                                ))
                             )
                             sell_pct_override = None
-                            buy_source = "range_low"
+
+                        if sell_pct_override is None:
+                            sell_pct_override = strategy_float(
+                                route_config,
+                                "profit_target_pct",
+                                profit_target_pct,
+                            )
 
                         for level in grid:
                             candidate_levels.append(
                                 {
                                     "level": level,
                                     "sell_pct_override": sell_pct_override,
-                                    "buy_source": buy_source
+                                    "buy_source": buy_source,
+                                    "anchor_router_anchor": route_context["anchor"],
+                                    "anchor_router_route": route,
+                                    "anchor_router_block_reason": (
+                                        route_context["block_reason"]
+                                    ),
+                                    "route_strategy_config": route_config,
+                                    "route_entry_step_pct": route_entry_step_pct,
                                 }
                             )
 
@@ -3951,6 +4235,47 @@ def main():
                     level = candidate["level"]
                     active_sell_pct_override = candidate["sell_pct_override"]
                     buy_source = candidate["buy_source"]
+                    route_config = candidate.get("route_strategy_config") or strategy_config
+                    route = candidate.get("anchor_router_route")
+                    route_anchor = candidate.get("anchor_router_anchor")
+                    route_block_reason = candidate.get(
+                        "anchor_router_block_reason"
+                    )
+                    route_limits = routed_effective_limits(
+                        route_config,
+                        regime,
+                        smoothed_risk_multiplier,
+                    )
+                    route_inventory_pressure = inventory_pressure_adjustment(
+                        deployed_inventory_usd,
+                        route_limits["max_inventory_usd"],
+                        route_config,
+                    )
+                    candidate_effective_position_size_pct = (
+                        route_limits["position_size_pct"]
+                        * route_inventory_pressure["size_multiplier"]
+                    )
+                    candidate_effective_max_inventory_usd = (
+                        route_limits["max_inventory_usd"]
+                    )
+                    candidate_effective_max_open_sell_orders = (
+                        route_limits["max_open_sell_orders"]
+                    )
+                    candidate_min_buy_notional_usd = strategy_float(
+                        route_config,
+                        "min_buy_notional_usd",
+                        min_buy_notional_usd,
+                    )
+                    candidate_min_buy_volume_btc = strategy_float(
+                        route_config,
+                        "min_buy_volume_btc",
+                        min_buy_volume_btc,
+                    )
+                    candidate_max_open_high_anchor_orders = int(strategy_float(
+                        route_config,
+                        "max_open_high_anchor_orders",
+                        max_open_high_anchor_orders,
+                    ))
                     bucket_name = buy_source_bucket(buy_source)
                     bucket_inventory_usd = bucket_inventory_usd_map.get(
                         bucket_name,
@@ -3958,7 +4283,7 @@ def main():
                     )
                     bucket_cap_usd = bucket_inventory_cap_usd(
                         bucket_name,
-                        effective_max_inventory_usd
+                        candidate_effective_max_inventory_usd
                     )
                     flow_control = flow_adjustment(flow_pressure, buy_source)
                     key = str(level)
@@ -3966,6 +4291,8 @@ def main():
 
                     if key in state["open_buy_orders"]:
                         skip_reason = "open_buy_order"
+                    elif route_block_reason:
+                        skip_reason = route_block_reason
                     elif key in reserved_sell_levels:
                         skip_reason = "open_sell_order"
                     elif (
@@ -3984,10 +4311,13 @@ def main():
                         skip_reason = "price_above_level"
                     elif (
                         len(state["open_sell_orders"])
-                        >= effective_max_open_sell_orders
+                        >= candidate_effective_max_open_sell_orders
                     ):
                         skip_reason = "max_open_sell_orders"
-                    elif deployed_inventory_usd >= effective_max_inventory_usd:
+                    elif (
+                        deployed_inventory_usd
+                        >= candidate_effective_max_inventory_usd
+                    ):
                         skip_reason = "max_inventory_usd"
                     elif (
                         buy_source == "llm_target"
@@ -4043,7 +4373,9 @@ def main():
                         skip_reason = "high_anchor_cooldown"
                     elif (
                         buy_source == "range_high_band"
-                        and high_anchor_order_count >= max_open_high_anchor_orders
+                        and high_anchor_order_count >= (
+                            candidate_max_open_high_anchor_orders
+                        )
                     ):
                         skip_reason = "max_open_high_anchor_orders"
                     elif available_usd <= 0:
@@ -4051,7 +4383,7 @@ def main():
 
                     volume = (
                         available_usd
-                        * effective_position_size_pct
+                        * candidate_effective_position_size_pct
                         * flow_control["size_multiplier"]
                     ) / level
                     trade_notional_usd = level * volume
@@ -4064,13 +4396,15 @@ def main():
 
                     if (
                         skip_reason is None
-                        and trade_notional_usd < min_buy_notional_usd
+                        and trade_notional_usd < candidate_min_buy_notional_usd
                     ):
                         skip_reason = "below_min_notional"
 
                     if (
                         skip_reason is None
-                        and projected_inventory_usd > effective_max_inventory_usd
+                        and projected_inventory_usd > (
+                            candidate_effective_max_inventory_usd
+                        )
                     ):
                         skip_reason = "max_inventory_usd"
 
@@ -4080,7 +4414,7 @@ def main():
                     ):
                         skip_reason = "bucket_max_inventory_usd"
 
-                    if skip_reason is None and volume < min_buy_volume_btc:
+                    if skip_reason is None and volume < candidate_min_buy_volume_btc:
                         skip_reason = "below_min_volume"
 
                     if skip_reason is not None:
@@ -4105,6 +4439,16 @@ def main():
                             range_buys_allowed=range_buys_allowed,
                             operating_mode=operating_mode,
                             sentiment_control_mode=sentiment_control_mode,
+                            anchor_strategy_router_enabled=(
+                                anchor_strategy_router_enabled
+                            ),
+                            anchor_strategy_router_anchor=route_anchor,
+                            anchor_strategy_router_strategy_label=(
+                                route.get("strategy_label") if route else None
+                            ),
+                            anchor_strategy_router_strategy_file=(
+                                route.get("strategy_file") if route else None
+                            ),
                             runtime_block_reason=runtime_block_reason,
                             buy_source=buy_source,
                             bucket_name=bucket_name,
@@ -4135,13 +4479,13 @@ def main():
                             ),
                             bucket_inventory_cap_usd=round(bucket_cap_usd, 8),
                             effective_position_size_pct=(
-                                effective_position_size_pct
+                                candidate_effective_position_size_pct
                             ),
                             effective_max_inventory_usd=(
-                                effective_max_inventory_usd
+                                candidate_effective_max_inventory_usd
                             ),
                             effective_max_open_sell_orders=(
-                                effective_max_open_sell_orders
+                                candidate_effective_max_open_sell_orders
                             ),
                             smoothed_risk_multiplier=smoothed_risk_multiplier,
                             flow_pressure=flow_pressure,
@@ -4149,12 +4493,15 @@ def main():
                             mean_reversion_opportunity=(
                                 mean_reversion_opportunity
                             ),
-                            effective_entry_step_pct=current_entry_step_pct,
+                            effective_entry_step_pct=(
+                                candidate.get("route_entry_step_pct")
+                                or current_entry_step_pct
+                            ),
                             inventory_pressure_usage_ratio=(
-                                inventory_pressure_usage_ratio
+                                route_inventory_pressure["usage_ratio"]
                             ),
                             inventory_pressure_size_multiplier=(
-                                inventory_pressure_size_multiplier
+                                route_inventory_pressure["size_multiplier"]
                             ),
                             last_sell_price=last_sell_price,
                             candidate_volume_btc=round(volume, VOLUME_DECIMALS),
@@ -4189,13 +4536,13 @@ def main():
                             action_policy_reason=action_policy.get("reason"),
                             sentiment_regime=regime["name"],
                             effective_position_size_pct=(
-                                effective_position_size_pct
+                                candidate_effective_position_size_pct
                             ),
                             effective_max_inventory_usd=(
-                                effective_max_inventory_usd
+                                candidate_effective_max_inventory_usd
                             ),
                             effective_max_open_sell_orders=(
-                                effective_max_open_sell_orders
+                                candidate_effective_max_open_sell_orders
                             ),
                             smoothed_risk_multiplier=smoothed_risk_multiplier,
                             flow_pressure=flow_pressure,
@@ -4203,14 +4550,27 @@ def main():
                             mean_reversion_opportunity=(
                                 mean_reversion_opportunity
                             ),
-                            effective_entry_step_pct=current_entry_step_pct,
+                            effective_entry_step_pct=(
+                                candidate.get("route_entry_step_pct")
+                                or current_entry_step_pct
+                            ),
                             inventory_pressure_usage_ratio=(
-                                inventory_pressure_usage_ratio
+                                route_inventory_pressure["usage_ratio"]
                             ),
                             inventory_pressure_size_multiplier=(
-                                inventory_pressure_size_multiplier
+                                route_inventory_pressure["size_multiplier"]
                             ),
                             buy_source=buy_source,
+                            anchor_strategy_router_enabled=(
+                                anchor_strategy_router_enabled
+                            ),
+                            anchor_strategy_router_anchor=route_anchor,
+                            anchor_strategy_router_strategy_label=(
+                                route.get("strategy_label") if route else None
+                            ),
+                            anchor_strategy_router_strategy_file=(
+                                route.get("strategy_file") if route else None
+                            ),
                             reason=skip_reason
                         )
                         continue
@@ -4233,17 +4593,22 @@ def main():
                         range_mean=mean,
                         range_median=median,
                         sentiment_regime=regime["name"],
-                        effective_position_size_pct=effective_position_size_pct,
+                        effective_position_size_pct=(
+                            candidate_effective_position_size_pct
+                        ),
                         smoothed_risk_multiplier=smoothed_risk_multiplier,
                         flow_pressure=flow_pressure,
                         flow_control_reason=flow_control["reason"],
                         mean_reversion_opportunity=mean_reversion_opportunity,
-                        effective_entry_step_pct=current_entry_step_pct,
+                        effective_entry_step_pct=(
+                            candidate.get("route_entry_step_pct")
+                            or current_entry_step_pct
+                        ),
                         inventory_pressure_usage_ratio=(
-                            inventory_pressure_usage_ratio
+                            route_inventory_pressure["usage_ratio"]
                         ),
                         inventory_pressure_size_multiplier=(
-                            inventory_pressure_size_multiplier
+                            route_inventory_pressure["size_multiplier"]
                         ),
                         buy_source=buy_source,
                         bucket_name=bucket_name,
@@ -4251,7 +4616,17 @@ def main():
                         bucket_inventory_cap_usd=round(bucket_cap_usd, 8),
                         high_anchor_order_count=high_anchor_order_count,
                         last_sell_price=last_sell_price,
-                        sell_pct_override=active_sell_pct_override
+                        sell_pct_override=active_sell_pct_override,
+                        anchor_strategy_router_enabled=(
+                            anchor_strategy_router_enabled
+                        ),
+                        anchor_strategy_router_anchor=route_anchor,
+                        anchor_strategy_router_strategy_label=(
+                            route.get("strategy_label") if route else None
+                        ),
+                        anchor_strategy_router_strategy_file=(
+                            route.get("strategy_file") if route else None
+                        )
                     )
 
                     state["stats"]["approved_buy_candidates"] += 1
@@ -4274,6 +4649,16 @@ def main():
                             sell_pct_override=active_sell_pct_override,
                             operating_mode=operating_mode,
                             llm_target_active=(buy_source == "llm_target"),
+                            anchor_strategy_router_enabled=(
+                                anchor_strategy_router_enabled
+                            ),
+                            anchor_strategy_router_anchor=route_anchor,
+                            anchor_strategy_router_strategy_label=(
+                                route.get("strategy_label") if route else None
+                            ),
+                            anchor_strategy_router_strategy_file=(
+                                route.get("strategy_file") if route else None
+                            ),
                             paper_trading_enabled=True
                         )
                         log_trade_activity(
@@ -4288,6 +4673,16 @@ def main():
                             buy_source=buy_source,
                             sell_pct_override=active_sell_pct_override,
                             operating_mode=operating_mode,
+                            anchor_strategy_router_enabled=(
+                                anchor_strategy_router_enabled
+                            ),
+                            anchor_strategy_router_anchor=route_anchor,
+                            anchor_strategy_router_strategy_label=(
+                                route.get("strategy_label") if route else None
+                            ),
+                            anchor_strategy_router_strategy_file=(
+                                route.get("strategy_file") if route else None
+                            ),
                         )
                         reserved_buy_usd += level * volume
                         available_usd = max(0.0, usd - reserved_buy_usd)
@@ -4313,6 +4708,16 @@ def main():
                             execution_signal=execution_signal,
                             buy_source=buy_source,
                             sell_pct_override=active_sell_pct_override,
+                            anchor_strategy_router_enabled=(
+                                anchor_strategy_router_enabled
+                            ),
+                            anchor_strategy_router_anchor=route_anchor,
+                            anchor_strategy_router_strategy_label=(
+                                route.get("strategy_label") if route else None
+                            ),
+                            anchor_strategy_router_strategy_file=(
+                                route.get("strategy_file") if route else None
+                            ),
                             error=(
                                 None if not buy_resp
                                 else buy_resp.get("error")
@@ -4328,7 +4733,14 @@ def main():
                         "placed_at": cycle_id,
                         "sell_pct_override": active_sell_pct_override,
                         "buy_source": buy_source,
-                        "trade_id": txid
+                        "trade_id": txid,
+                        "anchor_strategy_router_anchor": route_anchor,
+                        "anchor_strategy_router_strategy_label": (
+                            route.get("strategy_label") if route else None
+                        ),
+                        "anchor_strategy_router_strategy_file": (
+                            route.get("strategy_file") if route else None
+                        ),
                     }
                     if buy_source == "range_high_band":
                         state["last_high_anchor_buy_at"] = cycle_id
@@ -4359,7 +4771,17 @@ def main():
                         volume=round(volume, VOLUME_DECIMALS),
                         price=round(level, PRICE_DECIMALS),
                         buy_source=buy_source,
-                        sell_pct_override=active_sell_pct_override
+                        sell_pct_override=active_sell_pct_override,
+                        anchor_strategy_router_enabled=(
+                            anchor_strategy_router_enabled
+                        ),
+                        anchor_strategy_router_anchor=route_anchor,
+                        anchor_strategy_router_strategy_label=(
+                            route.get("strategy_label") if route else None
+                        ),
+                        anchor_strategy_router_strategy_file=(
+                            route.get("strategy_file") if route else None
+                        )
                     )
                     log_trade_activity(
                         "BUY_ORDER_PLACED",
@@ -4370,7 +4792,17 @@ def main():
                         price=round(level, PRICE_DECIMALS),
                         trade_notional_usd=round(level * volume, 8),
                         buy_source=buy_source,
-                        sell_pct_override=active_sell_pct_override
+                        sell_pct_override=active_sell_pct_override,
+                        anchor_strategy_router_enabled=(
+                            anchor_strategy_router_enabled
+                        ),
+                        anchor_strategy_router_anchor=route_anchor,
+                        anchor_strategy_router_strategy_label=(
+                            route.get("strategy_label") if route else None
+                        ),
+                        anchor_strategy_router_strategy_file=(
+                            route.get("strategy_file") if route else None
+                        )
                     )
                     notify_order_tracker(
                         trade_id=txid,

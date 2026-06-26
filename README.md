@@ -503,6 +503,29 @@ backtest outputs, such as `/var/www/html/bot`, the **Range Ranked** and
 **LLM Ranked** buttons load `range_grid_backtest_strategy_ranked.csv` and
 `llm_target_strategy_ranked.csv` from that folder.
 
+Range-grid strategy comparisons also write `range_grid_anchor_winners.json`.
+That file selects the top eligible low, median, and high anchor strategy from
+the ranked backtest. Eligibility is controlled with:
+
+```bash
+RANGE_GRID_BACKTEST_ANCHOR_WINNER_MIN_APPROVED=1
+RANGE_GRID_BACKTEST_ANCHOR_WINNER_MIN_AVG_END_RETURN_PCT=0
+RANGE_GRID_BACKTEST_ANCHOR_WINNER_MAX_AVG_DRAWDOWN_PCT=-3
+```
+
+The live range-grid bot can consume that file as a conservative per-anchor
+router, but it is off by default:
+
+```bash
+RANGE_GRID_ANCHOR_ROUTER_ENABLED=true
+RANGE_GRID_ANCHOR_ROUTER_FILE=/var/www/html/bot/range_grid_anchor_winners.json
+```
+
+When enabled, low/median/high candidates use the selected route's entry spacing,
+grid size, profit target, sizing, max inventory, and max open sell limit. The
+active strategy profile still controls the primary sentiment gates and runtime
+guardrails.
+
 Snapshot rotation is configured with `LLM_TARGET_BACKTEST_SNAPSHOT_DIR` and
 `LLM_TARGET_BACKTEST_SNAPSHOT_BASENAME`. For example, with
 `LLM_TARGET_BACKTEST_SNAPSHOT_DIR=/home/ben/krakenbot/backtests` and

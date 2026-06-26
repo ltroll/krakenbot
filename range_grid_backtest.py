@@ -54,6 +54,28 @@ BACKTEST_STRATEGY_RANKED_CSV_FILE = os.getenv(
     "RANGE_GRID_BACKTEST_STRATEGY_RANKED_CSV_FILE",
     "/var/www/html/bot/range_grid_backtest_strategy_ranked.csv"
 )
+BACKTEST_ANCHOR_WINNERS_FILE = os.getenv(
+    "RANGE_GRID_BACKTEST_ANCHOR_WINNERS_FILE",
+    "/var/www/html/bot/range_grid_anchor_winners.json"
+)
+BACKTEST_ANCHOR_WINNER_MIN_APPROVED = int(os.getenv(
+    "RANGE_GRID_BACKTEST_ANCHOR_WINNER_MIN_APPROVED",
+    "1"
+))
+BACKTEST_ANCHOR_WINNER_MIN_AVG_END_RETURN_PCT = float(os.getenv(
+    "RANGE_GRID_BACKTEST_ANCHOR_WINNER_MIN_AVG_END_RETURN_PCT",
+    "0"
+))
+BACKTEST_ANCHOR_WINNER_MAX_AVG_DRAWDOWN_PCT = float(os.getenv(
+    "RANGE_GRID_BACKTEST_ANCHOR_WINNER_MAX_AVG_DRAWDOWN_PCT",
+    "-3"
+))
+
+ANCHOR_WINNER_SOURCES = {
+    "low": "approved_range_low",
+    "median": "approved_range_median",
+    "high": "approved_range_high_band",
+}
 
 
 def now_utc():
@@ -1181,6 +1203,118 @@ def build_ranked_strategy_rows(comparison):
     return ranked_rows
 
 
+def anchor_winner_rejection_reasons(row, anchor, criteria):
+    reasons = []
+    source_field = ANCHOR_WINNER_SOURCES[anchor]
+    anchor_approved = row.get(source_field) or 0
+    avg_end_return = row.get("potential_avg_end_return_pct")
+    avg_drawdown = row.get("potential_avg_max_drawdown_pct")
+
+    if anchor_approved < criteria["min_anchor_approved"]:
+        reasons.append("anchor_approved_below_min")
+    if avg_end_return is None:
+        reasons.append("missing_avg_end_return")
+    elif avg_end_return < criteria["min_avg_end_return_pct"]:
+        reasons.append("avg_end_return_below_min")
+    if avg_drawdown is None:
+        reasons.append("missing_avg_drawdown")
+    elif avg_drawdown < criteria["max_avg_drawdown_pct"]:
+        reasons.append("avg_drawdown_below_max")
+    if (row.get("practical_score") or 0) <= 0:
+        reasons.append("practical_score_not_positive")
+
+    return reasons
+
+
+def strategy_detail_by_file(comparison):
+    details = {}
+    for detail in comparison.get("details") or []:
+        strategy_file = detail.get("strategy_file")
+        if strategy_file:
+            details[strategy_file] = detail
+    return details
+
+
+def build_anchor_winners(
+    comparison,
+    *,
+    min_anchor_approved=BACKTEST_ANCHOR_WINNER_MIN_APPROVED,
+    min_avg_end_return_pct=BACKTEST_ANCHOR_WINNER_MIN_AVG_END_RETURN_PCT,
+    max_avg_drawdown_pct=BACKTEST_ANCHOR_WINNER_MAX_AVG_DRAWDOWN_PCT,
+):
+    ranked_rows = build_ranked_strategy_rows(comparison)
+    details_by_file = strategy_detail_by_file(comparison)
+    criteria = {
+        "min_anchor_approved": max(0, int(min_anchor_approved)),
+        "min_avg_end_return_pct": float(min_avg_end_return_pct),
+        "max_avg_drawdown_pct": float(max_avg_drawdown_pct),
+    }
+    winners = {}
+
+    for anchor, source_field in ANCHOR_WINNER_SOURCES.items():
+        candidates = []
+        for row in ranked_rows:
+            if (row.get(source_field) or 0) <= 0:
+                continue
+
+            reasons = anchor_winner_rejection_reasons(row, anchor, criteria)
+            detail = details_by_file.get(row.get("strategy_file"), {})
+            candidates.append({
+                "strategy_label": row.get("strategy_label"),
+                "strategy_file": row.get("strategy_file"),
+                "practical_score": row.get("practical_score"),
+                "anchor_approved_candidates": row.get(source_field) or 0,
+                "approved_candidates": row.get("approved_candidates") or 0,
+                "candidate_efficiency": row.get("candidate_efficiency"),
+                "potential_take_profit_reached_rate": row.get(
+                    "potential_take_profit_reached_rate"
+                ),
+                "potential_avg_end_return_pct": row.get(
+                    "potential_avg_end_return_pct"
+                ),
+                "potential_avg_max_runup_pct": row.get(
+                    "potential_avg_max_runup_pct"
+                ),
+                "potential_avg_max_drawdown_pct": row.get(
+                    "potential_avg_max_drawdown_pct"
+                ),
+                "entry_step_pct": row.get("entry_step_pct"),
+                "volatility_reference_pct": row.get("volatility_reference_pct"),
+                "grid_anchor": row.get("grid_anchor"),
+                "operating_mode": row.get("operating_mode"),
+                "sentiment_control_mode": row.get("sentiment_control_mode"),
+                "eligible": not reasons,
+                "rejection_reasons": reasons,
+                "strategy_payload": detail.get("strategy_payload"),
+            })
+
+        selected = next((candidate for candidate in candidates if candidate["eligible"]), None)
+        winners[anchor] = {
+            "source_field": source_field,
+            "selected": selected,
+            "candidates": candidates[:5],
+        }
+
+    return {
+        "generated_at": now_utc().isoformat(),
+        "strategy_set_file": comparison.get("strategy_set_file"),
+        "criteria": criteria,
+        "winners": winners,
+    }
+
+
+def write_anchor_winners_json(comparison, output_path):
+    payload = build_anchor_winners(comparison)
+    resolved = resolve_repo_path(output_path)
+    output_dir = os.path.dirname(resolved)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    with open(resolved, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    return resolved
+
+
 def write_strategy_comparison_csv(comparison, output_path):
     rows = comparison.get("rows") or []
     if not rows:
@@ -2219,6 +2353,7 @@ def write_report(report):
 
     comparison_csv_file = None
     ranked_comparison_csv_file = None
+    anchor_winners_file = None
     if report.get("strategy_comparison"):
         comparison_csv_file = write_strategy_comparison_csv(
             report["strategy_comparison"],
@@ -2228,14 +2363,28 @@ def write_report(report):
             report["strategy_comparison"],
             BACKTEST_STRATEGY_RANKED_CSV_FILE,
         )
+        anchor_winners_file = write_anchor_winners_json(
+            report["strategy_comparison"],
+            BACKTEST_ANCHOR_WINNERS_FILE,
+        )
 
-    return archive_file, comparison_csv_file, ranked_comparison_csv_file
+    return (
+        archive_file,
+        comparison_csv_file,
+        ranked_comparison_csv_file,
+        anchor_winners_file,
+    )
 
 
 def main():
     args = parse_args()
     report = build_report(window_hours=args.window_hours)
-    archive_file, comparison_csv_file, ranked_comparison_csv_file = write_report(report)
+    (
+        archive_file,
+        comparison_csv_file,
+        ranked_comparison_csv_file,
+        anchor_winners_file,
+    ) = write_report(report)
     print(json.dumps({
         "timestamp": report["timestamp"],
         "output_file": BACKTEST_OUTPUT_FILE,
@@ -2245,6 +2394,7 @@ def main():
         "window_hours": args.window_hours if args.window_hours is not None else BACKTEST_WINDOW_HOURS,
         "strategy_comparison_csv_file": comparison_csv_file,
         "strategy_ranked_csv_file": ranked_comparison_csv_file,
+        "anchor_winners_file": anchor_winners_file,
     }))
 
 
