@@ -513,6 +513,15 @@ RANGE_GRID_BACKTEST_ANCHOR_WINNER_MIN_AVG_END_RETURN_PCT=0
 RANGE_GRID_BACKTEST_ANCHOR_WINNER_MAX_AVG_DRAWDOWN_PCT=-3
 ```
 
+If the backtest host and production host use different directories, set
+`RANGE_GRID_BACKTEST_ANCHOR_WINNER_STRATEGY_DIR` on the backtest host. The
+winner JSON will write `strategy_file` as that directory plus the strategy
+filename, and keep the original backtest path in `source_strategy_file`:
+
+```bash
+RANGE_GRID_BACKTEST_ANCHOR_WINNER_STRATEGY_DIR=/home/ben/krakenbot
+```
+
 The live range-grid bot can consume that file as a conservative per-anchor
 router, but it is off by default:
 

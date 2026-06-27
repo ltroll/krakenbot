@@ -1349,6 +1349,56 @@ class RangeGridBacktestTests(unittest.TestCase):
                 "baseline",
             )
 
+    def test_anchor_winners_can_rewrite_strategy_file_to_local_dir(self):
+        comparison = {
+            "rows": [
+                {
+                    "strategy_label": "baseline",
+                    "strategy_file": (
+                        "/home/losttroll/krakenbot-rgb-backtest/"
+                        "range_grid_strategy_recovery.json"
+                    ),
+                    "grid_anchor": "low",
+                    "raw_candidates": 10,
+                    "approved_candidates": 2,
+                    "approved_range_low": 2,
+                    "approved_range_median": 0,
+                    "approved_range_high_band": 0,
+                    "potential_take_profit_reached_rate": 0.5,
+                    "potential_avg_end_return_pct": 0.12,
+                    "potential_avg_max_runup_pct": 0.4,
+                    "potential_avg_max_drawdown_pct": -0.2,
+                }
+            ],
+            "details": [
+                {
+                    "strategy_file": (
+                        "/home/losttroll/krakenbot-rgb-backtest/"
+                        "range_grid_strategy_recovery.json"
+                    ),
+                    "strategy_payload": {"grid_anchor": "low"},
+                }
+            ],
+        }
+
+        winners = backtest.build_anchor_winners(
+            comparison,
+            strategy_dir="/home/ben/krakenbot/strategies",
+        )
+        selected = winners["winners"]["low"]["selected"]
+
+        self.assertEqual(
+            selected["strategy_file"],
+            "/home/ben/krakenbot/strategies/range_grid_strategy_recovery.json",
+        )
+        self.assertEqual(
+            selected["source_strategy_file"],
+            (
+                "/home/losttroll/krakenbot-rgb-backtest/"
+                "range_grid_strategy_recovery.json"
+            ),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

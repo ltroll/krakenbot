@@ -70,6 +70,10 @@ BACKTEST_ANCHOR_WINNER_MAX_AVG_DRAWDOWN_PCT = float(os.getenv(
     "RANGE_GRID_BACKTEST_ANCHOR_WINNER_MAX_AVG_DRAWDOWN_PCT",
     "-3"
 ))
+BACKTEST_ANCHOR_WINNER_STRATEGY_DIR = os.getenv(
+    "RANGE_GRID_BACKTEST_ANCHOR_WINNER_STRATEGY_DIR",
+    ""
+).strip()
 
 ANCHOR_WINNER_SOURCES = {
     "low": "approved_range_low",
@@ -1235,12 +1239,24 @@ def strategy_detail_by_file(comparison):
     return details
 
 
+def anchor_winner_strategy_file(path, strategy_dir):
+    if not strategy_dir or not path:
+        return path
+
+    filename = os.path.basename(str(path))
+    if not filename:
+        return path
+
+    return os.path.join(strategy_dir, filename)
+
+
 def build_anchor_winners(
     comparison,
     *,
     min_anchor_approved=BACKTEST_ANCHOR_WINNER_MIN_APPROVED,
     min_avg_end_return_pct=BACKTEST_ANCHOR_WINNER_MIN_AVG_END_RETURN_PCT,
     max_avg_drawdown_pct=BACKTEST_ANCHOR_WINNER_MAX_AVG_DRAWDOWN_PCT,
+    strategy_dir=BACKTEST_ANCHOR_WINNER_STRATEGY_DIR,
 ):
     ranked_rows = build_ranked_strategy_rows(comparison)
     details_by_file = strategy_detail_by_file(comparison)
@@ -1258,10 +1274,16 @@ def build_anchor_winners(
                 continue
 
             reasons = anchor_winner_rejection_reasons(row, anchor, criteria)
-            detail = details_by_file.get(row.get("strategy_file"), {})
+            source_strategy_file = row.get("strategy_file")
+            strategy_file = anchor_winner_strategy_file(
+                source_strategy_file,
+                strategy_dir,
+            )
+            detail = details_by_file.get(source_strategy_file, {})
             candidates.append({
                 "strategy_label": row.get("strategy_label"),
-                "strategy_file": row.get("strategy_file"),
+                "strategy_file": strategy_file,
+                "source_strategy_file": source_strategy_file,
                 "practical_score": row.get("practical_score"),
                 "anchor_approved_candidates": row.get(source_field) or 0,
                 "approved_candidates": row.get("approved_candidates") or 0,
@@ -1299,6 +1321,7 @@ def build_anchor_winners(
         "generated_at": now_utc().isoformat(),
         "strategy_set_file": comparison.get("strategy_set_file"),
         "criteria": criteria,
+        "strategy_dir": strategy_dir or None,
         "winners": winners,
     }
 
