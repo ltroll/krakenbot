@@ -749,8 +749,9 @@ def quality_decision(
     }
 
 
-def exit_prices(entry_price, target_profit_pct):
-    tp_price = entry_price * (1 + target_profit_pct)
+def exit_prices(entry_price, target_profit_pct, fee_bps=0.0):
+    fee_pct = (fee_bps or 0.0) / 10000.0
+    tp_price = entry_price * (1 + target_profit_pct + fee_pct)
     sl_price = entry_price * (1 - (BACKTEST_STOP_LOSS_PCT / 100.0))
     return tp_price, sl_price
 
@@ -1018,7 +1019,8 @@ def simulate_strategy(strategy_name, snapshots):
             position["low_water"] = min(position["low_water"], price)
             tp_price, sl_price = exit_prices(
                 position["entry_price"],
-                position["target_profit_pct"]
+                position["target_profit_pct"],
+                position["fee_bps"]
             )
             exit_reason = None
             exit_price = None
@@ -1298,17 +1300,30 @@ def strategy_comparison_score(row):
     terminal_rate = row.get("terminal_rate_after_approval") or 0.0
     candidate_efficiency = approved / raw_candidates if raw_candidates else 0.0
 
-    total_net = total_net if total_net is not None else -1.0
-    marked_to_market = (
-        marked_to_market
-        if marked_to_market is not None else
-        total_net
-    )
+    no_exposure = trades == 0 and open_count == 0
+    if no_exposure and approved == 0:
+        return 0.0
+    if no_exposure and approved > 0:
+        return round(-float(approved), 6)
+
+    total_net = total_net if total_net is not None else 0.0
+    marked_to_market = marked_to_market if marked_to_market is not None else total_net
+    if marked_to_market <= 0:
+        score = (
+            (marked_to_market * 20.0)
+            + (total_net * 6.0)
+            + (win_rate * 5.0)
+            + (fill_rate * 2.0)
+            + (terminal_rate * 2.0)
+            - (open_count * 8.0)
+        )
+        return round(score, 6)
+
     score = (
-        (trades * 10.0)
-        + (approved * 2.0)
+        (trades * 8.0)
+        + (approved * 1.0)
         + (win_rate * 20.0)
-        + (total_net * 8.0)
+        + (max(total_net, 0.0) * 8.0)
         + (marked_to_market * 12.0)
         + (fill_rate * 5.0)
         + (terminal_rate * 5.0)
@@ -1587,17 +1602,6 @@ def write_report(report):
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-    with open(BACKTEST_OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
-
-    os.makedirs(BACKTEST_ARCHIVE_DIR, exist_ok=True)
-    archive_file = os.path.join(
-        BACKTEST_ARCHIVE_DIR,
-        f"llm_target_backtest_{now_utc().strftime('%Y%m%d')}.json"
-    )
-    with open(archive_file, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
-
     comparison_csv_file = None
     ranked_comparison_csv_file = None
     if report.get("strategy_comparison"):
@@ -1614,6 +1618,17 @@ def write_report(report):
         "strategy_comparison_csv_file": comparison_csv_file,
         "strategy_ranked_csv_file": ranked_comparison_csv_file,
     }
+
+    with open(BACKTEST_OUTPUT_FILE, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+
+    os.makedirs(BACKTEST_ARCHIVE_DIR, exist_ok=True)
+    archive_file = os.path.join(
+        BACKTEST_ARCHIVE_DIR,
+        f"llm_target_backtest_{now_utc().strftime('%Y%m%d')}.json"
+    )
+    with open(archive_file, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
 
     return archive_file
 

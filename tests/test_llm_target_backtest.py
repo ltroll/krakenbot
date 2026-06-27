@@ -112,7 +112,7 @@ class LlmTargetBacktestTests(unittest.TestCase):
         snapshots = [
             make_snapshot("2026-05-30T12:00:00+00:00", 101.0),
             make_snapshot("2026-05-30T12:30:00+00:00", 100.0),
-            make_snapshot("2026-05-30T13:00:00+00:00", 100.8),
+            make_snapshot("2026-05-30T13:00:00+00:00", 101.1),
         ]
 
         result = backtest.simulate_strategy("with_target_quality", snapshots)
@@ -123,16 +123,16 @@ class LlmTargetBacktestTests(unittest.TestCase):
         self.assertEqual(result["summary"]["fill_rate_after_approval"], 1.0)
         trade = result["recent_trades"][0]
         self.assertEqual(trade["exit_reason"], "take_profit")
-        self.assertAlmostEqual(trade["exit_price"], 100.7, places=2)
+        self.assertAlmostEqual(trade["exit_price"], 101.02, places=2)
         self.assertAlmostEqual(trade["fee_bps"], 32.0, places=2)
-        self.assertAlmostEqual(trade["gross_return_pct"], 0.7, places=2)
-        self.assertAlmostEqual(trade["net_return_pct"], 0.38, places=2)
+        self.assertAlmostEqual(trade["gross_return_pct"], 1.02, places=2)
+        self.assertAlmostEqual(trade["net_return_pct"], 0.7, places=2)
 
     def test_backtest_accepts_multi_asset_signal_payload(self):
         snapshots = [
             make_snapshot("2026-05-30T12:00:00+00:00", 101.0),
             make_snapshot("2026-05-30T12:30:00+00:00", 100.0),
-            make_snapshot("2026-05-30T13:00:00+00:00", 100.8),
+            make_snapshot("2026-05-30T13:00:00+00:00", 101.1),
         ]
         snapshots[0]["signal"]["payload"] = {
             "schema_version": "multi-asset-sentiment-v1",
@@ -197,7 +197,7 @@ class LlmTargetBacktestTests(unittest.TestCase):
                 target_prices=[]
             ),
             make_snapshot("2026-05-30T12:30:00+00:00", 100.0),
-            make_snapshot("2026-05-30T13:00:00+00:00", 100.8),
+            make_snapshot("2026-05-30T13:00:00+00:00", 101.1),
         ]
 
         result = backtest.simulate_strategy("with_target_quality", snapshots)
@@ -254,7 +254,7 @@ class LlmTargetBacktestTests(unittest.TestCase):
                 action_recommendation="watch_only"
             ),
             make_snapshot("2026-05-30T12:30:00+00:00", 100.0),
-            make_snapshot("2026-05-30T13:00:00+00:00", 100.8),
+            make_snapshot("2026-05-30T13:00:00+00:00", 101.1),
         ]
 
         result = backtest.simulate_strategy("target_quality_only", snapshots)
@@ -267,8 +267,8 @@ class LlmTargetBacktestTests(unittest.TestCase):
         snapshots = [
             make_snapshot("2026-05-30T12:00:00+00:00", 101.0),
             make_snapshot("2026-05-30T12:30:00+00:00", 100.0),
-            make_snapshot("2026-05-30T13:00:00+00:00", 100.7),
-            make_snapshot("2026-05-30T13:30:00+00:00", 100.8),
+            make_snapshot("2026-05-30T13:00:00+00:00", 101.0),
+            make_snapshot("2026-05-30T13:30:00+00:00", 101.2),
         ]
 
         default_result = backtest.simulate_strategy("price_target_only", snapshots)
@@ -281,6 +281,11 @@ class LlmTargetBacktestTests(unittest.TestCase):
         self.assertEqual(variant_result["recent_trades"][0]["exit_time"], "2026-05-30T13:30:00+00:00")
         self.assertAlmostEqual(
             variant_result["recent_trades"][0]["gross_return_pct"],
+            1.12,
+            places=2
+        )
+        self.assertAlmostEqual(
+            variant_result["recent_trades"][0]["net_return_pct"],
             0.8,
             places=2
         )
@@ -339,7 +344,7 @@ class LlmTargetBacktestTests(unittest.TestCase):
             target_prices=[{"buy_price": 100.0, "sell_pct": 0.5}]
         )
         fill = make_snapshot("2026-05-30T13:00:00+00:00", 100.0)
-        exit_snapshot = make_snapshot("2026-05-30T13:30:00+00:00", 100.8)
+        exit_snapshot = make_snapshot("2026-05-30T13:30:00+00:00", 101.1)
 
         result = backtest.simulate_strategy(
             "sentiment_discount_with_quality",
@@ -376,6 +381,54 @@ class LlmTargetBacktestTests(unittest.TestCase):
         self.assertEqual(summary["best_strategy"], "price_target_only")
         self.assertIn("No-trade outperformed", summary["best_strategy_reason"])
 
+    def test_negative_strategy_score_ranks_below_no_trade(self):
+        losing_trade = {
+            "trades": 1,
+            "approved_candidates": 7,
+            "raw_candidates": 7,
+            "win_rate": 0.0,
+            "total_net_return_pct": -1.15,
+            "marked_to_market_net_return_pct": -1.15,
+            "open_position_count": 0,
+            "fill_rate_after_approval": 0.1429,
+            "terminal_rate_after_approval": 0.8571,
+        }
+        no_trade = {
+            "trades": 0,
+            "approved_candidates": 0,
+            "raw_candidates": 1441,
+            "marked_to_market_net_return_pct": None,
+            "open_position_count": 0,
+        }
+
+        self.assertLess(
+            backtest.strategy_comparison_score(losing_trade),
+            backtest.strategy_comparison_score(no_trade)
+        )
+
+    def test_unfilled_strategy_score_ranks_below_no_trade(self):
+        unfilled = {
+            "trades": 0,
+            "approved_candidates": 1,
+            "raw_candidates": 1200,
+            "marked_to_market_net_return_pct": None,
+            "open_position_count": 0,
+            "fill_rate_after_approval": 0.0,
+            "terminal_rate_after_approval": 1.0,
+        }
+        no_trade = {
+            "trades": 0,
+            "approved_candidates": 0,
+            "raw_candidates": 1441,
+            "marked_to_market_net_return_pct": None,
+            "open_position_count": 0,
+        }
+
+        self.assertLess(
+            backtest.strategy_comparison_score(unfilled),
+            backtest.strategy_comparison_score(no_trade)
+        )
+
     def test_best_result_mentions_negative_open_exposure(self):
         strategies = {
             "target_quality_only_hold": {
@@ -403,7 +456,7 @@ class LlmTargetBacktestTests(unittest.TestCase):
         snapshots = [
             make_snapshot("2026-05-30T12:00:00+00:00", 101.0),
             make_snapshot("2026-05-30T12:30:00+00:00", 100.0),
-            make_snapshot("2026-05-30T13:00:00+00:00", 100.8),
+            make_snapshot("2026-05-30T13:00:00+00:00", 101.1),
         ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -451,6 +504,7 @@ class LlmTargetBacktestTests(unittest.TestCase):
             self.assertEqual(report["simulation"]["fee_bps"], 32.0)
             self.assertEqual(len(report["snapshot_files"]), 1)
             self.assertIsNone(report["snapshot_diagnostics"]["empty_window_reason"])
+            self.assertIn("written_outputs", report)
 
     def test_build_report_diagnoses_missing_snapshot_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
