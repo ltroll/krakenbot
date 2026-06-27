@@ -3064,8 +3064,27 @@ def main():
         ),
         sentiment_defensive_extra_aging_reduction_pct=(
             sentiment_defensive_extra_aging_reduction_pct
-        )
+        ),
+        anchor_strategy_router_enabled=anchor_strategy_router_enabled,
+        anchor_strategy_router_file=anchor_strategy_router_file,
+        anchor_strategy_router_refresh_seconds=(
+            anchor_strategy_router_refresh_seconds
+        ),
+        anchor_strategy_router_timeout_seconds=(
+            anchor_strategy_router_timeout_seconds
+        ),
+        anchor_strategy_router_fail_closed=anchor_strategy_router_fail_closed,
     )
+    if anchor_strategy_router_enabled:
+        routes = load_anchor_strategy_routes(force=True)
+        log_event(
+            "ANCHOR_STRATEGY_ROUTER_STARTUP_CHECK",
+            router_file=anchor_strategy_router_cache.get("path"),
+            route_count=len(routes),
+            anchors=sorted(routes),
+            error=anchor_strategy_router_cache.get("error"),
+            fail_closed=anchor_strategy_router_fail_closed,
+        )
     startup_reconcile_state()
 
     loop_count = 0
