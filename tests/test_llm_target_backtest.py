@@ -429,6 +429,69 @@ class LlmTargetBacktestTests(unittest.TestCase):
             backtest.strategy_comparison_score(no_trade)
         )
 
+    def test_production_eligibility_marks_probe_variants(self):
+        eligible = backtest.production_eligibility(
+            {
+                "target_quality_enabled": True,
+                "backtest_strategy_variant": "with_target_quality",
+            },
+            "with_target_quality"
+        )
+        price_probe = backtest.production_eligibility(
+            {
+                "probe_only": True,
+                "target_quality_enabled": False,
+            },
+            "price_target_only_tp_0_8"
+        )
+
+        self.assertTrue(eligible["production_eligible"])
+        self.assertIsNone(eligible["production_ineligible_reason"])
+        self.assertFalse(price_probe["production_eligible"])
+        self.assertEqual(
+            price_probe["production_ineligible_reason"],
+            "probe_only,price_target_only_variant,target_quality_disabled"
+        )
+
+    def test_strategy_comparison_includes_production_eligibility(self):
+        snapshots = [
+            make_snapshot("2026-05-30T12:00:00+00:00", 101.0),
+            make_snapshot("2026-05-30T12:30:00+00:00", 100.0),
+            make_snapshot("2026-05-30T13:00:00+00:00", 101.1),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            strategy_file = os.path.join(tmpdir, "probe.json")
+            strategy_set_file = os.path.join(tmpdir, "strategies.txt")
+            csv_file = os.path.join(tmpdir, "ranked.csv")
+            with open(strategy_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "probe_only": True,
+                    "target_quality_enabled": False,
+                    "backtest_strategy_variant": "price_target_only_tp_0_8",
+                }, f)
+            with open(strategy_set_file, "w", encoding="utf-8") as f:
+                f.write(f"probe,{strategy_file}\n")
+
+            comparison = backtest.build_strategy_comparison_rows(
+                snapshots,
+                strategy_set_file
+            )
+            output_file = backtest.write_strategy_comparison_csv(
+                comparison,
+                csv_file,
+                ranked=True
+            )
+
+            row = comparison["rows"][0]
+            with open(output_file, encoding="utf-8") as f:
+                header = f.readline().strip().split(",")
+
+            self.assertFalse(row["production_eligible"])
+            self.assertIn("probe_only", row["production_ineligible_reason"])
+            self.assertIn("production_eligible", header)
+            self.assertIn("production_ineligible_reason", header)
+
     def test_best_result_mentions_negative_open_exposure(self):
         strategies = {
             "target_quality_only_hold": {

@@ -1333,6 +1333,29 @@ def strategy_comparison_score(row):
     return round(score, 6)
 
 
+def bool_config(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def production_eligibility(strategy_payload, variant):
+    reasons = []
+    if bool_config(strategy_payload.get("probe_only"), False):
+        reasons.append("probe_only")
+    if str(variant).startswith("price_target_only"):
+        reasons.append("price_target_only_variant")
+    if bool_config(strategy_payload.get("target_quality_enabled"), True) is False:
+        reasons.append("target_quality_disabled")
+
+    return {
+        "production_eligible": not reasons,
+        "production_ineligible_reason": ",".join(reasons) if reasons else None,
+    }
+
+
 def build_strategy_comparison_rows(snapshots, strategy_set_file):
     rows = []
     details = []
@@ -1352,6 +1375,7 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
             strategy_payload.get("backtest_strategy_variant")
             or "with_target_quality"
         )
+        eligibility = production_eligibility(strategy_payload, variant)
         variant_snapshots = [
             snapshot_with_strategy(snapshot, strategy_path, strategy_payload)
             for snapshot in snapshots
@@ -1362,6 +1386,10 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
             "strategy_label": entry["label"],
             "strategy_file": strategy_path,
             "backtest_strategy_variant": variant,
+            "production_eligible": eligibility["production_eligible"],
+            "production_ineligible_reason": eligibility[
+                "production_ineligible_reason"
+            ],
             "target_profit_pct": strategy_payload.get("target_profit_pct"),
             "target_quality_enabled": strategy_payload.get("target_quality_enabled"),
             "target_quality_fail_closed": strategy_payload.get("target_quality_fail_closed"),
@@ -1437,6 +1465,8 @@ def write_strategy_comparison_csv(comparison, output_path, ranked=False):
     fieldnames = [
         "strategy_label",
         "practical_score",
+        "production_eligible",
+        "production_ineligible_reason",
         "backtest_strategy_variant",
         "trades",
         "win_rate",
