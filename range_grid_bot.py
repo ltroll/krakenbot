@@ -56,7 +56,13 @@ LOG_FILE = (
 )
 ACTIVITY_LOG_FILE = (
     os.getenv("RANGE_GRID_ACTIVITY_LOG_FILE")
-    or "range_grid_activity.jsonl"
+    or "/var/www/html/bot/range_grid_activity.jsonl"
+)
+ACTIVITY_LOG_ROTATE_DAILY = (
+    os.getenv("RANGE_GRID_ACTIVITY_LOG_ROTATE_DAILY", "true")
+    .strip()
+    .lower()
+    in ("1", "true", "yes", "on")
 )
 INSTANCE_LOCK_FILE = (
     os.getenv("RANGE_GRID_LOCK_FILE")
@@ -778,15 +784,27 @@ def append_jsonl(path, record):
         f.write(json.dumps(record) + "\n")
 
 
+def rotated_log_path(base_path, dt):
+    root, ext = os.path.splitext(base_path)
+    suffix = dt.strftime("%Y%m%d")
+    return f"{root}_{suffix}{ext or '.jsonl'}"
+
+
 def log_trade_activity(event, **kwargs):
+    now = datetime.now(timezone.utc)
     record = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": now.isoformat(),
         "event": event,
     }
     record.update(kwargs)
 
     try:
-        append_jsonl(ACTIVITY_LOG_FILE, record)
+        path = (
+            rotated_log_path(ACTIVITY_LOG_FILE, now)
+            if ACTIVITY_LOG_ROTATE_DAILY else
+            ACTIVITY_LOG_FILE
+        )
+        append_jsonl(path, record)
     except Exception as e:
         log_event("ACTIVITY_LOG_WRITE_ERROR", message=str(e), activity_event=event)
 
@@ -3000,6 +3018,7 @@ def main():
         status_file=os.path.abspath(STATUS_FILE),
         alert_log_file=os.path.abspath(ALERT_LOG_FILE),
         activity_log_file=os.path.abspath(ACTIVITY_LOG_FILE),
+        activity_log_rotate_daily=ACTIVITY_LOG_ROTATE_DAILY,
         max_daily_loss_usd=max_daily_loss_usd,
         disable_new_buys_on_sell_backlog_count=(
             disable_new_buys_on_sell_backlog_count
@@ -3964,6 +3983,22 @@ def main():
                             else sell_resp.get("error")
                         )
                     )
+                    log_trade_activity(
+                        "ORDER_REJECTED",
+                        mode="live",
+                        cycle_id=cycle_id,
+                        side="sell",
+                        level=level,
+                        volume=round(order["volume"], VOLUME_DECIMALS),
+                        buy_price=round(buy_price, PRICE_DECIMALS),
+                        sell_price=round(sell_price, PRICE_DECIMALS),
+                        sell_pct_override=sell_pct_override,
+                        buy_source=buy_source,
+                        error=(
+                            None if not sell_resp
+                            else sell_resp.get("error")
+                        )
+                    )
                     cooldown_seconds = (
                         SELL_INSUFFICIENT_FUNDS_COOLDOWN_SECONDS
                     )
@@ -4744,6 +4779,31 @@ def main():
                         save_state(state)
                         log_event(
                             "ORDER_REJECTED",
+                            cycle_id=cycle_id,
+                            side="buy",
+                            level=round(level, PRICE_DECIMALS),
+                            volume=round(volume, VOLUME_DECIMALS),
+                            execution_signal=execution_signal,
+                            buy_source=buy_source,
+                            sell_pct_override=active_sell_pct_override,
+                            anchor_strategy_router_enabled=(
+                                anchor_strategy_router_enabled
+                            ),
+                            anchor_strategy_router_anchor=route_anchor,
+                            anchor_strategy_router_strategy_label=(
+                                route.get("strategy_label") if route else None
+                            ),
+                            anchor_strategy_router_strategy_file=(
+                                route.get("strategy_file") if route else None
+                            ),
+                            error=(
+                                None if not buy_resp
+                                else buy_resp.get("error")
+                            )
+                        )
+                        log_trade_activity(
+                            "ORDER_REJECTED",
+                            mode="live",
                             cycle_id=cycle_id,
                             side="buy",
                             level=round(level, PRICE_DECIMALS),

@@ -99,9 +99,13 @@ def make_snapshot(
 class RangeGridBacktestTests(unittest.TestCase):
     def setUp(self):
         self.original_rotate_daily = backtest.SNAPSHOT_ROTATE_DAILY
+        self.original_activity_log_file = backtest.ACTIVITY_LOG_FILE
+        self.original_activity_rotate_daily = backtest.ACTIVITY_LOG_ROTATE_DAILY
 
     def tearDown(self):
         backtest.SNAPSHOT_ROTATE_DAILY = self.original_rotate_daily
+        backtest.ACTIVITY_LOG_FILE = self.original_activity_log_file
+        backtest.ACTIVITY_LOG_ROTATE_DAILY = self.original_activity_rotate_daily
 
     def test_snapshot_source_files_prefers_rotated_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -120,6 +124,38 @@ class RangeGridBacktestTests(unittest.TestCase):
             )
 
             self.assertEqual(files, [os.path.abspath(june12), os.path.abspath(june13)])
+
+    def test_trade_event_source_files_prefers_rotated_activity_logs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_path = os.path.join(tmpdir, "range_grid_activity.jsonl")
+            june12 = os.path.join(tmpdir, "range_grid_activity_20260612.jsonl")
+            june13 = os.path.join(tmpdir, "range_grid_activity_20260613.jsonl")
+            for path in (june12, june13):
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("")
+
+            backtest.ACTIVITY_LOG_FILE = base_path
+            backtest.ACTIVITY_LOG_ROTATE_DAILY = True
+            files = backtest.trade_event_source_files(
+                backtest.parse_iso8601("2026-06-12T12:00:00+00:00"),
+                backtest.parse_iso8601("2026-06-13T12:00:00+00:00"),
+            )
+
+            self.assertEqual(files, [os.path.abspath(june12), os.path.abspath(june13)])
+
+    def test_trade_event_source_files_supports_rotated_activity_url(self):
+        backtest.ACTIVITY_LOG_FILE = "http://example.test/bot/range_grid_activity.jsonl"
+        backtest.ACTIVITY_LOG_ROTATE_DAILY = True
+
+        files = backtest.trade_event_source_files(
+            backtest.parse_iso8601("2026-06-12T12:00:00+00:00"),
+            backtest.parse_iso8601("2026-06-13T12:00:00+00:00"),
+        )
+
+        self.assertEqual(files, [
+            "http://example.test/bot/range_grid_activity_20260612.jsonl",
+            "http://example.test/bot/range_grid_activity_20260613.jsonl",
+        ])
 
     def test_load_strategy_set_entries_supports_comment_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:

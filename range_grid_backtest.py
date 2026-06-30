@@ -6,6 +6,8 @@ import csv
 import json
 import os
 import statistics
+import urllib.error
+import urllib.request
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -29,6 +31,18 @@ TRADE_LOG_FILE = (
     or os.getenv("TRADE_LOG_FILE")
     or "trade_log.jsonl"
 )
+ACTIVITY_LOG_FILE = (
+    os.getenv("RANGE_GRID_ACTIVITY_LOG_FILE")
+    or ""
+).strip()
+ACTIVITY_LOG_ROTATE_DAILY = os.getenv(
+    "RANGE_GRID_ACTIVITY_LOG_ROTATE_DAILY",
+    "true"
+).strip().lower() in ("1", "true", "yes", "on")
+BACKTEST_HTTP_TIMEOUT_SECONDS = float(os.getenv(
+    "RANGE_GRID_BACKTEST_HTTP_TIMEOUT_SECONDS",
+    "10"
+))
 BACKTEST_OUTPUT_FILE = os.getenv(
     "RANGE_GRID_BACKTEST_OUTPUT_FILE",
     "/var/www/html/bot/range_grid_backtest.json"
@@ -120,20 +134,46 @@ def safe_float(value):
         return None
 
 
-def load_jsonl(path):
-    if not os.path.exists(path):
-        return []
+def is_http_url(value):
+    text = str(value or "").strip().lower()
+    return text.startswith("http://") or text.startswith("https://")
 
+
+def display_source_path(path):
+    if is_http_url(path):
+        return path
+    return os.path.abspath(path)
+
+
+def load_jsonl(path):
     rows = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            text = line.strip()
-            if not text:
-                continue
-            try:
-                rows.append(json.loads(text))
-            except Exception:
-                continue
+    if is_http_url(path):
+        try:
+            with urllib.request.urlopen(
+                path,
+                timeout=BACKTEST_HTTP_TIMEOUT_SECONDS
+            ) as response:
+                lines = response.read().decode("utf-8").splitlines()
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return []
+            return []
+        except Exception:
+            return []
+    else:
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding="utf-8") as f:
+            lines = list(f)
+
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            rows.append(json.loads(text))
+        except Exception:
+            continue
     return rows
 
 
@@ -157,24 +197,44 @@ def daterange(start_date, end_date):
         current += timedelta(days=1)
 
 
-def snapshot_source_files(base_path, since_dt, until_dt):
+def rotated_source_files(base_path, since_dt, until_dt, rotate_daily):
     rotated_files = []
-    if SNAPSHOT_ROTATE_DAILY:
+    if rotate_daily:
         for day in daterange(since_dt.date(), until_dt.date()):
             rotated_path = rotated_snapshot_path(
                 base_path,
                 datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
             )
-            if os.path.exists(rotated_path):
-                rotated_files.append(os.path.abspath(rotated_path))
+            if is_http_url(rotated_path) or os.path.exists(rotated_path):
+                rotated_files.append(display_source_path(rotated_path))
 
     if rotated_files:
         return rotated_files
 
-    if os.path.exists(base_path):
-        return [os.path.abspath(base_path)]
+    if is_http_url(base_path) or os.path.exists(base_path):
+        return [display_source_path(base_path)]
 
     return []
+
+
+def snapshot_source_files(base_path, since_dt, until_dt):
+    return rotated_source_files(
+        base_path,
+        since_dt,
+        until_dt,
+        SNAPSHOT_ROTATE_DAILY,
+    )
+
+
+def trade_event_source_files(since_dt, until_dt):
+    if ACTIVITY_LOG_FILE:
+        return rotated_source_files(
+            ACTIVITY_LOG_FILE,
+            since_dt,
+            until_dt,
+            ACTIVITY_LOG_ROTATE_DAILY,
+        )
+    return rotated_source_files(TRADE_LOG_FILE, since_dt, until_dt, False)
 
 
 def snapshot_timestamp(snapshot):
@@ -2307,7 +2367,10 @@ def build_report(window_hours=None):
     ]
     snapshots.sort(key=lambda snapshot: snapshot_timestamp(snapshot) or datetime.min.replace(tzinfo=timezone.utc))
 
-    all_events = load_jsonl(TRADE_LOG_FILE)
+    trade_event_files = trade_event_source_files(since_dt, now)
+    all_events = []
+    for path in trade_event_files:
+        all_events.extend(load_jsonl(path))
     events = [
         event
         for event in all_events
@@ -2328,9 +2391,11 @@ def build_report(window_hours=None):
 
     report = {
         "timestamp": now.isoformat(),
-        "snapshot_file_base": os.path.abspath(SNAPSHOT_LOG_FILE),
+        "snapshot_file_base": display_source_path(SNAPSHOT_LOG_FILE),
         "snapshot_files": snapshot_files,
-        "trade_log_file": os.path.abspath(TRADE_LOG_FILE),
+        "trade_log_file": display_source_path(TRADE_LOG_FILE),
+        "activity_log_file": display_source_path(ACTIVITY_LOG_FILE) if ACTIVITY_LOG_FILE else None,
+        "trade_event_files": trade_event_files,
         "since": since_dt.isoformat(),
         "snapshot_count": len(snapshots),
         "trade_event_count": len(events),

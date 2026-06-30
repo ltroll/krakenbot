@@ -402,7 +402,10 @@ Backtest-specific outputs default to:
 
 Bots are expected to write structured JSONL logs to `trade_log.jsonl`.
 The range-grid bot also writes trading-focused records to `range_grid_activity.jsonl`
-or the file pointed to by `RANGE_GRID_ACTIVITY_LOG_FILE`.
+or the file pointed to by `RANGE_GRID_ACTIVITY_LOG_FILE`. By default, the
+range-grid activity log rolls daily, so
+`/var/www/html/bot/range_grid_activity.jsonl` is written as files such as
+`/var/www/html/bot/range_grid_activity_20260629.jsonl`.
 
 Each line is one JSON object, for example:
 
@@ -435,6 +438,15 @@ The active range-grid bot currently writes events such as:
 - `LOOP_ERROR`
 
 This structure is important because other utilities can consume it without regex parsing.
+
+For split-host backtests, point the backtest process at the production activity
+log base path or URL. The backtest expands daily rotated files for the reporting
+window:
+
+```bash
+RANGE_GRID_ACTIVITY_LOG_FILE=http://pibot.local/bot/range_grid_activity.jsonl
+RANGE_GRID_ACTIVITY_LOG_ROTATE_DAILY=true
+```
 
 ## Viewing logs
 
