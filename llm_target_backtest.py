@@ -791,6 +791,8 @@ def empty_summary():
         "shadow_target_quality_approved": 0,
         "shadow_target_quality_rejected": 0,
         "shadow_target_quality_unavailable": 0,
+        "sentiment_saved_quality_candidates": 0,
+        "sentiment_saved_quality_candidate_rate": None,
         "signal_target_snapshots": 0,
         "quality_fallback_target_snapshots": 0,
         "missing_signal": 0,
@@ -874,6 +876,15 @@ def finalize_summary(summary, trades, open_positions=None):
             6
         )
     approved_candidates = summary["approved_candidates"]
+    blocked_by_sentiment = summary.get("blocked_by_sentiment") or 0
+    saved_quality_candidates = summary.get("shadow_target_quality_approved") or 0
+    summary["sentiment_saved_quality_candidates"] = saved_quality_candidates
+    summary["sentiment_saved_quality_candidate_rate"] = (
+        round(saved_quality_candidates / blocked_by_sentiment, 6)
+        if blocked_by_sentiment > 0 else
+        None
+    )
+
     if approved_candidates > 0:
         summary["fill_rate_after_approval"] = round(
             len(trades) / approved_candidates,
@@ -1268,6 +1279,12 @@ def top_summary(strategies):
                 "marked_to_market_net_return_pct": payload["summary"].get(
                     "marked_to_market_net_return_pct"
                 ),
+                "sentiment_saved_quality_candidates": payload["summary"].get(
+                    "sentiment_saved_quality_candidates"
+                ),
+                "sentiment_saved_quality_candidate_rate": payload["summary"].get(
+                    "sentiment_saved_quality_candidate_rate"
+                ),
                 "no_target": payload["summary"].get("no_target"),
                 "not_filled": payload["summary"].get("not_filled"),
                 "signal_target_snapshots": payload["summary"].get(
@@ -1414,6 +1431,8 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
             "blocked_by_target_quality": summary.get("blocked_by_target_quality"),
             "shadow_target_quality_approved": summary.get("shadow_target_quality_approved"),
             "shadow_target_quality_rejected": summary.get("shadow_target_quality_rejected"),
+            "sentiment_saved_quality_candidates": summary.get("sentiment_saved_quality_candidates"),
+            "sentiment_saved_quality_candidate_rate": summary.get("sentiment_saved_quality_candidate_rate"),
             "no_target": summary.get("no_target"),
             "not_filled": summary.get("not_filled"),
             "fill_rate_after_approval": summary.get("fill_rate_after_approval"),
@@ -1485,6 +1504,8 @@ def write_strategy_comparison_csv(comparison, output_path, ranked=False):
         "blocked_by_target_quality",
         "shadow_target_quality_approved",
         "shadow_target_quality_rejected",
+        "sentiment_saved_quality_candidates",
+        "sentiment_saved_quality_candidate_rate",
         "no_target",
         "not_filled",
         "target_profit_pct",

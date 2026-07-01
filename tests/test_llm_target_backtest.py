@@ -243,6 +243,8 @@ class LlmTargetBacktestTests(unittest.TestCase):
         self.assertEqual(summary["blocked_by_sentiment"], 1)
         self.assertEqual(summary["shadow_target_quality_approved"], 1)
         self.assertEqual(summary["shadow_target_quality_rejected"], 0)
+        self.assertEqual(summary["sentiment_saved_quality_candidates"], 1)
+        self.assertEqual(summary["sentiment_saved_quality_candidate_rate"], 1.0)
         decision = result["recent_decisions"][0]
         self.assertTrue(decision["shadow_target_quality"]["allowed"])
 
@@ -491,6 +493,8 @@ class LlmTargetBacktestTests(unittest.TestCase):
             self.assertIn("probe_only", row["production_ineligible_reason"])
             self.assertIn("production_eligible", header)
             self.assertIn("production_ineligible_reason", header)
+            self.assertIn("sentiment_saved_quality_candidates", header)
+            self.assertIn("sentiment_saved_quality_candidate_rate", header)
 
     def test_best_result_mentions_negative_open_exposure(self):
         strategies = {
