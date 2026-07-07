@@ -28,6 +28,22 @@ class RangeGridGuardrailsTests(unittest.TestCase):
         })
         self.assertTrue(any("aging_start_minutes_by_source.banana" in error for error in errors))
 
+    def test_validate_strategy_config_allows_negative_execution_threshold(self):
+        errors = guardrails.validate_strategy_config({
+            "grid_anchor": "low,high",
+            "operating_mode": "range_only",
+            "execution_signal_threshold": -0.08,
+        })
+        self.assertFalse(errors)
+
+    def test_validate_strategy_config_rejects_out_of_bounds_execution_threshold(self):
+        errors = guardrails.validate_strategy_config({
+            "grid_anchor": "low,high",
+            "operating_mode": "range_only",
+            "execution_signal_threshold": -1.5,
+        })
+        self.assertTrue(any("execution_signal_threshold" in error for error in errors))
+
     def test_summarize_sell_backlog_counts_and_ages(self):
         now = datetime(2026, 6, 13, 12, 0, tzinfo=timezone.utc)
         summary = guardrails.summarize_sell_backlog(

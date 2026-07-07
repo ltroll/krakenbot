@@ -99,8 +99,8 @@ def validate_strategy_config(strategy_config):
             errors.append(f"{field} must be > 0")
 
     non_negative_numeric_fields = (
-        "execution_signal_threshold",
         "llm_target_proximity_pct",
+        "momentum_entry_tolerance_pct",
         "aging_profit_reduction_pct",
         "min_profit_target_pct",
         "buy_after_sell_discount_pct",
@@ -118,6 +118,16 @@ def validate_strategy_config(strategy_config):
             continue
         if numeric < 0:
             errors.append(f"{field} must be >= 0")
+
+    value = strategy_config.get("execution_signal_threshold")
+    if value is not None:
+        try:
+            numeric = float(value)
+        except Exception:
+            errors.append("execution_signal_threshold must be numeric")
+        else:
+            if numeric < -1 or numeric > 1:
+                errors.append("execution_signal_threshold must be between -1 and 1")
 
     try:
         profit_target_pct = float(strategy_config.get("profit_target_pct", 0.01))
