@@ -583,6 +583,18 @@ sentiment_paused_profit_target_offset_pct = profile_float(
     "sentiment_paused_profit_target_offset_pct",
     -0.001
 )
+sentiment_paused_size_multiplier = profile_float(
+    "sentiment_paused_size_multiplier",
+    0.0
+)
+sentiment_paused_inventory_multiplier = profile_float(
+    "sentiment_paused_inventory_multiplier",
+    0.0
+)
+sentiment_paused_open_sell_multiplier = profile_float(
+    "sentiment_paused_open_sell_multiplier",
+    0.0
+)
 sentiment_defensive_profit_target_offset_pct = profile_float(
     "sentiment_defensive_profit_target_offset_pct",
     -0.0005
@@ -2308,9 +2320,9 @@ def sentiment_regime(
             }
         return {
             "name": "paused",
-            "position_size_multiplier": 0.0,
-            "inventory_multiplier": 0.0,
-            "open_sell_multiplier": 0.0,
+            "position_size_multiplier": sentiment_paused_size_multiplier,
+            "inventory_multiplier": sentiment_paused_inventory_multiplier,
+            "open_sell_multiplier": sentiment_paused_open_sell_multiplier,
             "allow_high_anchor": False,
             "profit_target_offset_pct": (
                 sentiment_paused_profit_target_offset_pct
@@ -3062,6 +3074,13 @@ def main():
         ),
         sentiment_defensive_threshold=sentiment_defensive_threshold,
         sentiment_risk_on_threshold=sentiment_risk_on_threshold,
+        sentiment_paused_size_multiplier=sentiment_paused_size_multiplier,
+        sentiment_paused_inventory_multiplier=(
+            sentiment_paused_inventory_multiplier
+        ),
+        sentiment_paused_open_sell_multiplier=(
+            sentiment_paused_open_sell_multiplier
+        ),
         sentiment_defensive_size_multiplier=(
             sentiment_defensive_size_multiplier
         ),
