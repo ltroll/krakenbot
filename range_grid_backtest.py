@@ -396,6 +396,28 @@ def normalized_source_config_map(config, key):
     return normalized
 
 
+def range_momentum_entry_tolerance_pct(config, buy_source):
+    if buy_source not in ("range_low", "range_mean", "range_median"):
+        return 0.0
+
+    source_values = normalized_source_config_map(
+        config,
+        "momentum_entry_tolerance_pct_by_source",
+    )
+    source_value = source_values.get(buy_source)
+    if source_value is not None:
+        return max(0.0, source_value)
+
+    return max(0.0, safe_float(config.get("momentum_entry_tolerance_pct")) or 0.0)
+
+
+def price_is_above_allowed_entry(price, level, config, buy_source):
+    if buy_source == "llm_target":
+        return False
+    tolerance_pct = range_momentum_entry_tolerance_pct(config, buy_source)
+    return price > (level * (1 + tolerance_pct))
+
+
 def source_sell_policy(config, buy_source):
     source_key = str(buy_source or "").strip().lower()
     configured_profit_target = safe_float(config.get("profit_target_pct")) or 0.0
@@ -1876,7 +1898,7 @@ def evaluate_candidate(snapshot, candidate, price):
         return False, "above_last_sell_discount"
     if mean_reversion_opportunity < mean_reversion_min_opportunity:
         return False, "mean_reversion_opportunity_below_min"
-    if buy_source != "llm_target" and price > level:
+    if price_is_above_allowed_entry(price, level, config, buy_source):
         return False, "price_above_level"
     if int(state_info.get("open_sell_count") or 0) >= max_open_sell_orders:
         return False, "max_open_sell_orders"

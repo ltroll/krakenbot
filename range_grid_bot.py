@@ -2381,6 +2381,31 @@ def min_signal_for_buy_source(buy_source):
     return low_min_signal
 
 
+def range_momentum_entry_tolerance_pct(config, buy_source):
+    if buy_source not in ("range_low", "range_mean", "range_median"):
+        return 0.0
+
+    source_values = normalized_source_config_map(
+        config,
+        "momentum_entry_tolerance_pct_by_source"
+    )
+    source_value = source_values.get(buy_source)
+    if source_value is not None:
+        return max(0.0, float(source_value))
+
+    return max(
+        0.0,
+        strategy_float(config, "momentum_entry_tolerance_pct", 0.0)
+    )
+
+
+def price_is_above_allowed_entry(price, level, config, buy_source):
+    if buy_source == "llm_target":
+        return False
+    tolerance_pct = range_momentum_entry_tolerance_pct(config, buy_source)
+    return price > (level * (1 + tolerance_pct))
+
+
 def clamp(value, minimum, maximum):
     return max(minimum, min(maximum, value))
 
@@ -4374,6 +4399,15 @@ def main():
                         max_open_high_anchor_orders,
                     ))
                     bucket_name = buy_source_bucket(buy_source)
+                    momentum_entry_tolerance_pct = (
+                        range_momentum_entry_tolerance_pct(
+                            route_config,
+                            buy_source
+                        )
+                    )
+                    momentum_entry_max_price = level * (
+                        1 + momentum_entry_tolerance_pct
+                    )
                     bucket_inventory_usd = bucket_inventory_usd_map.get(
                         bucket_name,
                         0.0
@@ -4404,7 +4438,12 @@ def main():
                         mean_reversion_opportunity < mean_reversion_min_opportunity
                     ):
                         skip_reason = "mean_reversion_opportunity_below_min"
-                    elif buy_source != "llm_target" and price > level:
+                    elif price_is_above_allowed_entry(
+                        price,
+                        level,
+                        route_config,
+                        buy_source
+                    ):
                         skip_reason = "price_above_level"
                     elif (
                         len(state["open_sell_orders"])
@@ -4594,6 +4633,13 @@ def main():
                                 candidate.get("route_entry_step_pct")
                                 or current_entry_step_pct
                             ),
+                            momentum_entry_tolerance_pct=(
+                                momentum_entry_tolerance_pct
+                            ),
+                            momentum_entry_max_price=round(
+                                momentum_entry_max_price,
+                                PRICE_DECIMALS
+                            ),
                             inventory_pressure_usage_ratio=(
                                 route_inventory_pressure["usage_ratio"]
                             ),
@@ -4651,6 +4697,13 @@ def main():
                                 candidate.get("route_entry_step_pct")
                                 or current_entry_step_pct
                             ),
+                            momentum_entry_tolerance_pct=(
+                                momentum_entry_tolerance_pct
+                            ),
+                            momentum_entry_max_price=round(
+                                momentum_entry_max_price,
+                                PRICE_DECIMALS
+                            ),
                             inventory_pressure_usage_ratio=(
                                 route_inventory_pressure["usage_ratio"]
                             ),
@@ -4700,6 +4753,13 @@ def main():
                         effective_entry_step_pct=(
                             candidate.get("route_entry_step_pct")
                             or current_entry_step_pct
+                        ),
+                        momentum_entry_tolerance_pct=(
+                            momentum_entry_tolerance_pct
+                        ),
+                        momentum_entry_max_price=round(
+                            momentum_entry_max_price,
+                            PRICE_DECIMALS
                         ),
                         inventory_pressure_usage_ratio=(
                             route_inventory_pressure["usage_ratio"]

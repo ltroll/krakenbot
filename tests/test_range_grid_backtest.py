@@ -497,6 +497,50 @@ class RangeGridBacktestTests(unittest.TestCase):
             [93.1, 91.2],
         )
 
+    def test_evaluate_candidate_allows_median_momentum_entry_tolerance(self):
+        snapshot = make_snapshot(
+            "2026-06-12T12:00:00+00:00",
+            100.1,
+            action_recommendation="bullish_allowed",
+            strategy_modes=["median"],
+            strategy_overrides={
+                "momentum_entry_tolerance_pct": 0.002,
+                "prevent_buy_above_last_sell": False,
+            },
+        )
+        candidate = {
+            "level": 100.0,
+            "buy_source": "range_median",
+            "strategy_mode": "median",
+        }
+
+        approved, reason = backtest.evaluate_candidate(snapshot, candidate, 100.1)
+
+        self.assertTrue(approved)
+        self.assertIsNone(reason)
+
+    def test_evaluate_candidate_keeps_high_anchor_strict_above_level(self):
+        snapshot = make_snapshot(
+            "2026-06-12T12:00:00+00:00",
+            100.1,
+            action_recommendation="bullish_allowed",
+            strategy_modes=["high"],
+            strategy_overrides={
+                "momentum_entry_tolerance_pct": 0.002,
+                "prevent_buy_above_last_sell": False,
+            },
+        )
+        candidate = {
+            "level": 100.0,
+            "buy_source": "range_high_band",
+            "strategy_mode": "high",
+        }
+
+        approved, reason = backtest.evaluate_candidate(snapshot, candidate, 100.1)
+
+        self.assertFalse(approved)
+        self.assertEqual(reason, "price_above_level")
+
     def test_confidence_liquidity_block_can_allow_range_only_override(self):
         permissions = backtest.sentiment_buy_permissions(
             "blocked",
