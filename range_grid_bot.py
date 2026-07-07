@@ -2381,7 +2381,7 @@ def min_signal_for_buy_source(buy_source):
     return low_min_signal
 
 
-def range_momentum_entry_tolerance_pct(config, buy_source):
+def range_momentum_entry_tolerance_pct(config, buy_source, fallback_config=None):
     if buy_source not in ("range_low", "range_mean", "range_median"):
         return 0.0
 
@@ -2393,16 +2393,47 @@ def range_momentum_entry_tolerance_pct(config, buy_source):
     if source_value is not None:
         return max(0.0, float(source_value))
 
-    return max(
-        0.0,
-        strategy_float(config, "momentum_entry_tolerance_pct", 0.0)
-    )
+    if "momentum_entry_tolerance_pct" in config:
+        return max(
+            0.0,
+            strategy_float(config, "momentum_entry_tolerance_pct", 0.0)
+        )
+
+    if fallback_config:
+        fallback_source_values = normalized_source_config_map(
+            fallback_config,
+            "momentum_entry_tolerance_pct_by_source"
+        )
+        fallback_source_value = fallback_source_values.get(buy_source)
+        if fallback_source_value is not None:
+            return max(0.0, float(fallback_source_value))
+
+        return max(
+            0.0,
+            strategy_float(
+                fallback_config,
+                "momentum_entry_tolerance_pct",
+                0.0
+            )
+        )
+
+    return 0.0
 
 
-def price_is_above_allowed_entry(price, level, config, buy_source):
+def price_is_above_allowed_entry(
+    price,
+    level,
+    config,
+    buy_source,
+    fallback_config=None
+):
     if buy_source == "llm_target":
         return False
-    tolerance_pct = range_momentum_entry_tolerance_pct(config, buy_source)
+    tolerance_pct = range_momentum_entry_tolerance_pct(
+        config,
+        buy_source,
+        fallback_config
+    )
     return price > (level * (1 + tolerance_pct))
 
 
@@ -4402,7 +4433,8 @@ def main():
                     momentum_entry_tolerance_pct = (
                         range_momentum_entry_tolerance_pct(
                             route_config,
-                            buy_source
+                            buy_source,
+                            strategy_config
                         )
                     )
                     momentum_entry_max_price = level * (
@@ -4442,7 +4474,8 @@ def main():
                         price,
                         level,
                         route_config,
-                        buy_source
+                        buy_source,
+                        strategy_config
                     ):
                         skip_reason = "price_above_level"
                     elif (

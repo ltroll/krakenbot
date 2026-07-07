@@ -396,7 +396,7 @@ def normalized_source_config_map(config, key):
     return normalized
 
 
-def range_momentum_entry_tolerance_pct(config, buy_source):
+def range_momentum_entry_tolerance_pct(config, buy_source, fallback_config=None):
     if buy_source not in ("range_low", "range_mean", "range_median"):
         return 0.0
 
@@ -408,13 +408,39 @@ def range_momentum_entry_tolerance_pct(config, buy_source):
     if source_value is not None:
         return max(0.0, source_value)
 
-    return max(0.0, safe_float(config.get("momentum_entry_tolerance_pct")) or 0.0)
+    if "momentum_entry_tolerance_pct" in config:
+        return max(0.0, safe_float(config.get("momentum_entry_tolerance_pct")) or 0.0)
+
+    if fallback_config:
+        fallback_source_values = normalized_source_config_map(
+            fallback_config,
+            "momentum_entry_tolerance_pct_by_source",
+        )
+        fallback_source_value = fallback_source_values.get(buy_source)
+        if fallback_source_value is not None:
+            return max(0.0, fallback_source_value)
+        return max(
+            0.0,
+            safe_float(fallback_config.get("momentum_entry_tolerance_pct")) or 0.0
+        )
+
+    return 0.0
 
 
-def price_is_above_allowed_entry(price, level, config, buy_source):
+def price_is_above_allowed_entry(
+    price,
+    level,
+    config,
+    buy_source,
+    fallback_config=None,
+):
     if buy_source == "llm_target":
         return False
-    tolerance_pct = range_momentum_entry_tolerance_pct(config, buy_source)
+    tolerance_pct = range_momentum_entry_tolerance_pct(
+        config,
+        buy_source,
+        fallback_config,
+    )
     return price > (level * (1 + tolerance_pct))
 
 

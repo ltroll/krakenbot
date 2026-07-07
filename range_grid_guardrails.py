@@ -165,6 +165,7 @@ def validate_strategy_config(strategy_config):
 
     source_numeric_maps = {
         "sell_target_offset_pct_by_source": ("numeric", None),
+        "momentum_entry_tolerance_pct_by_source": ("non_negative", None),
         "aging_start_minutes_by_source": ("positive", None),
         "aging_step_minutes_by_source": ("positive", None),
         "aging_profit_reduction_pct_by_source": ("non_negative", None),

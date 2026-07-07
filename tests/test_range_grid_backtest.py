@@ -541,6 +541,50 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertFalse(approved)
         self.assertEqual(reason, "price_above_level")
 
+    def test_momentum_entry_tolerance_can_fall_back_to_base_config(self):
+        route_config = {}
+        base_config = {"momentum_entry_tolerance_pct": 0.002}
+
+        self.assertAlmostEqual(
+            backtest.range_momentum_entry_tolerance_pct(
+                route_config,
+                "range_median",
+                base_config,
+            ),
+            0.002,
+        )
+        self.assertFalse(
+            backtest.price_is_above_allowed_entry(
+                100.1,
+                100.0,
+                route_config,
+                "range_median",
+                base_config,
+            )
+        )
+
+    def test_momentum_entry_tolerance_route_config_overrides_base_config(self):
+        route_config = {"momentum_entry_tolerance_pct": 0.0005}
+        base_config = {"momentum_entry_tolerance_pct": 0.002}
+
+        self.assertAlmostEqual(
+            backtest.range_momentum_entry_tolerance_pct(
+                route_config,
+                "range_median",
+                base_config,
+            ),
+            0.0005,
+        )
+        self.assertTrue(
+            backtest.price_is_above_allowed_entry(
+                100.1,
+                100.0,
+                route_config,
+                "range_median",
+                base_config,
+            )
+        )
+
     def test_confidence_liquidity_block_can_allow_range_only_override(self):
         permissions = backtest.sentiment_buy_permissions(
             "blocked",
