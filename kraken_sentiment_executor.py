@@ -187,6 +187,8 @@ BOT_REPLAY_BACKTEST_URL = (
     CLI_ARGS.bot_replay_backtest_url
     or os.getenv("BOT_REPLAY_BACKTEST_URL")
 )
+ACTIVE_STRATEGY_URL = os.getenv("ACTIVE_STRATEGY_URL")
+ACTIVE_STRATEGY_FILE = os.getenv("ACTIVE_STRATEGY_FILE")
 RUN_BACKTEST = (
     CLI_ARGS.run_backtest
     or os.getenv("SENTIMENT_RUN_BACKTEST", "").strip().lower()
@@ -460,6 +462,46 @@ MEAN_REVERSION_FLOW_PRESSURE_MIN = profile_float(
     "mean_reversion_flow_pressure_min",
     0.0
 )
+USE_MARKET_STRUCTURE_FILTER = env_profile_bool(
+    "USE_MARKET_STRUCTURE_FILTER",
+    "use_market_structure_filter",
+    False
+)
+MARKET_STRUCTURE_FAIL_CLOSED = env_profile_bool(
+    "MARKET_STRUCTURE_FAIL_CLOSED",
+    "market_structure_fail_closed",
+    True
+)
+STRUCTURE_RESISTANCE_BUFFER_PCT = env_profile_float(
+    "STRUCTURE_RESISTANCE_BUFFER_PCT",
+    "structure_resistance_buffer_pct",
+    0.0025
+)
+STRUCTURE_MIN_RISK_REWARD = env_profile_float(
+    "STRUCTURE_MIN_RISK_REWARD",
+    "structure_min_risk_reward",
+    1.25
+)
+STRUCTURE_MAX_RANGE_POSITION = env_profile_float(
+    "STRUCTURE_MAX_RANGE_POSITION",
+    "structure_max_range_position",
+    1.0
+)
+STRUCTURE_REQUIRE_SUPPORT_PROXIMITY = env_profile_bool(
+    "STRUCTURE_REQUIRE_SUPPORT_PROXIMITY",
+    "structure_require_support_proximity",
+    False
+)
+STRUCTURE_MAX_SUPPORT_DISTANCE_PCT = env_profile_float(
+    "STRUCTURE_MAX_SUPPORT_DISTANCE_PCT",
+    "structure_max_support_distance_pct",
+    0.01
+)
+STRUCTURE_SUPPORT_RANGE_POSITION_MAX = env_profile_float(
+    "STRUCTURE_SUPPORT_RANGE_POSITION_MAX",
+    "structure_support_range_position_max",
+    0.35
+)
 USE_BACKTEST_HEALTH_GATE = env_bool(
     "USE_BACKTEST_HEALTH_GATE",
     False,
@@ -480,6 +522,35 @@ BACKTEST_REQUIRE_POLICY_BEATS_BASELINE = env_bool(
     True,
     CLI_ARGS.backtest_require_policy_beats_baseline
 )
+ACTIVE_STRATEGY_ENABLED = env_profile_bool(
+    "ACTIVE_STRATEGY_ENABLED",
+    "active_strategy_enabled",
+    bool(ACTIVE_STRATEGY_URL or ACTIVE_STRATEGY_FILE)
+)
+ACTIVE_STRATEGY_FAIL_CLOSED = env_profile_bool(
+    "ACTIVE_STRATEGY_FAIL_CLOSED",
+    "active_strategy_fail_closed",
+    False
+)
+ACTIVE_STRATEGY_MAX_AGE_MINUTES = env_profile_float(
+    "ACTIVE_STRATEGY_MAX_AGE_MINUTES",
+    "active_strategy_max_age_minutes",
+    120
+)
+
+ACTIVE_STRATEGY_ALLOWED_OVERRIDES = {
+    "ENTRY_SIGNAL_MODE",
+    "PRICE_FIRST_MAX_RANGE_POSITION",
+    "PRICE_FIRST_MIN_MEAN_REVERSION",
+    "PRICE_FIRST_MIN_CONFIDENCE",
+    "PRICE_FIRST_MIN_CONTRIBUTORS",
+    "PRICE_FIRST_MIN_EXECUTION_SIGNAL",
+    "PRICE_FIRST_MAX_EXECUTION_SIGNAL",
+    "PRICE_FIRST_RISK_OFF_SIGNAL",
+    "PRICE_FIRST_BLOCK_RISK_OFF",
+    "BOT_REPLAY_TAKE_PROFIT_PCT",
+    "BOT_REPLAY_COOLDOWN_MINUTES",
+}
 
 PAIR_INFO_CACHE = None
 
@@ -571,7 +642,14 @@ DECISION_CSV_FIELDS = [
     "mean_reversion_opportunity",
     "range_position_24h",
     "flow_pressure",
+    "structure_bias",
+    "support_price",
+    "resistance_price",
+    "support_distance_pct",
+    "upside_to_resistance_pct",
+    "risk_reward_to_structure",
     "target_buy_price",
+    "target_source",
     "target_allocation_pct",
     "open_buy_count",
     "max_open_buy_orders",
@@ -585,7 +663,12 @@ DECISION_CSV_FIELDS = [
     "backtest_policy_max_drawdown_pct",
     "backtest_baseline_win_rate",
     "backtest_baseline_avg_net_return_pct",
-    "backtest_baseline_max_drawdown_pct"
+    "backtest_baseline_max_drawdown_pct",
+    "active_strategy_status",
+    "active_strategy",
+    "active_strategy_reason",
+    "active_strategy_score",
+    "entry_signal_mode"
 ]
 
 # ----------------------
@@ -1223,6 +1306,109 @@ def load_signal():
         return None
 
 
+def load_active_strategy():
+    if not ACTIVE_STRATEGY_ENABLED:
+        return None, "active_strategy_disabled"
+    if not ACTIVE_STRATEGY_URL and not ACTIVE_STRATEGY_FILE:
+        return None, "active_strategy_source_missing"
+
+    try:
+        if ACTIVE_STRATEGY_URL:
+            response = request_with_retries(
+                "GET",
+                ACTIVE_STRATEGY_URL,
+                timeout=REQUEST_TIMEOUT
+            )
+            response.raise_for_status()
+            return response.json(), None
+
+        with open(ACTIVE_STRATEGY_FILE, encoding="utf-8") as f:
+            return json.load(f), None
+    except Exception as e:
+        log_event("ACTIVE_STRATEGY_ERROR", message=str(e))
+        return None, "active_strategy_unavailable"
+
+
+def active_strategy_context(now):
+    payload, error = load_active_strategy()
+    if payload is None:
+        return {
+            "enabled": ACTIVE_STRATEGY_ENABLED,
+            "active": False,
+            "status": "unavailable" if ACTIVE_STRATEGY_ENABLED else "disabled",
+            "reason": error,
+            "payload": {},
+            "overrides": {},
+            "trade_parameters": {},
+        }
+    if not isinstance(payload, dict):
+        return {
+            "enabled": ACTIVE_STRATEGY_ENABLED,
+            "active": False,
+            "status": "invalid",
+            "reason": "active_strategy_payload_not_object",
+            "payload": {},
+            "overrides": {},
+            "trade_parameters": {},
+        }
+
+    timestamp = parse_iso8601(payload.get("timestamp"))
+    expires_at = parse_iso8601(payload.get("expires_at"))
+    age_minutes = None
+    if timestamp is not None:
+        age_minutes = (now - timestamp).total_seconds() / 60
+
+    stale = False
+    stale_reasons = []
+    if expires_at is not None and now > expires_at:
+        stale = True
+        stale_reasons.append("expired")
+    if (
+        ACTIVE_STRATEGY_MAX_AGE_MINUTES > 0
+        and age_minutes is not None
+        and age_minutes > ACTIVE_STRATEGY_MAX_AGE_MINUTES
+    ):
+        stale = True
+        stale_reasons.append("too_old")
+
+    active = (
+        payload.get("status") == "active"
+        and payload.get("eligible_for_live") is True
+        and payload.get("mode") == "live_candidate"
+        and not stale
+    )
+    overrides = payload.get("overrides") if isinstance(payload.get("overrides"), dict) else {}
+    safe_overrides = {
+        key: value
+        for key, value in overrides.items()
+        if key in ACTIVE_STRATEGY_ALLOWED_OVERRIDES
+    }
+    trade_parameters = (
+        payload.get("trade_parameters")
+        if isinstance(payload.get("trade_parameters"), dict)
+        else {}
+    )
+    reason = payload.get("reason")
+    if stale_reasons:
+        reason = "active_strategy_" + "_".join(stale_reasons)
+    elif not active:
+        reason = reason or "active_strategy_not_live_eligible"
+
+    return {
+        "enabled": ACTIVE_STRATEGY_ENABLED,
+        "active": active,
+        "status": payload.get("status", "unknown"),
+        "reason": reason,
+        "payload": payload,
+        "overrides": safe_overrides if active else {},
+        "trade_parameters": trade_parameters if active else {},
+        "age_minutes": age_minutes,
+        "expires_at": payload.get("expires_at"),
+        "active_strategy": payload.get("active_strategy"),
+        "score": payload.get("score"),
+    }
+
+
 def load_backtest():
     backtest_url = BOT_REPLAY_BACKTEST_URL or BOT_POLICY_BACKTEST_URL
     if not backtest_url:
@@ -1737,6 +1923,29 @@ def normalize_price_regime(price_regime):
     return normalized
 
 
+def normalize_market_structure(market_structure):
+    if not isinstance(market_structure, dict):
+        return {}
+
+    normalized = dict(market_structure)
+    aliases = {
+        "nearest_support": "support_price",
+        "support": "support_price",
+        "nearest_resistance": "resistance_price",
+        "resistance": "resistance_price",
+        "upside_pct": "upside_to_resistance_pct",
+        "resistance_distance_pct": "upside_to_resistance_pct",
+        "downside_pct": "downside_to_support_pct",
+        "support_distance_pct": "downside_to_support_pct",
+        "risk_reward": "risk_reward_to_structure",
+        "range_position": "range_position_24h",
+    }
+    for source, target in aliases.items():
+        if target not in normalized and source in normalized:
+            normalized[target] = normalized[source]
+    return normalized
+
+
 def normalize_source_status(source_status):
     normalized = dict(source_status)
     if "asset_price" in normalized and "market_data" not in normalized:
@@ -1762,6 +1971,11 @@ def normalize_signal(signal):
     if not isinstance(price_regime, dict):
         price_regime = {}
     price_regime = normalize_price_regime(price_regime)
+
+    market_structure = signal.get("market_structure")
+    if not isinstance(market_structure, dict):
+        market_structure = signal.get("asset_market_structure")
+    market_structure = normalize_market_structure(market_structure)
 
     kraken_flow = signal.get("kraken_flow")
     if not isinstance(kraken_flow, dict):
@@ -1822,6 +2036,7 @@ def normalize_signal(signal):
         if isinstance(signal.get("freshness"), dict)
         else {},
         "price_regime": price_regime,
+        "market_structure": market_structure,
         "kraken_flow": kraken_flow,
         "source_status": source_status,
         "target_prices": target_prices
@@ -2198,13 +2413,18 @@ def skip_cycle(reason, cycle_id, **kwargs):
     )
 
 
-def cooldown_active(now, weighted_signal):
+def cooldown_active(now, weighted_signal, cooldown_minutes=None):
+    cooldown_minutes = (
+        REBALANCE_COOLDOWN_MINUTES
+        if cooldown_minutes is None
+        else cooldown_minutes
+    )
     last_trade_at = parse_iso8601(state.get("last_trade_at"))
-    if REBALANCE_COOLDOWN_MINUTES <= 0 or last_trade_at is None:
+    if cooldown_minutes <= 0 or last_trade_at is None:
         return None
 
     elapsed_minutes = (now - last_trade_at).total_seconds() / 60
-    if elapsed_minutes >= REBALANCE_COOLDOWN_MINUTES:
+    if elapsed_minutes >= cooldown_minutes:
         return None
 
     if abs(weighted_signal) >= COOLDOWN_OVERRIDE_SIGNAL_ABS:
@@ -2212,7 +2432,7 @@ def cooldown_active(now, weighted_signal):
 
     return {
         "elapsed_minutes": elapsed_minutes,
-        "cooldown_minutes": REBALANCE_COOLDOWN_MINUTES,
+        "cooldown_minutes": cooldown_minutes,
         "cooldown_override_signal_abs": COOLDOWN_OVERRIDE_SIGNAL_ABS
     }
 
@@ -2228,6 +2448,180 @@ def numeric_or_none(value):
 
 def clamp(value, lower, upper):
     return max(lower, min(upper, value))
+
+
+def decimal_pct(value):
+    parsed = numeric_or_none(value)
+    if parsed is None:
+        return None
+    if abs(parsed) > 1:
+        return parsed / 100
+    return parsed
+
+
+def first_number(*values):
+    for value in values:
+        parsed = numeric_or_none(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def first_pct(*values):
+    for value in values:
+        parsed = decimal_pct(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def market_structure_snapshot(sentiment, current_price):
+    price_regime = sentiment.get("price_regime", {})
+    structure = sentiment.get("market_structure", {})
+    if not isinstance(structure, dict):
+        structure = {}
+
+    support_price = first_number(
+        structure.get("support_price"),
+        price_regime.get("support_price"),
+        price_regime.get("price_low_24h")
+    )
+    resistance_price = first_number(
+        structure.get("resistance_price"),
+        price_regime.get("resistance_price"),
+        price_regime.get("price_high_24h")
+    )
+    range_position = first_number(
+        structure.get("range_position_24h"),
+        price_regime.get("range_position_24h")
+    )
+
+    support_distance_pct = first_pct(
+        structure.get("downside_to_support_pct"),
+        structure.get("support_distance_pct")
+    )
+    if support_distance_pct is None and support_price and current_price:
+        support_distance_pct = (current_price - support_price) / current_price
+
+    upside_to_resistance_pct = first_pct(
+        structure.get("upside_to_resistance_pct"),
+        structure.get("resistance_distance_pct")
+    )
+    if upside_to_resistance_pct is None and resistance_price and current_price:
+        upside_to_resistance_pct = (resistance_price - current_price) / current_price
+
+    risk_reward = first_number(structure.get("risk_reward_to_structure"))
+    if (
+        risk_reward is None
+        and upside_to_resistance_pct is not None
+        and support_distance_pct is not None
+        and support_distance_pct > 0
+    ):
+        risk_reward = upside_to_resistance_pct / support_distance_pct
+
+    bias = structure.get("structure_bias")
+    if not bias:
+        if range_position is not None:
+            if range_position <= STRUCTURE_SUPPORT_RANGE_POSITION_MAX:
+                bias = "near_support"
+            elif range_position >= STRUCTURE_MAX_RANGE_POSITION:
+                bias = "near_resistance"
+            else:
+                bias = "middle_range"
+        elif (
+            support_distance_pct is not None
+            and support_distance_pct <= STRUCTURE_MAX_SUPPORT_DISTANCE_PCT
+        ):
+            bias = "near_support"
+        elif (
+            upside_to_resistance_pct is not None
+            and upside_to_resistance_pct <= STRUCTURE_RESISTANCE_BUFFER_PCT
+        ):
+            bias = "near_resistance"
+
+    return {
+        "support_price": support_price,
+        "resistance_price": resistance_price,
+        "support_distance_pct": support_distance_pct,
+        "upside_to_resistance_pct": upside_to_resistance_pct,
+        "risk_reward_to_structure": risk_reward,
+        "range_position_24h": range_position,
+        "structure_bias": bias,
+    }
+
+
+def market_structure_failure(sentiment, current_price, target_profit_pct):
+    if not USE_MARKET_STRUCTURE_FILTER:
+        return None
+
+    snapshot = market_structure_snapshot(sentiment, current_price)
+    upside = snapshot.get("upside_to_resistance_pct")
+    support_distance = snapshot.get("support_distance_pct")
+    risk_reward = snapshot.get("risk_reward_to_structure")
+    range_position = snapshot.get("range_position_24h")
+    required_upside = target_profit_pct + ROUND_TRIP_FEE_PCT + STRUCTURE_RESISTANCE_BUFFER_PCT
+
+    base_details = {
+        "structure_bias": snapshot.get("structure_bias"),
+        "support_price": snapshot.get("support_price"),
+        "resistance_price": snapshot.get("resistance_price"),
+        "support_distance_pct": support_distance,
+        "upside_to_resistance_pct": upside,
+        "risk_reward_to_structure": risk_reward,
+        "range_position_24h": range_position,
+    }
+
+    if upside is None:
+        if MARKET_STRUCTURE_FAIL_CLOSED:
+            return {
+                "reason": "market_structure_missing_resistance",
+                **base_details
+            }
+        return None
+
+    if upside < required_upside:
+        return {
+            "reason": "market_structure_resistance_too_close",
+            "required_upside_to_resistance_pct": required_upside,
+            **base_details
+        }
+
+    if risk_reward is not None and risk_reward < STRUCTURE_MIN_RISK_REWARD:
+        return {
+            "reason": "market_structure_risk_reward_too_low",
+            "structure_min_risk_reward": STRUCTURE_MIN_RISK_REWARD,
+            **base_details
+        }
+
+    if (
+        range_position is not None
+        and STRUCTURE_MAX_RANGE_POSITION < 1
+        and range_position > STRUCTURE_MAX_RANGE_POSITION
+    ):
+        return {
+            "reason": "market_structure_range_too_high",
+            "structure_max_range_position": STRUCTURE_MAX_RANGE_POSITION,
+            **base_details
+        }
+
+    if STRUCTURE_REQUIRE_SUPPORT_PROXIMITY:
+        near_support_by_price = (
+            support_distance is not None
+            and support_distance <= STRUCTURE_MAX_SUPPORT_DISTANCE_PCT
+        )
+        near_support_by_range = (
+            range_position is not None
+            and range_position <= STRUCTURE_SUPPORT_RANGE_POSITION_MAX
+        )
+        if not near_support_by_price and not near_support_by_range:
+            return {
+                "reason": "market_structure_not_near_support",
+                "structure_max_support_distance_pct": STRUCTURE_MAX_SUPPORT_DISTANCE_PCT,
+                "structure_support_range_position_max": STRUCTURE_SUPPORT_RANGE_POSITION_MAX,
+                **base_details
+            }
+
+    return None
 
 
 def signal_age_minutes(sentiment, now):
@@ -2385,6 +2779,95 @@ def mean_reversion_setup_allowed(sentiment):
     )
 
 
+def active_strategy_take_profit_pct(active_context, fallback):
+    value = active_context.get("trade_parameters", {}).get("take_profit_pct")
+    parsed = numeric_or_none(value)
+    if parsed is None:
+        parsed = numeric_or_none(
+            active_context.get("overrides", {}).get("BOT_REPLAY_TAKE_PROFIT_PCT")
+        )
+    if parsed is None:
+        return fallback
+    return decimal_pct(parsed)
+
+
+def active_strategy_cooldown_minutes(active_context, fallback):
+    value = active_context.get("trade_parameters", {}).get("cooldown_minutes")
+    parsed = numeric_or_none(value)
+    if parsed is None:
+        parsed = numeric_or_none(
+            active_context.get("overrides", {}).get("BOT_REPLAY_COOLDOWN_MINUTES")
+        )
+    return fallback if parsed is None else parsed
+
+
+def active_price_first_decision(active_context, sentiment):
+    if not active_context.get("active"):
+        return False, active_context.get("reason") or "active_strategy_inactive", {}
+
+    overrides = active_context.get("overrides") or {}
+    if overrides.get("ENTRY_SIGNAL_MODE") != "price_first_context":
+        return False, "active_strategy_unsupported_entry_mode", {}
+
+    price_regime = sentiment.get("price_regime", {})
+    raw_signal = numeric_or_none(sentiment.get("execution_signal")) or 0.0
+    confidence = numeric_or_none(sentiment.get("confidence")) or 0.0
+    contributors = numeric_or_none(sentiment.get("contributor_count")) or 0.0
+    range_position = numeric_or_none(price_regime.get("range_position_24h"))
+    if range_position is None:
+        range_position = 0.5
+    mean_reversion = numeric_or_none(sentiment.get("mean_reversion_opportunity"))
+    if mean_reversion is None:
+        mean_reversion = numeric_or_none(price_regime.get("mean_reversion_opportunity"))
+    if mean_reversion is None:
+        mean_reversion = 0.0
+
+    min_signal = numeric_or_none(overrides.get("PRICE_FIRST_MIN_EXECUTION_SIGNAL"))
+    max_signal = numeric_or_none(overrides.get("PRICE_FIRST_MAX_EXECUTION_SIGNAL"))
+    max_range = numeric_or_none(overrides.get("PRICE_FIRST_MAX_RANGE_POSITION"))
+    min_mean = numeric_or_none(overrides.get("PRICE_FIRST_MIN_MEAN_REVERSION"))
+    min_confidence = numeric_or_none(overrides.get("PRICE_FIRST_MIN_CONFIDENCE"))
+    min_contributors = numeric_or_none(overrides.get("PRICE_FIRST_MIN_CONTRIBUTORS"))
+    risk_off_signal = numeric_or_none(overrides.get("PRICE_FIRST_RISK_OFF_SIGNAL"))
+    block_risk_off = parse_bool(overrides.get("PRICE_FIRST_BLOCK_RISK_OFF", True))
+
+    min_signal = -0.2 if min_signal is None else min_signal
+    max_signal = 0.12 if max_signal is None else max_signal
+    max_range = 0.4 if max_range is None else max_range
+    min_mean = 0.35 if min_mean is None else min_mean
+    min_confidence = 0.0 if min_confidence is None else min_confidence
+    min_contributors = 0.0 if min_contributors is None else min_contributors
+    risk_off_signal = -0.08 if risk_off_signal is None else risk_off_signal
+
+    details = {
+        "entry_signal_mode": "price_first_context",
+        "active_strategy": active_context.get("active_strategy"),
+        "active_strategy_score": active_context.get("score"),
+        "price_first_min_signal": min_signal,
+        "price_first_max_signal": max_signal,
+        "price_first_max_range_position": max_range,
+        "price_first_min_mean_reversion": min_mean,
+        "price_first_min_confidence": min_confidence,
+        "price_first_min_contributors": min_contributors,
+        "price_first_risk_off_signal": risk_off_signal,
+    }
+
+    if block_risk_off and raw_signal <= risk_off_signal:
+        return False, "active_strategy_risk_off", details
+    if not (min_signal <= raw_signal <= max_signal):
+        return False, "active_strategy_signal_outside_range", details
+    if confidence < min_confidence:
+        return False, "active_strategy_confidence_low", details
+    if contributors < min_contributors:
+        return False, "active_strategy_contributors_low", details
+    if range_position > max_range:
+        return False, "active_strategy_range_too_high", details
+    if mean_reversion < min_mean:
+        return False, "active_strategy_mean_reversion_low", details
+
+    return True, "active_strategy_price_first_allowed", details
+
+
 def dynamic_target_profit_pct(sentiment, weighted_signal):
     if not DYNAMIC_PROFIT_TARGETS:
         return TARGET_PROFIT_PCT
@@ -2487,6 +2970,43 @@ def target_limit_orders(
             "allocation_pct": target["allocation"] / allocation_sum
         }
         for target in targets
+    ]
+
+
+def regime_target_limit_orders(
+    sentiment,
+    current_price,
+    total_trade_value,
+    max_buy_price=None
+):
+    price_regime = sentiment.get("price_regime", {})
+    raw_candidates = [
+        ("price_low_24h", price_regime.get("price_low_24h")),
+        ("median_reversion_buy_target", price_regime.get("median_reversion_buy_target")),
+        ("mean_reversion_buy_target", price_regime.get("mean_reversion_buy_target")),
+    ]
+    candidates = []
+    for source, value in raw_candidates:
+        buy_price = numeric_or_none(value)
+        if buy_price is None or buy_price <= 0:
+            continue
+        if buy_price > current_price:
+            continue
+        if max_buy_price is not None and buy_price >= max_buy_price:
+            continue
+        candidates.append({"source": source, "buy_price": buy_price})
+
+    if not candidates:
+        return []
+
+    target = sorted(candidates, key=lambda item: item["buy_price"], reverse=True)[0]
+    return [
+        {
+            "buy_price": target["buy_price"],
+            "trade_value": total_trade_value,
+            "allocation_pct": 1.0,
+            "source": target["source"]
+        }
     ]
 
 
@@ -2777,10 +3297,24 @@ def run_cycle():
         sentiment.get("mean_reversion_opportunity")
     )
     flow_pressure = numeric_or_none(sentiment.get("flow_pressure"))
+    active_context = active_strategy_context(now)
+    active_entry_allowed, active_entry_reason, active_entry_details = (
+        active_price_first_decision(active_context, sentiment)
+    )
     target_profit_pct = dynamic_target_profit_pct(sentiment, weighted_signal)
+    if active_entry_allowed:
+        target_profit_pct = active_strategy_take_profit_pct(
+            active_context,
+            target_profit_pct
+        )
+    active_cooldown_minutes = active_strategy_cooldown_minutes(
+        active_context,
+        REBALANCE_COOLDOWN_MINUTES
+    ) if active_entry_allowed else REBALANCE_COOLDOWN_MINUTES
     action_policy = sentiment.get("action_policy", {})
     action_policy_reason = action_policy.get("reason") or sentiment.get("reason")
     action_recommendation = sentiment.get("action_recommendation")
+    structure = market_structure_snapshot(sentiment, price)
 
     log_event(
         "SIGNAL_UPDATE",
@@ -2818,9 +3352,21 @@ def run_cycle():
         mean_reversion_opportunity=mean_reversion_opportunity,
         range_position_24h=range_position,
         flow_pressure=flow_pressure,
+        structure_bias=structure.get("structure_bias"),
+        support_price=structure.get("support_price"),
+        resistance_price=structure.get("resistance_price"),
+        support_distance_pct=structure.get("support_distance_pct"),
+        upside_to_resistance_pct=structure.get("upside_to_resistance_pct"),
+        risk_reward_to_structure=structure.get("risk_reward_to_structure"),
         target_profit_pct=target_profit_pct,
         round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
         gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
+        active_strategy_status=active_context.get("status"),
+        active_strategy=active_context.get("active_strategy"),
+        active_strategy_reason=active_entry_reason,
+        active_strategy_score=active_context.get("score"),
+        active_strategy_age_minutes=active_context.get("age_minutes"),
+        entry_signal_mode=active_entry_details.get("entry_signal_mode"),
         processed_at=sentiment.get("processed_at")
     )
     console(f"Price: {price} | Signal: {raw_signal} | Confidence: {confidence}")
@@ -2840,9 +3386,37 @@ def run_cycle():
         )
         return
 
-    if action_recommendation != "bullish_allowed":
+    if (
+        ACTIVE_STRATEGY_FAIL_CLOSED
+        and ACTIVE_STRATEGY_ENABLED
+        and not active_context.get("active")
+        and active_context.get("status") in ("unavailable", "invalid")
+    ):
         skip_cycle(
-            "action_policy_" + (action_recommendation or "missing"),
+            active_context.get("reason") or "active_strategy_unavailable",
+            cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            action_recommendation=action_recommendation,
+            action_policy_reason=action_policy_reason,
+            active_strategy_status=active_context.get("status"),
+            active_strategy=active_context.get("active_strategy"),
+            active_strategy_reason=active_context.get("reason"),
+            active_strategy_score=active_context.get("score")
+        )
+        return
+
+    if action_recommendation != "bullish_allowed" and not active_entry_allowed:
+        hold_reason = (
+            active_entry_reason
+            if active_context.get("active")
+            else "action_policy_" + (action_recommendation or "missing")
+        )
+        skip_cycle(
+            hold_reason,
             cycle_id,
             price=price,
             execution_signal=raw_signal,
@@ -2852,7 +3426,33 @@ def run_cycle():
             action_recommendation=action_recommendation,
             action_policy_reason=action_policy_reason,
             contributor_count=sentiment.get("contributor_count"),
-            bot_action_allowed=sentiment.get("bot_action_allowed")
+            bot_action_allowed=sentiment.get("bot_action_allowed"),
+            active_strategy_status=active_context.get("status"),
+            active_strategy=active_context.get("active_strategy"),
+            active_strategy_reason=active_entry_reason,
+            active_strategy_score=active_context.get("score"),
+            entry_signal_mode=active_entry_details.get("entry_signal_mode")
+        )
+        return
+
+    structure_failure = market_structure_failure(sentiment, price, target_profit_pct)
+    if structure_failure is not None:
+        reason = structure_failure.pop("reason")
+        skip_cycle(
+            reason,
+            cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            action_recommendation=action_recommendation,
+            action_policy_reason=action_policy_reason,
+            contributor_count=sentiment.get("contributor_count"),
+            target_profit_pct=target_profit_pct,
+            round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+            gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
+            **structure_failure
         )
         return
 
@@ -2874,12 +3474,40 @@ def run_cycle():
         )
         return
 
-    target_limit_candidates = target_limit_orders(sentiment, price, 1)
-    allow_target_limit_buy = (
-        mean_reversion_setup_allowed(sentiment)
-        and bool(target_limit_candidates)
+    target_limit_candidates = (
+        regime_target_limit_orders(sentiment, price, 1)
+        if active_entry_allowed
+        else target_limit_orders(sentiment, price, 1)
     )
-    allow_market_buy = not allow_target_limit_buy
+    allow_active_target_limit_buy = active_entry_allowed and bool(target_limit_candidates)
+    allow_target_limit_buy = (
+        allow_active_target_limit_buy
+        or (
+            mean_reversion_setup_allowed(sentiment)
+            and bool(target_limit_candidates)
+        )
+    )
+    allow_market_buy = not allow_target_limit_buy and not active_entry_allowed
+
+    if active_entry_allowed and not target_limit_candidates:
+        skip_cycle(
+            "active_strategy_no_regime_target",
+            cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            action_recommendation=action_recommendation,
+            action_policy_reason=action_policy_reason,
+            contributor_count=sentiment.get("contributor_count"),
+            active_strategy_status=active_context.get("status"),
+            active_strategy=active_context.get("active_strategy"),
+            active_strategy_reason=active_entry_reason,
+            active_strategy_score=active_context.get("score"),
+            entry_signal_mode=active_entry_details.get("entry_signal_mode")
+        )
+        return
 
     price_high = numeric_or_none(price_regime.get("price_high_24h"))
     if price_high is not None and HIGH_PRICE_BUY_BLOCK_PCT >= 0:
@@ -2899,7 +3527,7 @@ def run_cycle():
             )
             return
 
-    cooldown = cooldown_active(now, weighted_signal)
+    cooldown = cooldown_active(now, weighted_signal, active_cooldown_minutes)
     if cooldown is not None:
         skip_cycle(
             "cooldown",
@@ -2922,7 +3550,11 @@ def run_cycle():
         if price >= max_rebuy_price:
             if not (
                 allow_target_limit_buy
-                and target_limit_orders(sentiment, price, 1, max_rebuy_price)
+                and (
+                    regime_target_limit_orders(sentiment, price, 1, max_rebuy_price)
+                    if allow_active_target_limit_buy
+                    else target_limit_orders(sentiment, price, 1, max_rebuy_price)
+                )
             ):
                 skip_cycle(
                     "price_above_last_sell",
@@ -3004,11 +3636,25 @@ def run_cycle():
 
     min_volume = get_min_order_volume()
     if allow_target_limit_buy:
-        orders = target_limit_orders(
-            sentiment,
-            price,
-            trade_value,
-            max_rebuy_price
+        decision_reason = (
+            "active_strategy_price_first_target_limit_buy"
+            if allow_active_target_limit_buy
+            else "mean_reversion_target_limit_buy"
+        )
+        orders = (
+            regime_target_limit_orders(
+                sentiment,
+                price,
+                trade_value,
+                max_rebuy_price
+            )
+            if allow_active_target_limit_buy
+            else target_limit_orders(
+                sentiment,
+                price,
+                trade_value,
+                max_rebuy_price
+            )
         )
         placed_orders = 0
 
@@ -3037,10 +3683,11 @@ def run_cycle():
                 "TRADE_DECISION",
                 cycle_id=cycle_id,
                 side="buy",
-                reason="mean_reversion_target_limit_buy",
+                reason=decision_reason,
                 volume=volume,
                 price=target_price,
                 target_buy_price=target_price,
+                target_source=order.get("source"),
                 target_allocation_pct=order["allocation_pct"],
                 trade_value=target_trade_value,
                 base_balance=base_balance,
@@ -3059,16 +3706,28 @@ def run_cycle():
                 effective_risk_multiplier=effective_multiplier,
                 mean_reversion_opportunity=mean_reversion_opportunity,
                 range_position_24h=range_position,
-                flow_pressure=flow_pressure
+                flow_pressure=flow_pressure,
+                structure_bias=structure.get("structure_bias"),
+                support_price=structure.get("support_price"),
+                resistance_price=structure.get("resistance_price"),
+                support_distance_pct=structure.get("support_distance_pct"),
+                upside_to_resistance_pct=structure.get("upside_to_resistance_pct"),
+                risk_reward_to_structure=structure.get("risk_reward_to_structure"),
+                active_strategy_status=active_context.get("status"),
+                active_strategy=active_context.get("active_strategy"),
+                active_strategy_reason=active_entry_reason,
+                active_strategy_score=active_context.get("score"),
+                entry_signal_mode=active_entry_details.get("entry_signal_mode")
             )
             append_decision_csv(
                 "trade_decision",
                 cycle_id=cycle_id,
                 side="buy",
-                reason="mean_reversion_target_limit_buy",
+                reason=decision_reason,
                 volume=volume,
                 price=target_price,
                 target_buy_price=target_price,
+                target_source=order.get("source"),
                 target_allocation_pct=order["allocation_pct"],
                 trade_value=target_trade_value,
                 base_balance=base_balance,
@@ -3088,7 +3747,18 @@ def run_cycle():
                 effective_risk_multiplier=effective_multiplier,
                 mean_reversion_opportunity=mean_reversion_opportunity,
                 range_position_24h=range_position,
-                flow_pressure=flow_pressure
+                flow_pressure=flow_pressure,
+                structure_bias=structure.get("structure_bias"),
+                support_price=structure.get("support_price"),
+                resistance_price=structure.get("resistance_price"),
+                support_distance_pct=structure.get("support_distance_pct"),
+                upside_to_resistance_pct=structure.get("upside_to_resistance_pct"),
+                risk_reward_to_structure=structure.get("risk_reward_to_structure"),
+                active_strategy_status=active_context.get("status"),
+                active_strategy=active_context.get("active_strategy"),
+                active_strategy_reason=active_entry_reason,
+                active_strategy_score=active_context.get("score"),
+                entry_signal_mode=active_entry_details.get("entry_signal_mode")
             )
 
             result = place_limit_buy(
@@ -3117,6 +3787,7 @@ def run_cycle():
                 volume=volume,
                 price=target_price,
                 target_buy_price=target_price,
+                target_source=order.get("source"),
                 target_allocation_pct=order["allocation_pct"],
                 trade_value=target_trade_value,
                 base_balance=base_balance,
@@ -3133,6 +3804,11 @@ def run_cycle():
                 target_profit_pct=target_profit_pct,
                 round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
                 gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
+                active_strategy_status=active_context.get("status"),
+                active_strategy=active_context.get("active_strategy"),
+                active_strategy_reason=active_entry_reason,
+                active_strategy_score=active_context.get("score"),
+                entry_signal_mode=active_entry_details.get("entry_signal_mode"),
                 result=result_payload or result
             )
 
@@ -3161,7 +3837,7 @@ def run_cycle():
             confidence=confidence,
             action_recommendation=action_recommendation,
             side="buy",
-            reason="mean_reversion_target_limit_buy",
+            reason=decision_reason,
             trade_value=trade_value,
             base_balance=base_balance,
             quote_balance=quote_balance,
@@ -3172,7 +3848,29 @@ def run_cycle():
             target_profit_pct=target_profit_pct,
             round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
             gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
+            active_strategy_status=active_context.get("status"),
+            active_strategy=active_context.get("active_strategy"),
+            active_strategy_reason=active_entry_reason,
+            active_strategy_score=active_context.get("score"),
+            entry_signal_mode=active_entry_details.get("entry_signal_mode"),
             dry_run=DRY_RUN
+        )
+        return
+
+    if not allow_market_buy:
+        skip_cycle(
+            "market_buy_disabled_for_active_strategy",
+            cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            active_strategy_status=active_context.get("status"),
+            active_strategy=active_context.get("active_strategy"),
+            active_strategy_reason=active_entry_reason,
+            active_strategy_score=active_context.get("score"),
+            entry_signal_mode=active_entry_details.get("entry_signal_mode")
         )
         return
 
@@ -3209,7 +3907,13 @@ def run_cycle():
         round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
         gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
         risk_multiplier=risk_multiplier,
-        effective_risk_multiplier=effective_multiplier
+        effective_risk_multiplier=effective_multiplier,
+        structure_bias=structure.get("structure_bias"),
+        support_price=structure.get("support_price"),
+        resistance_price=structure.get("resistance_price"),
+        support_distance_pct=structure.get("support_distance_pct"),
+        upside_to_resistance_pct=structure.get("upside_to_resistance_pct"),
+        risk_reward_to_structure=structure.get("risk_reward_to_structure")
     )
     append_decision_csv(
         "trade_decision",
@@ -3233,7 +3937,13 @@ def run_cycle():
         round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
         gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
         risk_multiplier=risk_multiplier,
-        effective_risk_multiplier=effective_multiplier
+        effective_risk_multiplier=effective_multiplier,
+        structure_bias=structure.get("structure_bias"),
+        support_price=structure.get("support_price"),
+        resistance_price=structure.get("resistance_price"),
+        support_distance_pct=structure.get("support_distance_pct"),
+        upside_to_resistance_pct=structure.get("upside_to_resistance_pct"),
+        risk_reward_to_structure=structure.get("risk_reward_to_structure")
     )
 
     result = place_market_buy(volume, cycle_id)
@@ -3264,6 +3974,12 @@ def run_cycle():
         gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
         risk_multiplier=risk_multiplier,
         effective_risk_multiplier=effective_multiplier,
+        structure_bias=structure.get("structure_bias"),
+        support_price=structure.get("support_price"),
+        resistance_price=structure.get("resistance_price"),
+        support_distance_pct=structure.get("support_distance_pct"),
+        upside_to_resistance_pct=structure.get("upside_to_resistance_pct"),
+        risk_reward_to_structure=structure.get("risk_reward_to_structure"),
         **fill,
         result=result_payload or result
     )
@@ -3368,6 +4084,19 @@ def main():
         mean_reversion_buy_threshold=MEAN_REVERSION_BUY_THRESHOLD,
         mean_reversion_range_position_max=MEAN_REVERSION_RANGE_POSITION_MAX,
         mean_reversion_flow_pressure_min=MEAN_REVERSION_FLOW_PRESSURE_MIN,
+        use_market_structure_filter=USE_MARKET_STRUCTURE_FILTER,
+        market_structure_fail_closed=MARKET_STRUCTURE_FAIL_CLOSED,
+        structure_resistance_buffer_pct=STRUCTURE_RESISTANCE_BUFFER_PCT,
+        structure_min_risk_reward=STRUCTURE_MIN_RISK_REWARD,
+        structure_max_range_position=STRUCTURE_MAX_RANGE_POSITION,
+        structure_require_support_proximity=STRUCTURE_REQUIRE_SUPPORT_PROXIMITY,
+        structure_max_support_distance_pct=STRUCTURE_MAX_SUPPORT_DISTANCE_PCT,
+        structure_support_range_position_max=STRUCTURE_SUPPORT_RANGE_POSITION_MAX,
+        active_strategy_enabled=ACTIVE_STRATEGY_ENABLED,
+        active_strategy_fail_closed=ACTIVE_STRATEGY_FAIL_CLOSED,
+        active_strategy_max_age_minutes=ACTIVE_STRATEGY_MAX_AGE_MINUTES,
+        active_strategy_url=ACTIVE_STRATEGY_URL,
+        active_strategy_file=ACTIVE_STRATEGY_FILE,
         use_backtest_health_gate=USE_BACKTEST_HEALTH_GATE,
         backtest_fail_closed=BACKTEST_FAIL_CLOSED,
         backtest_min_trades=BACKTEST_MIN_TRADES,
