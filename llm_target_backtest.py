@@ -426,6 +426,70 @@ def signal_payload_with_target_fallback(snapshot):
     return signal, True
 
 
+RISK_CONTEXT_NUMERIC_FIELDS = {
+    "market_risk_score": "sentiment_market_risk_score",
+    "buy_aggression_score": "sentiment_buy_aggression_score",
+    "downside_risk_score": "sentiment_downside_risk_score",
+    "bottoming_score": "sentiment_bottoming_score",
+    "rebound_score": "sentiment_rebound_score",
+    "breakout_score": "sentiment_breakout_score",
+    "position_size_multiplier": "sentiment_position_size_multiplier",
+    "grid_aggression_multiplier": "sentiment_grid_aggression_multiplier",
+    "target_profit_multiplier": "sentiment_target_profit_multiplier",
+    "entry_discount_multiplier": "sentiment_entry_discount_multiplier",
+}
+
+
+def risk_context_payload(signal):
+    risk_context = signal.get("risk_context")
+    return risk_context if isinstance(risk_context, dict) else {}
+
+
+def sentiment_risk_event_fields(signal):
+    risk_context = risk_context_payload(signal)
+    flags = risk_context.get("hard_safety_flags")
+    if not isinstance(flags, list):
+        flags = []
+    fields = {
+        "sentiment_risk_posture": risk_context.get("recommended_posture"),
+        "sentiment_hard_safety_flags": flags,
+    }
+    for source_key, output_key in RISK_CONTEXT_NUMERIC_FIELDS.items():
+        fields[output_key] = numeric_or_none(risk_context.get(source_key))
+    return fields
+
+
+def apply_sentiment_risk_summary(summary, events):
+    summary["sentiment_risk_sample_count"] = len(events)
+    posture_counts = {}
+    hard_safety_flag_counts = {}
+    numeric_totals = {field: 0.0 for field in RISK_CONTEXT_NUMERIC_FIELDS.values()}
+    numeric_counts = {field: 0 for field in RISK_CONTEXT_NUMERIC_FIELDS.values()}
+
+    for event in events:
+        posture = event.get("sentiment_risk_posture")
+        if posture:
+            posture_counts[posture] = posture_counts.get(posture, 0) + 1
+        for flag in event.get("sentiment_hard_safety_flags") or []:
+            hard_safety_flag_counts[flag] = hard_safety_flag_counts.get(flag, 0) + 1
+        for field in RISK_CONTEXT_NUMERIC_FIELDS.values():
+            value = numeric_or_none(event.get(field))
+            if value is None:
+                continue
+            numeric_totals[field] += value
+            numeric_counts[field] += 1
+
+    summary["sentiment_risk_posture_counts"] = posture_counts
+    summary["sentiment_hard_safety_flag_counts"] = hard_safety_flag_counts
+    for field in RISK_CONTEXT_NUMERIC_FIELDS.values():
+        summary[f"avg_{field}"] = (
+            round(numeric_totals[field] / numeric_counts[field], 6)
+            if numeric_counts[field] else
+            None
+        )
+    return summary
+
+
 def snapshot_timestamp(snapshot):
     return parse_iso8601(snapshot.get("captured_at"))
 
@@ -765,8 +829,165 @@ def compute_trade_stats(entry_price, exit_price, high_water, low_water, fee_bps=
     return gross_return_pct, net_return_pct, max_runup_pct, max_drawdown_pct
 
 
-def empty_summary():
+def simulate_candidate_markout(
+    snapshots,
+    start_index,
+    *,
+    strategy_name,
+    decision_time,
+    signal_timestamp,
+    decision_price,
+    buy_target,
+    profit_target_pct,
+    fee_bps,
+    signal,
+    policy,
+):
+    risk_fields = sentiment_risk_event_fields(signal)
+    entry_price = buy_target["buy_price"]
+    fill_deadline = decision_time + timedelta(hours=BACKTEST_ENTRY_WAIT_HOURS)
+    filled_at = None
+    mark_time = decision_time
+    mark_price = decision_price
+    high_water = entry_price
+    low_water = entry_price
+
+    for future in snapshots[start_index + 1:]:
+        timestamp = snapshot_timestamp(future)
+        price = extract_price(future)
+        if timestamp is None:
+            continue
+        if timestamp > fill_deadline:
+            return {
+                "strategy": strategy_name,
+                "decision_time": decision_time.isoformat(),
+                "signal_timestamp": signal_timestamp,
+                "decision_price": decision_price,
+                "buy_target": buy_target,
+                "outcome": "not_filled",
+                "fill_deadline": fill_deadline.isoformat(),
+                "fee_bps": round(fee_bps, 6),
+                "policy": policy,
+                **risk_fields,
+            }
+        if price is not None and price <= entry_price:
+            filled_at = timestamp
+            mark_time = timestamp
+            mark_price = price
+            break
+
+    if filled_at is None:
+        return {
+            "strategy": strategy_name,
+            "decision_time": decision_time.isoformat(),
+            "signal_timestamp": signal_timestamp,
+            "decision_price": decision_price,
+            "buy_target": buy_target,
+            "outcome": "not_filled",
+            "fill_deadline": fill_deadline.isoformat(),
+            "fee_bps": round(fee_bps, 6),
+            "policy": policy,
+            **risk_fields,
+        }
+
+    exit_deadline = filled_at + timedelta(hours=BACKTEST_MAX_HOLD_HOURS)
+    tp_price, sl_price = exit_prices(entry_price, profit_target_pct, fee_bps)
+
+    for future in snapshots[start_index + 1:]:
+        timestamp = snapshot_timestamp(future)
+        price = extract_price(future)
+        if timestamp is None or timestamp < filled_at or price is None:
+            continue
+
+        mark_time = timestamp
+        mark_price = price
+        high_water = max(high_water, price)
+        low_water = min(low_water, price)
+
+        exit_reason = None
+        exit_price = None
+        if price >= tp_price:
+            exit_reason = "take_profit"
+            exit_price = tp_price
+        elif price <= sl_price:
+            exit_reason = "stop_loss"
+            exit_price = sl_price
+        elif timestamp >= exit_deadline:
+            exit_reason = "timeout"
+            exit_price = price
+
+        if exit_reason is not None:
+            hold_minutes = (timestamp - filled_at).total_seconds() / 60.0
+            gross_return_pct, net_return_pct, max_runup_pct, max_drawdown_pct = (
+                compute_trade_stats(
+                    entry_price,
+                    exit_price,
+                    high_water,
+                    low_water,
+                    fee_bps,
+                )
+            )
+            return {
+                "strategy": strategy_name,
+                "decision_time": decision_time.isoformat(),
+                "signal_timestamp": signal_timestamp,
+                "decision_price": decision_price,
+                "buy_target": buy_target,
+                "outcome": exit_reason,
+                "filled_at": filled_at.isoformat(),
+                "entry_price": entry_price,
+                "exit_time": timestamp.isoformat(),
+                "exit_price": round(exit_price, 2),
+                "fee_bps": round(fee_bps, 6),
+                "gross_return_pct": round(gross_return_pct, 6),
+                "net_return_pct": round(net_return_pct, 6),
+                "max_runup_pct": round(max_runup_pct, 6),
+                "max_drawdown_pct": round(max_drawdown_pct, 6),
+                "hold_minutes": round(hold_minutes, 2),
+                "execution_signal": numeric_or_none(signal.get("execution_signal")),
+                "confidence": numeric_or_none(signal.get("confidence")),
+                "contributor_count": signal.get("contributor_count"),
+                "policy": policy,
+                **risk_fields,
+            }
+
+    gross_return_pct, net_return_pct, max_runup_pct, max_drawdown_pct = (
+        compute_trade_stats(
+            entry_price,
+            mark_price,
+            high_water,
+            low_water,
+            fee_bps,
+        )
+    )
+    hold_minutes = (mark_time - filled_at).total_seconds() / 60.0
     return {
+        "strategy": strategy_name,
+        "decision_time": decision_time.isoformat(),
+        "signal_timestamp": signal_timestamp,
+        "decision_price": decision_price,
+        "buy_target": buy_target,
+        "outcome": "open",
+        "filled_at": filled_at.isoformat(),
+        "entry_price": entry_price,
+        "mark_time": mark_time.isoformat(),
+        "mark_price": round(mark_price, 2) if mark_price is not None else None,
+        "fee_bps": round(fee_bps, 6),
+        "gross_return_pct": round(gross_return_pct, 6),
+        "unrealized_net_return_pct": round(net_return_pct, 6),
+        "max_runup_pct": round(max_runup_pct, 6),
+        "max_drawdown_pct": round(max_drawdown_pct, 6),
+        "hold_minutes": round(hold_minutes, 2),
+        "execution_signal": numeric_or_none(signal.get("execution_signal")),
+        "confidence": numeric_or_none(signal.get("confidence")),
+        "contributor_count": signal.get("contributor_count"),
+        "policy": policy,
+        **risk_fields,
+    }
+
+
+def empty_summary():
+    summary = {
         "trades": 0,
         "win_rate": None,
         "avg_net_return_pct": None,
@@ -793,6 +1014,19 @@ def empty_summary():
         "shadow_target_quality_unavailable": 0,
         "sentiment_saved_quality_candidates": 0,
         "sentiment_saved_quality_candidate_rate": None,
+        "sentiment_blocked_quality_markout_count": 0,
+        "sentiment_blocked_quality_filled": 0,
+        "sentiment_blocked_quality_not_filled": 0,
+        "sentiment_blocked_quality_take_profit": 0,
+        "sentiment_blocked_quality_stop_loss": 0,
+        "sentiment_blocked_quality_timeout": 0,
+        "sentiment_blocked_quality_open": 0,
+        "sentiment_blocked_quality_win_rate": None,
+        "sentiment_blocked_quality_total_net_return_pct": None,
+        "sentiment_blocked_quality_marked_to_market_net_return_pct": None,
+        "sentiment_risk_sample_count": 0,
+        "sentiment_risk_posture_counts": {},
+        "sentiment_hard_safety_flag_counts": {},
         "signal_target_snapshots": 0,
         "quality_fallback_target_snapshots": 0,
         "missing_signal": 0,
@@ -803,6 +1037,80 @@ def empty_summary():
         "fill_rate_after_approval": None,
         "terminal_rate_after_approval": None
     }
+    for output_key in RISK_CONTEXT_NUMERIC_FIELDS.values():
+        summary[f"avg_{output_key}"] = None
+    return summary
+
+
+def apply_blocked_quality_markout_summary(summary, markouts):
+    summary["sentiment_blocked_quality_markout_count"] = len(markouts)
+    summary["sentiment_blocked_quality_filled"] = sum(
+        1 for markout in markouts
+        if markout.get("outcome") not in (None, "not_filled")
+    )
+    summary["sentiment_blocked_quality_not_filled"] = sum(
+        1 for markout in markouts
+        if markout.get("outcome") == "not_filled"
+    )
+    summary["sentiment_blocked_quality_take_profit"] = sum(
+        1 for markout in markouts
+        if markout.get("outcome") == "take_profit"
+    )
+    summary["sentiment_blocked_quality_stop_loss"] = sum(
+        1 for markout in markouts
+        if markout.get("outcome") == "stop_loss"
+    )
+    summary["sentiment_blocked_quality_timeout"] = sum(
+        1 for markout in markouts
+        if markout.get("outcome") == "timeout"
+    )
+    summary["sentiment_blocked_quality_open"] = sum(
+        1 for markout in markouts
+        if markout.get("outcome") == "open"
+    )
+
+    terminal = [
+        markout for markout in markouts
+        if markout.get("net_return_pct") is not None
+    ]
+    open_markouts = [
+        markout for markout in markouts
+        if markout.get("unrealized_net_return_pct") is not None
+    ]
+    if terminal:
+        wins = [
+            markout for markout in terminal
+            if markout.get("net_return_pct", 0.0) > 0.0
+        ]
+        summary["sentiment_blocked_quality_win_rate"] = round(
+            len(wins) / len(terminal),
+            4
+        )
+        summary["sentiment_blocked_quality_total_net_return_pct"] = round(
+            sum(markout["net_return_pct"] for markout in terminal),
+            6
+        )
+    if terminal or open_markouts:
+        total_net = sum(markout.get("net_return_pct") or 0.0 for markout in terminal)
+        open_net = sum(
+            markout.get("unrealized_net_return_pct") or 0.0
+            for markout in open_markouts
+        )
+        summary["sentiment_blocked_quality_marked_to_market_net_return_pct"] = round(
+            total_net + open_net,
+            6
+        )
+    return summary
+
+
+def sentiment_risk_fields_from_record(record):
+    fields = {
+        "sentiment_risk_posture": record.get("sentiment_risk_posture"),
+        "sentiment_hard_safety_flags": record.get("sentiment_hard_safety_flags") or [],
+    }
+    for output_key in RISK_CONTEXT_NUMERIC_FIELDS.values():
+        fields[output_key] = record.get(output_key)
+    return fields
 
 
 def finalize_open_position(position, last_price, last_timestamp):
@@ -846,6 +1154,7 @@ def finalize_open_position(position, last_price, last_timestamp):
         "confidence": position["confidence"],
         "contributor_count": position["contributor_count"],
         "policy": position["policy"],
+        **sentiment_risk_fields_from_record(position),
     }
 
 
@@ -991,6 +1300,8 @@ def target_diagnostics(snapshots):
 def simulate_strategy(strategy_name, snapshots):
     summary = empty_summary()
     recent_decisions = []
+    blocked_quality_markouts = []
+    sentiment_risk_events = []
     trades = []
     position = None
     pending_entry = None
@@ -999,7 +1310,7 @@ def simulate_strategy(strategy_name, snapshots):
     last_price = None
     last_timestamp = None
 
-    for snapshot in snapshots:
+    for index, snapshot in enumerate(snapshots):
         timestamp = snapshot_timestamp(snapshot)
         price = extract_price(snapshot)
         signal, target_fallback_used = signal_payload_with_target_fallback(snapshot)
@@ -1089,6 +1400,7 @@ def simulate_strategy(strategy_name, snapshots):
                     "confidence": position["confidence"],
                     "contributor_count": position["contributor_count"],
                     "policy": position["policy"],
+                    **sentiment_risk_fields_from_record(position),
                 }
                 trades.append(trade)
                 last_sell_price = exit_price
@@ -1129,6 +1441,8 @@ def simulate_strategy(strategy_name, snapshots):
             continue
 
         summary["raw_candidates"] += 1
+        risk_fields = sentiment_risk_event_fields(signal)
+        sentiment_risk_events.append(risk_fields)
         decision = quality_decision(
             snapshot,
             candidate,
@@ -1150,6 +1464,24 @@ def simulate_strategy(strategy_name, snapshots):
                     )
                     if shadow_quality["allowed"]:
                         summary["shadow_target_quality_approved"] += 1
+                        markout = simulate_candidate_markout(
+                            snapshots,
+                            index,
+                            strategy_name=strategy_name,
+                            decision_time=timestamp,
+                            signal_timestamp=signal.get("processed_at"),
+                            decision_price=price,
+                            buy_target=candidate,
+                            profit_target_pct=(
+                                shadow_quality["profit_target_pct"]
+                                if shadow_quality["profit_target_pct"] is not None else
+                                float(strategy_value(snapshot, "target_profit_pct", 0.005))
+                            ),
+                            fee_bps=effective_fee_bps(snapshot),
+                            signal=signal,
+                            policy=shadow_quality["policy"],
+                        )
+                        blocked_quality_markouts.append(markout)
                     elif shadow_quality["reason"].startswith("target_quality_unavailable"):
                         summary["shadow_target_quality_unavailable"] += 1
                     else:
@@ -1163,7 +1495,8 @@ def simulate_strategy(strategy_name, snapshots):
                 "signal_timestamp": signal.get("processed_at"),
                 "decision_price": price,
                 "buy_target": candidate,
-                "policy": policy
+                "policy": policy,
+                **risk_fields,
             }
             if shadow_quality is not None:
                 decision_record["shadow_target_quality"] = {
@@ -1201,6 +1534,7 @@ def simulate_strategy(strategy_name, snapshots):
             "execution_signal": numeric_or_none(signal.get("execution_signal")),
             "confidence": numeric_or_none(signal.get("confidence")),
             "contributor_count": signal.get("contributor_count"),
+            **risk_fields,
         }
         recent_decisions.append({
             "strategy": strategy_name,
@@ -1208,19 +1542,24 @@ def simulate_strategy(strategy_name, snapshots):
             "signal_timestamp": signal.get("processed_at"),
             "decision_price": price,
             "buy_target": candidate,
-            "policy": policy
+            "policy": policy,
+            **risk_fields,
         })
 
     recent_decisions = recent_decisions[-BACKTEST_RECENT_LIMIT:]
     recent_trades = trades[-BACKTEST_RECENT_LIMIT:]
+    recent_blocked_quality_markouts = blocked_quality_markouts[-BACKTEST_RECENT_LIMIT:]
     open_positions = []
     open_position = finalize_open_position(position, last_price, last_timestamp)
     if open_position is not None:
         open_positions.append(open_position)
+    apply_blocked_quality_markout_summary(summary, blocked_quality_markouts)
+    apply_sentiment_risk_summary(summary, sentiment_risk_events)
     return {
         "summary": finalize_summary(summary, trades, open_positions),
         "recent_decisions": recent_decisions,
         "recent_trades": recent_trades,
+        "recent_sentiment_blocked_quality_markouts": recent_blocked_quality_markouts,
         "open_positions": open_positions
     }
 
@@ -1285,6 +1624,43 @@ def top_summary(strategies):
                 "sentiment_saved_quality_candidate_rate": payload["summary"].get(
                     "sentiment_saved_quality_candidate_rate"
                 ),
+                "sentiment_blocked_quality_markout_count": payload["summary"].get(
+                    "sentiment_blocked_quality_markout_count"
+                ),
+                "sentiment_blocked_quality_filled": payload["summary"].get(
+                    "sentiment_blocked_quality_filled"
+                ),
+                "sentiment_blocked_quality_not_filled": payload["summary"].get(
+                    "sentiment_blocked_quality_not_filled"
+                ),
+                "sentiment_blocked_quality_take_profit": payload["summary"].get(
+                    "sentiment_blocked_quality_take_profit"
+                ),
+                "sentiment_blocked_quality_stop_loss": payload["summary"].get(
+                    "sentiment_blocked_quality_stop_loss"
+                ),
+                "sentiment_blocked_quality_open": payload["summary"].get(
+                    "sentiment_blocked_quality_open"
+                ),
+                "sentiment_blocked_quality_total_net_return_pct": payload["summary"].get(
+                    "sentiment_blocked_quality_total_net_return_pct"
+                ),
+                "sentiment_blocked_quality_marked_to_market_net_return_pct": payload["summary"].get(
+                    "sentiment_blocked_quality_marked_to_market_net_return_pct"
+                ),
+                "sentiment_risk_sample_count": payload["summary"].get(
+                    "sentiment_risk_sample_count"
+                ),
+                "sentiment_risk_posture_counts": payload["summary"].get(
+                    "sentiment_risk_posture_counts"
+                ),
+                "sentiment_hard_safety_flag_counts": payload["summary"].get(
+                    "sentiment_hard_safety_flag_counts"
+                ),
+                **{
+                    f"avg_{field}": payload["summary"].get(f"avg_{field}")
+                    for field in RISK_CONTEXT_NUMERIC_FIELDS.values()
+                },
                 "no_target": payload["summary"].get("no_target"),
                 "not_filled": payload["summary"].get("not_filled"),
                 "signal_target_snapshots": payload["summary"].get(
@@ -1433,6 +1809,29 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
             "shadow_target_quality_rejected": summary.get("shadow_target_quality_rejected"),
             "sentiment_saved_quality_candidates": summary.get("sentiment_saved_quality_candidates"),
             "sentiment_saved_quality_candidate_rate": summary.get("sentiment_saved_quality_candidate_rate"),
+            "sentiment_blocked_quality_markout_count": summary.get("sentiment_blocked_quality_markout_count"),
+            "sentiment_blocked_quality_filled": summary.get("sentiment_blocked_quality_filled"),
+            "sentiment_blocked_quality_not_filled": summary.get("sentiment_blocked_quality_not_filled"),
+            "sentiment_blocked_quality_take_profit": summary.get("sentiment_blocked_quality_take_profit"),
+            "sentiment_blocked_quality_stop_loss": summary.get("sentiment_blocked_quality_stop_loss"),
+            "sentiment_blocked_quality_timeout": summary.get("sentiment_blocked_quality_timeout"),
+            "sentiment_blocked_quality_open": summary.get("sentiment_blocked_quality_open"),
+            "sentiment_blocked_quality_win_rate": summary.get("sentiment_blocked_quality_win_rate"),
+            "sentiment_blocked_quality_total_net_return_pct": summary.get("sentiment_blocked_quality_total_net_return_pct"),
+            "sentiment_blocked_quality_marked_to_market_net_return_pct": summary.get("sentiment_blocked_quality_marked_to_market_net_return_pct"),
+            "sentiment_risk_sample_count": summary.get("sentiment_risk_sample_count"),
+            "sentiment_risk_posture_counts": json.dumps(
+                summary.get("sentiment_risk_posture_counts") or {},
+                sort_keys=True
+            ),
+            "sentiment_hard_safety_flag_counts": json.dumps(
+                summary.get("sentiment_hard_safety_flag_counts") or {},
+                sort_keys=True
+            ),
+            **{
+                f"avg_{field}": summary.get(f"avg_{field}")
+                for field in RISK_CONTEXT_NUMERIC_FIELDS.values()
+            },
             "no_target": summary.get("no_target"),
             "not_filled": summary.get("not_filled"),
             "fill_rate_after_approval": summary.get("fill_rate_after_approval"),
@@ -1452,6 +1851,9 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
             "summary": summary,
             "recent_decisions": result.get("recent_decisions", []),
             "recent_trades": result.get("recent_trades", []),
+            "recent_sentiment_blocked_quality_markouts": result.get(
+                "recent_sentiment_blocked_quality_markouts", []
+            ),
             "open_positions": result.get("open_positions", []),
         })
 
@@ -1506,6 +1908,20 @@ def write_strategy_comparison_csv(comparison, output_path, ranked=False):
         "shadow_target_quality_rejected",
         "sentiment_saved_quality_candidates",
         "sentiment_saved_quality_candidate_rate",
+        "sentiment_blocked_quality_markout_count",
+        "sentiment_blocked_quality_filled",
+        "sentiment_blocked_quality_not_filled",
+        "sentiment_blocked_quality_take_profit",
+        "sentiment_blocked_quality_stop_loss",
+        "sentiment_blocked_quality_timeout",
+        "sentiment_blocked_quality_open",
+        "sentiment_blocked_quality_win_rate",
+        "sentiment_blocked_quality_total_net_return_pct",
+        "sentiment_blocked_quality_marked_to_market_net_return_pct",
+        "sentiment_risk_sample_count",
+        "sentiment_risk_posture_counts",
+        "sentiment_hard_safety_flag_counts",
+        *[f"avg_{field}" for field in RISK_CONTEXT_NUMERIC_FIELDS.values()],
         "no_target",
         "not_filled",
         "target_profit_pct",

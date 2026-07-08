@@ -14,6 +14,7 @@ def make_snapshot(
     target_prices=None,
     quality_targets=None,
     strategy_overrides=None,
+    risk_context=None,
 ):
     strategy_payload = {
         "target_profit_pct": 0.005,
@@ -36,7 +37,10 @@ def make_snapshot(
         if target_prices is not None else
         [{"buy_price": 100.0, "sell_pct": 0.5}]
     )
-    quality = quality_targets or [{
+    quality = (
+        quality_targets
+        if quality_targets is not None else
+        [{
         "buy_price": 100.0,
         "matched_sample_count": 30,
         "fill_probability": {
@@ -45,7 +49,8 @@ def make_snapshot(
         "best_profit_target_pct": 0.7,
         "best_expected_value_pct_per_signal": 0.08,
         "recommendation": "buy_allowed",
-    }]
+        }]
+    )
 
     return {
         "captured_at": captured_at,
@@ -60,6 +65,7 @@ def make_snapshot(
                 "confidence": 0.6,
                 "contributor_count": 12,
                 "target_prices": targets,
+                "risk_context": risk_context or {},
             },
         },
         "target_quality": {
@@ -245,8 +251,100 @@ class LlmTargetBacktestTests(unittest.TestCase):
         self.assertEqual(summary["shadow_target_quality_rejected"], 0)
         self.assertEqual(summary["sentiment_saved_quality_candidates"], 1)
         self.assertEqual(summary["sentiment_saved_quality_candidate_rate"], 1.0)
+        self.assertEqual(summary["sentiment_blocked_quality_markout_count"], 1)
+        self.assertEqual(summary["sentiment_blocked_quality_not_filled"], 1)
         decision = result["recent_decisions"][0]
         self.assertTrue(decision["shadow_target_quality"]["allowed"])
+
+    def test_sentiment_blocked_quality_markout_records_would_have_stopped(self):
+        snapshots = [
+            make_snapshot(
+                "2026-05-30T12:00:00+00:00",
+                101.0,
+                action_recommendation="contrarian_watch",
+            ),
+            make_snapshot(
+                "2026-05-30T12:15:00+00:00",
+                100.0,
+                action_recommendation="contrarian_watch",
+                target_prices=[],
+                quality_targets=[],
+            ),
+            make_snapshot(
+                "2026-05-30T12:30:00+00:00",
+                99.5,
+                action_recommendation="contrarian_watch",
+                target_prices=[],
+                quality_targets=[],
+            ),
+        ]
+
+        result = backtest.simulate_strategy("with_target_quality", snapshots)
+
+        summary = result["summary"]
+        self.assertEqual(summary["sentiment_saved_quality_candidates"], 1)
+        self.assertEqual(summary["sentiment_blocked_quality_markout_count"], 1)
+        self.assertEqual(summary["sentiment_blocked_quality_filled"], 1)
+        self.assertEqual(summary["sentiment_blocked_quality_stop_loss"], 1)
+        self.assertEqual(summary["sentiment_blocked_quality_take_profit"], 0)
+        self.assertEqual(summary["sentiment_blocked_quality_win_rate"], 0.0)
+        self.assertAlmostEqual(
+            summary["sentiment_blocked_quality_total_net_return_pct"],
+            -0.82,
+            places=2,
+        )
+        markout = result["recent_sentiment_blocked_quality_markouts"][0]
+        self.assertEqual(markout["outcome"], "stop_loss")
+        self.assertEqual(markout["entry_price"], 100.0)
+
+    def test_backtest_logs_sentiment_risk_context_fields(self):
+        risk_context = {
+            "recommended_posture": "entry_allowed",
+            "market_risk_score": 0.2763,
+            "buy_aggression_score": 0.4872,
+            "downside_risk_score": 0.35,
+            "bottoming_score": 0.42,
+            "rebound_score": 0.18,
+            "breakout_score": 0.08,
+            "position_size_multiplier": 0.3525,
+            "grid_aggression_multiplier": 0.7106,
+            "target_profit_multiplier": 0.9447,
+            "entry_discount_multiplier": 1.0312,
+            "hard_safety_flags": ["test_flag"],
+        }
+        snapshots = [
+            make_snapshot(
+                "2026-05-30T12:00:00+00:00",
+                101.0,
+                risk_context=risk_context,
+            ),
+            make_snapshot("2026-05-30T12:30:00+00:00", 100.0),
+            make_snapshot("2026-05-30T13:00:00+00:00", 101.1),
+        ]
+
+        result = backtest.simulate_strategy("with_target_quality", snapshots)
+
+        summary = result["summary"]
+        decision = result["recent_decisions"][0]
+        trade = result["recent_trades"][0]
+        self.assertEqual(summary["sentiment_risk_sample_count"], 1)
+        self.assertEqual(
+            summary["sentiment_risk_posture_counts"],
+            {"entry_allowed": 1},
+        )
+        self.assertEqual(
+            summary["sentiment_hard_safety_flag_counts"],
+            {"test_flag": 1},
+        )
+        self.assertAlmostEqual(summary["avg_sentiment_market_risk_score"], 0.2763)
+        self.assertAlmostEqual(
+            summary["avg_sentiment_position_size_multiplier"],
+            0.3525,
+        )
+        self.assertEqual(decision["sentiment_risk_posture"], "entry_allowed")
+        self.assertEqual(decision["sentiment_hard_safety_flags"], ["test_flag"])
+        self.assertAlmostEqual(decision["sentiment_buy_aggression_score"], 0.4872)
+        self.assertAlmostEqual(trade["sentiment_target_profit_multiplier"], 0.9447)
 
     def test_target_quality_only_ignores_sentiment_but_uses_quality(self):
         snapshots = [
@@ -495,6 +593,13 @@ class LlmTargetBacktestTests(unittest.TestCase):
             self.assertIn("production_ineligible_reason", header)
             self.assertIn("sentiment_saved_quality_candidates", header)
             self.assertIn("sentiment_saved_quality_candidate_rate", header)
+            self.assertIn("sentiment_blocked_quality_stop_loss", header)
+            self.assertIn(
+                "sentiment_blocked_quality_marked_to_market_net_return_pct",
+                header
+            )
+            self.assertIn("sentiment_risk_sample_count", header)
+            self.assertIn("avg_sentiment_market_risk_score", header)
 
     def test_best_result_mentions_negative_open_exposure(self):
         strategies = {
