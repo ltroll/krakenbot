@@ -461,6 +461,9 @@ def sentiment_risk_event_fields(signal):
 
 def apply_sentiment_risk_summary(summary, events):
     summary["sentiment_risk_sample_count"] = len(events)
+    context_present_count = 0
+    numeric_sample_count = 0
+    posture_present_count = 0
     posture_counts = {}
     hard_safety_flag_counts = {}
     numeric_totals = {field: 0.0 for field in RISK_CONTEXT_NUMERIC_FIELDS.values()}
@@ -469,16 +472,38 @@ def apply_sentiment_risk_summary(summary, events):
     for event in events:
         posture = event.get("sentiment_risk_posture")
         if posture:
+            posture_present_count += 1
             posture_counts[posture] = posture_counts.get(posture, 0) + 1
-        for flag in event.get("sentiment_hard_safety_flags") or []:
+        flags = event.get("sentiment_hard_safety_flags") or []
+        for flag in flags:
             hard_safety_flag_counts[flag] = hard_safety_flag_counts.get(flag, 0) + 1
+        event_numeric_count = 0
         for field in RISK_CONTEXT_NUMERIC_FIELDS.values():
             value = numeric_or_none(event.get(field))
             if value is None:
                 continue
             numeric_totals[field] += value
             numeric_counts[field] += 1
+            event_numeric_count += 1
+        if event_numeric_count > 0:
+            numeric_sample_count += 1
+        if posture or flags or event_numeric_count > 0:
+            context_present_count += 1
 
+    summary["sentiment_risk_context_present_count"] = context_present_count
+    summary["sentiment_risk_context_missing_count"] = (
+        len(events) - context_present_count
+    )
+    summary["sentiment_risk_context_coverage_pct"] = (
+        round(context_present_count / len(events), 6)
+        if events else
+        None
+    )
+    summary["sentiment_risk_numeric_sample_count"] = numeric_sample_count
+    summary["sentiment_risk_posture_present_count"] = posture_present_count
+    summary["sentiment_risk_posture_missing_count"] = (
+        len(events) - posture_present_count
+    )
     summary["sentiment_risk_posture_counts"] = posture_counts
     summary["sentiment_hard_safety_flag_counts"] = hard_safety_flag_counts
     for field in RISK_CONTEXT_NUMERIC_FIELDS.values():
@@ -1025,6 +1050,12 @@ def empty_summary():
         "sentiment_blocked_quality_total_net_return_pct": None,
         "sentiment_blocked_quality_marked_to_market_net_return_pct": None,
         "sentiment_risk_sample_count": 0,
+        "sentiment_risk_context_present_count": 0,
+        "sentiment_risk_context_missing_count": 0,
+        "sentiment_risk_context_coverage_pct": None,
+        "sentiment_risk_numeric_sample_count": 0,
+        "sentiment_risk_posture_present_count": 0,
+        "sentiment_risk_posture_missing_count": 0,
         "sentiment_risk_posture_counts": {},
         "sentiment_hard_safety_flag_counts": {},
         "signal_target_snapshots": 0,
@@ -1651,6 +1682,24 @@ def top_summary(strategies):
                 "sentiment_risk_sample_count": payload["summary"].get(
                     "sentiment_risk_sample_count"
                 ),
+                "sentiment_risk_context_present_count": payload["summary"].get(
+                    "sentiment_risk_context_present_count"
+                ),
+                "sentiment_risk_context_missing_count": payload["summary"].get(
+                    "sentiment_risk_context_missing_count"
+                ),
+                "sentiment_risk_context_coverage_pct": payload["summary"].get(
+                    "sentiment_risk_context_coverage_pct"
+                ),
+                "sentiment_risk_numeric_sample_count": payload["summary"].get(
+                    "sentiment_risk_numeric_sample_count"
+                ),
+                "sentiment_risk_posture_present_count": payload["summary"].get(
+                    "sentiment_risk_posture_present_count"
+                ),
+                "sentiment_risk_posture_missing_count": payload["summary"].get(
+                    "sentiment_risk_posture_missing_count"
+                ),
                 "sentiment_risk_posture_counts": payload["summary"].get(
                     "sentiment_risk_posture_counts"
                 ),
@@ -1820,6 +1869,12 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
             "sentiment_blocked_quality_total_net_return_pct": summary.get("sentiment_blocked_quality_total_net_return_pct"),
             "sentiment_blocked_quality_marked_to_market_net_return_pct": summary.get("sentiment_blocked_quality_marked_to_market_net_return_pct"),
             "sentiment_risk_sample_count": summary.get("sentiment_risk_sample_count"),
+            "sentiment_risk_context_present_count": summary.get("sentiment_risk_context_present_count"),
+            "sentiment_risk_context_missing_count": summary.get("sentiment_risk_context_missing_count"),
+            "sentiment_risk_context_coverage_pct": summary.get("sentiment_risk_context_coverage_pct"),
+            "sentiment_risk_numeric_sample_count": summary.get("sentiment_risk_numeric_sample_count"),
+            "sentiment_risk_posture_present_count": summary.get("sentiment_risk_posture_present_count"),
+            "sentiment_risk_posture_missing_count": summary.get("sentiment_risk_posture_missing_count"),
             "sentiment_risk_posture_counts": json.dumps(
                 summary.get("sentiment_risk_posture_counts") or {},
                 sort_keys=True
@@ -1919,6 +1974,12 @@ def write_strategy_comparison_csv(comparison, output_path, ranked=False):
         "sentiment_blocked_quality_total_net_return_pct",
         "sentiment_blocked_quality_marked_to_market_net_return_pct",
         "sentiment_risk_sample_count",
+        "sentiment_risk_context_present_count",
+        "sentiment_risk_context_missing_count",
+        "sentiment_risk_context_coverage_pct",
+        "sentiment_risk_numeric_sample_count",
+        "sentiment_risk_posture_present_count",
+        "sentiment_risk_posture_missing_count",
         "sentiment_risk_posture_counts",
         "sentiment_hard_safety_flag_counts",
         *[f"avg_{field}" for field in RISK_CONTEXT_NUMERIC_FIELDS.values()],

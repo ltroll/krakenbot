@@ -328,6 +328,12 @@ class LlmTargetBacktestTests(unittest.TestCase):
         decision = result["recent_decisions"][0]
         trade = result["recent_trades"][0]
         self.assertEqual(summary["sentiment_risk_sample_count"], 1)
+        self.assertEqual(summary["sentiment_risk_context_present_count"], 1)
+        self.assertEqual(summary["sentiment_risk_context_missing_count"], 0)
+        self.assertEqual(summary["sentiment_risk_context_coverage_pct"], 1.0)
+        self.assertEqual(summary["sentiment_risk_numeric_sample_count"], 1)
+        self.assertEqual(summary["sentiment_risk_posture_present_count"], 1)
+        self.assertEqual(summary["sentiment_risk_posture_missing_count"], 0)
         self.assertEqual(
             summary["sentiment_risk_posture_counts"],
             {"entry_allowed": 1},
@@ -599,6 +605,10 @@ class LlmTargetBacktestTests(unittest.TestCase):
                 header
             )
             self.assertIn("sentiment_risk_sample_count", header)
+            self.assertIn("sentiment_risk_context_present_count", header)
+            self.assertIn("sentiment_risk_context_coverage_pct", header)
+            self.assertIn("sentiment_risk_numeric_sample_count", header)
+            self.assertIn("sentiment_risk_posture_missing_count", header)
             self.assertIn("avg_sentiment_market_risk_score", header)
 
     def test_best_result_mentions_negative_open_exposure(self):
