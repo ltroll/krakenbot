@@ -377,20 +377,25 @@ def summarize_sentiment_risk_events(events):
     samples = 0
 
     for event in events or []:
-        if not any(key in event for key in RISK_CONTEXT_NUMERIC_FIELDS.values()):
+        posture = event.get("sentiment_risk_posture")
+        flags = event.get("sentiment_hard_safety_flags")
+        if not isinstance(flags, list):
+            flags = []
+        has_numeric_value = any(
+            safe_float(event.get(key)) is not None
+            for key in RISK_CONTEXT_NUMERIC_FIELDS.values()
+        )
+        has_risk_value = bool(posture) or bool(flags) or has_numeric_value
+        if not has_risk_value:
             continue
         samples += 1
-        posture = event.get("sentiment_risk_posture") or "unknown"
-        posture_counts[posture] += 1
+        posture_counts[posture or "unknown"] += 1
         for output_key in RISK_CONTEXT_NUMERIC_FIELDS.values():
             value = safe_float(event.get(output_key))
             if value is None:
                 continue
             numeric_totals[output_key] += value
             numeric_counts[output_key] += 1
-        flags = event.get("sentiment_hard_safety_flags")
-        if not isinstance(flags, list):
-            flags = []
         for flag in flags:
             hard_safety_flag_counts[str(flag)] += 1
 

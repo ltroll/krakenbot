@@ -268,6 +268,22 @@ class RangeGridBacktestTests(unittest.TestCase):
             "entry_allowed",
         )
 
+    def test_replay_does_not_count_missing_risk_context_as_sample(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                100.0,
+                strategy_modes=["llm_target"],
+            )
+        ]
+
+        result = backtest.replay_from_snapshots(snapshots)
+        risk_summary = result["summary"]["approved_sentiment_risk"]
+
+        self.assertEqual(risk_summary["sentiment_risk_sample_count"], 0)
+        self.assertEqual(risk_summary["sentiment_risk_posture_counts"], {})
+        self.assertIsNone(risk_summary["avg_sentiment_market_risk_score"])
+
     def test_approved_event_profit_target_pct_uses_source_and_regime_policy(self):
         snapshot = make_snapshot(
             "2026-06-13T12:00:00+00:00",
