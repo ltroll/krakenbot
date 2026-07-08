@@ -1959,7 +1959,40 @@ def synthetic_range_sentiment_payload(reason, price):
         "processed_at": datetime.now(timezone.utc).isoformat(),
         "price_regime": {},
         "trend_snapshot": {},
-        "kraken_flow": {}
+        "kraken_flow": {},
+        "risk_context": {},
+    }
+
+
+def sentiment_risk_log_fields(risk_context):
+    if not isinstance(risk_context, dict):
+        risk_context = {}
+
+    flags = risk_context.get("hard_safety_flags")
+    if not isinstance(flags, list):
+        flags = []
+
+    return {
+        "sentiment_risk_posture": risk_context.get("recommended_posture"),
+        "sentiment_market_risk_score": risk_context.get("market_risk_score"),
+        "sentiment_buy_aggression_score": risk_context.get("buy_aggression_score"),
+        "sentiment_downside_risk_score": risk_context.get("downside_risk_score"),
+        "sentiment_bottoming_score": risk_context.get("bottoming_score"),
+        "sentiment_rebound_score": risk_context.get("rebound_score"),
+        "sentiment_breakout_score": risk_context.get("breakout_score"),
+        "sentiment_position_size_multiplier": (
+            risk_context.get("position_size_multiplier")
+        ),
+        "sentiment_grid_aggression_multiplier": (
+            risk_context.get("grid_aggression_multiplier")
+        ),
+        "sentiment_target_profit_multiplier": (
+            risk_context.get("target_profit_multiplier")
+        ),
+        "sentiment_entry_discount_multiplier": (
+            risk_context.get("entry_discount_multiplier")
+        ),
+        "sentiment_hard_safety_flags": flags,
     }
 
 
@@ -3296,6 +3329,9 @@ def main():
                 sentiment_payload.get("action_recommendation") or "neutral"
             )
             action_policy = sentiment_payload.get("action_policy", {})
+            sentiment_risk_fields = sentiment_risk_log_fields(
+                sentiment_payload.get("risk_context")
+            )
             allow_range_buy_on_confidence_block = profile_bool(
                 "allow_range_buy_on_confidence_block",
                 False
@@ -3464,6 +3500,7 @@ def main():
                 ),
                 action_recommendation=action_recommendation,
                 action_policy_reason=action_policy.get("reason"),
+                **sentiment_risk_fields,
                 signal_status=signal_status,
                 signal_allows_trading=any_buys_allowed,
                 llm_buys_allowed=llm_buys_allowed,
@@ -4595,6 +4632,7 @@ def main():
                             execution_signal=execution_signal,
                             action_recommendation=action_recommendation,
                             action_policy_reason=action_policy.get("reason"),
+                            **sentiment_risk_fields,
                             signal_status=signal_status,
                             freshness_allows_trading=freshness_allows_trading,
                             freshness_block_reason=freshness_block_reason,
@@ -4710,6 +4748,7 @@ def main():
                             last_sell_price=last_sell_price,
                             action_recommendation=action_recommendation,
                             action_policy_reason=action_policy.get("reason"),
+                            **sentiment_risk_fields,
                             sentiment_regime=regime["name"],
                             effective_position_size_pct=(
                                 candidate_effective_position_size_pct
@@ -4771,6 +4810,7 @@ def main():
                         reserved_buy_capital_usd=round(reserved_buy_usd, 8),
                         action_recommendation=action_recommendation,
                         action_policy_reason=action_policy.get("reason"),
+                        **sentiment_risk_fields,
                         range_low=low,
                         range_high=high,
                         range_mean=mean,
@@ -4987,6 +5027,7 @@ def main():
                         price=round(level, PRICE_DECIMALS),
                         buy_source=buy_source,
                         sell_pct_override=active_sell_pct_override,
+                        **sentiment_risk_fields,
                         anchor_strategy_router_enabled=(
                             anchor_strategy_router_enabled
                         ),
@@ -5008,6 +5049,7 @@ def main():
                         trade_notional_usd=round(level * volume, 8),
                         buy_source=buy_source,
                         sell_pct_override=active_sell_pct_override,
+                        **sentiment_risk_fields,
                         anchor_strategy_router_enabled=(
                             anchor_strategy_router_enabled
                         ),
@@ -5064,6 +5106,7 @@ def main():
                     ),
                     action_recommendation=action_recommendation,
                     action_policy_reason=action_policy.get("reason"),
+                    **sentiment_risk_fields,
                     contributor_count=sentiment_payload.get("contributor_count"),
                     active_observation_count=sentiment_payload.get(
                         "active_observation_count"
@@ -5152,6 +5195,7 @@ def main():
                 ),
                 action_recommendation=action_recommendation,
                 action_policy_reason=action_policy.get("reason"),
+                **sentiment_risk_fields,
                 contributor_count=sentiment_payload.get("contributor_count"),
                 active_observation_count=sentiment_payload.get(
                     "active_observation_count"
