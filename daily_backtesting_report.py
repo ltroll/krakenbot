@@ -475,6 +475,7 @@ def collect_log_lines(log_file: Path, since: datetime) -> LogSummary:
                     risk_records.append(
                         {
                             "ts": payload.get("ts"),
+                            "parsed_ts": ts,
                             "available": risk_available,
                             "stale": payload.get("risk_context_stale"),
                             "recommended_posture": payload.get("risk_context_recommended_posture"),
@@ -491,6 +492,12 @@ def collect_log_lines(log_file: Path, since: datetime) -> LogSummary:
                             "entry_discount_multiplier": number_value(payload.get("suggested_entry_discount_multiplier")),
                             "take_profit_multiplier": number_value(payload.get("suggested_take_profit_multiplier")),
                             "reason": payload.get("risk_adjusted_reason"),
+                            "action_recommendation": payload.get("action_recommendation"),
+                            "action_policy_reason": payload.get("action_policy_reason"),
+                            "execution_signal": number_value(payload.get("execution_signal")),
+                            "confidence": number_value(payload.get("confidence")),
+                            "range_position_24h": number_value(payload.get("range_position_24h")),
+                            "price": number_value(payload.get("price")),
                         }
                     )
             if event in {
@@ -571,6 +578,18 @@ def fmt_minutes(value: Any) -> str:
     return "n/a"
 
 
+def fmt_signed_minutes(value: Any) -> str:
+    if isinstance(value, (int, float)):
+        return f"{value:+.2f} min"
+    return "n/a"
+
+
+def md_cell(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    return str(value).replace("|", "\\|").replace("\n", " ")
+
+
 def number_value(value: Any) -> Optional[float]:
     if isinstance(value, (int, float)):
         return float(value)
@@ -604,6 +623,27 @@ def strategy_summary(payload: Optional[dict[str, Any]], *names: str) -> dict[str
         if isinstance(summary, dict):
             return summary
     return {}
+
+
+def strategy_payload(payload: Optional[dict[str, Any]], *names: str) -> dict[str, Any]:
+    if not payload:
+        return {}
+    strategies = payload.get("strategies")
+    if not isinstance(strategies, dict):
+        return {}
+    for name in names:
+        strategy = strategies.get(name)
+        if isinstance(strategy, dict):
+            return strategy
+    return {}
+
+
+def recent_strategy_trades(payload: Optional[dict[str, Any]], *names: str) -> list[dict[str, Any]]:
+    strategy = strategy_payload(payload, *names)
+    trades = strategy.get("recent_trades")
+    if isinstance(trades, list):
+        return [trade for trade in trades if isinstance(trade, dict)]
+    return []
 
 
 def trade_event_total(trade_events: Counter[str]) -> int:
@@ -1037,6 +1077,130 @@ def render_risk_context_summary(log_summary: LogSummary) -> list[str]:
     return lines
 
 
+def nearest_risk_record(
+    records: list[dict[str, Any]],
+    target: datetime,
+    *,
+    max_minutes: float = 10.0,
+) -> tuple[Optional[dict[str, Any]], Optional[float]]:
+    best_record: Optional[dict[str, Any]] = None
+    best_delta: Optional[float] = None
+    for record in records:
+        record_ts = record.get("parsed_ts")
+        if not isinstance(record_ts, datetime):
+            continue
+        delta_minutes = (record_ts - target).total_seconds() / 60
+        if abs(delta_minutes) > max_minutes:
+            continue
+        if best_delta is None or abs(delta_minutes) < abs(best_delta):
+            best_record = record
+            best_delta = delta_minutes
+    return best_record, best_delta
+
+
+def render_price_target_policy_context(
+    log_summary: LogSummary,
+    replay_json: Optional[dict[str, Any]],
+) -> list[str]:
+    price_only = strategy_summary(replay_json, "price_target_only")
+    sentiment_policy = strategy_summary(replay_json, "with_sentiment_policy")
+    price_trades = number_value(price_only.get("trades"))
+    sentiment_trades = number_value(sentiment_policy.get("trades"))
+    recent_trades = recent_strategy_trades(replay_json, "price_target_only")
+
+    if not price_trades or price_trades <= 0:
+        return [
+            "## Price-Target Policy Context",
+            "",
+            "No price-target replay trades were present in this report window.",
+            "",
+        ]
+
+    lines = [
+        "## Price-Target Policy Context",
+        "",
+        "Nearest live risk-context snapshot for price-target replay trades.",
+        "",
+        f"- Price-target replay trades: {fmt_count(price_trades)}",
+        f"- Sentiment-policy replay trades: {fmt_count(sentiment_trades)}",
+        "",
+    ]
+
+    if not log_summary.risk_records:
+        lines.extend(
+            [
+                "Price-target replay found trades, but no risk-context fields were present in the live bot logs.",
+                "",
+            ]
+        )
+        return lines
+
+    if not recent_trades:
+        lines.extend(
+            [
+                "Price-target replay found trades, but the replay JSON did not include recent trade details.",
+                "",
+            ]
+        )
+        return lines
+
+    context_rows: list[tuple[dict[str, Any], Optional[dict[str, Any]], Optional[float]]] = []
+    reason_counts: Counter[str] = Counter()
+    posture_counts: Counter[str] = Counter()
+    for trade in recent_trades:
+        decision_ts = parse_timestamp(trade.get("decision_time") or trade.get("signal_timestamp"))
+        if decision_ts is None:
+            context_rows.append((trade, None, None))
+            reason_counts["no_decision_timestamp"] += 1
+            continue
+        risk_record, delta = nearest_risk_record(log_summary.risk_records, decision_ts)
+        context_rows.append((trade, risk_record, delta))
+        if risk_record:
+            reason_counts[str(risk_record.get("reason") or risk_record.get("action_policy_reason") or "unknown")] += 1
+            posture_counts[str(risk_record.get("adjusted_posture") or "unknown")] += 1
+        else:
+            reason_counts["no_nearby_risk_context"] += 1
+
+    lines.extend(
+        [
+            "### Nearest Block Reasons",
+            "",
+            *render_counter(reason_counts),
+            "",
+            "### Nearest Risk Postures",
+            "",
+            *render_counter(posture_counts),
+            "",
+            "### Recent Price-Target Trades",
+            "",
+            "| decision time | entry | exit reason | net | nearest delta | posture | buy score | market score | action | risk reason |",
+            "| --- | ---: | --- | ---: | ---: | --- | ---: | ---: | --- | --- |",
+        ]
+    )
+
+    for trade, risk_record, delta in context_rows[-10:]:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    md_cell(trade.get("decision_time") or trade.get("signal_timestamp")),
+                    fmt_count(number_value(trade.get("entry_price"))),
+                    md_cell(trade.get("exit_reason")),
+                    fmt_pct(number_value(trade.get("net_return_pct"))),
+                    fmt_signed_minutes(delta),
+                    md_cell(risk_record.get("adjusted_posture") if risk_record else None),
+                    fmt_count(risk_record.get("buy_score") if risk_record else None),
+                    fmt_count(risk_record.get("market_score") if risk_record else None),
+                    md_cell(risk_record.get("action_recommendation") if risk_record else None),
+                    md_cell(risk_record.get("reason") if risk_record else None),
+                ]
+            )
+            + " |"
+        )
+    lines.append("")
+    return lines
+
+
 def render_contrarian_candidate_summary(log_summary: LogSummary) -> list[str]:
     candidates = log_summary.contrarian_candidates
     lines = [
@@ -1425,6 +1589,7 @@ def write_report(args: argparse.Namespace, runs: list[BacktestRun]) -> Path:
     report.extend(render_rolling_summary(report_dir, report_path, metrics))
     report.extend(render_live_vs_backtest(metrics))
     report.extend(render_risk_context_summary(log_summary))
+    report.extend(render_price_target_policy_context(log_summary, replay_json))
     report.extend(render_market_structure_summary(log_summary))
     report.extend(render_contrarian_candidate_summary(log_summary))
     report.extend(
