@@ -65,6 +65,29 @@ def normalize_price_regime(price_regime):
     return normalized
 
 
+def normalize_market_structure(market_structure):
+    if not isinstance(market_structure, dict):
+        return {}
+
+    normalized = dict(market_structure)
+    aliases = {
+        "nearest_support": "support_price",
+        "support": "support_price",
+        "nearest_resistance": "resistance_price",
+        "resistance": "resistance_price",
+        "upside_pct": "upside_to_resistance_pct",
+        "resistance_distance_pct": "upside_to_resistance_pct",
+        "downside_pct": "downside_to_support_pct",
+        "support_distance_pct": "downside_to_support_pct",
+        "risk_reward": "risk_reward_to_structure",
+        "range_position": "range_position_24h",
+    }
+    for source, target in aliases.items():
+        if target not in normalized and source in normalized:
+            normalized[target] = normalized[source]
+    return normalized
+
+
 def normalize_source_status(source_status):
     if not isinstance(source_status, dict):
         return {}
@@ -99,10 +122,19 @@ def normalize_signal_payload(signal, asset_id=None, pair=None):
     if not isinstance(action_policy, dict):
         action_policy = {}
 
+    risk_context = signal.get("risk_context")
+    if not isinstance(risk_context, dict):
+        risk_context = {}
+
     price_regime = signal.get("price_regime")
     if not isinstance(price_regime, dict):
         price_regime = signal.get("asset_price_regime")
     price_regime = normalize_price_regime(price_regime)
+
+    market_structure = signal.get("market_structure")
+    if not isinstance(market_structure, dict):
+        market_structure = signal.get("asset_market_structure")
+    market_structure = normalize_market_structure(market_structure)
 
     target_prices = signal.get("target_prices")
     if not isinstance(target_prices, list):
@@ -149,6 +181,7 @@ def normalize_signal_payload(signal, asset_id=None, pair=None):
         "bot_action_allowed": signal.get("bot_action_allowed"),
         "action_recommendation": signal.get("action_recommendation"),
         "action_policy": action_policy,
+        "risk_context": risk_context,
         "contributor_count": signal.get("contributor_count"),
         "active_observation_count": signal.get("active_observation_count"),
         "reason": signal.get("reason"),
@@ -159,6 +192,7 @@ def normalize_signal_payload(signal, asset_id=None, pair=None):
         "schema_version": signal.get("schema_version"),
         "multi_asset_schema_version": signal.get("multi_asset_schema_version"),
         "price_regime": price_regime,
+        "market_structure": market_structure,
         "asset_price_regime": signal.get("asset_price_regime"),
         "source_status": source_status,
         "target_prices": target_prices,
