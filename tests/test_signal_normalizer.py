@@ -31,6 +31,10 @@ def make_multi_asset_signal():
                 "bot_action_allowed": True,
                 "action_recommendation": "watch_only",
                 "action_policy": {"reason": "watch-only test"},
+                "active_strategy": {
+                    "active": True,
+                    "active_strategy": "price_first_accumulation",
+                },
                 "risk_context": {
                     "recommended_posture": "entry_allowed",
                     "market_risk_score": 0.2763,
@@ -99,6 +103,7 @@ class SignalNormalizerTests(unittest.TestCase):
             normalized["risk_context"]["buy_aggression_score"],
             0.4872
         )
+        self.assertTrue(normalized["active_strategy"]["active"])
         self.assertEqual(normalized["source_status"]["market_data"]["status"], "fresh")
         self.assertEqual(normalized["source_status"]["price_regime"]["status"], "fresh")
         self.assertEqual(normalized["price_regime"]["range_position_24h"], 0.917)

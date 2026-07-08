@@ -20,6 +20,7 @@ import requests
 from dotenv import load_dotenv
 
 from fee_config import effective_round_trip_fee_pct
+from risk_context import derive_risk_context
 ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(dotenv_path=ENV_FILE, override=True)
 
@@ -460,6 +461,36 @@ MEAN_REVERSION_FLOW_PRESSURE_MIN = profile_float(
     "mean_reversion_flow_pressure_min",
     0.0
 )
+USE_RISK_CONTEXT_POLICY = env_profile_bool(
+    "USE_RISK_CONTEXT_POLICY",
+    "use_risk_context_policy",
+    True
+)
+RISK_CONTEXT_HARD_SAFETY_BLOCK = env_profile_bool(
+    "RISK_CONTEXT_HARD_SAFETY_BLOCK",
+    "risk_context_hard_safety_block",
+    True
+)
+RISK_CONTEXT_MIN_BUY_SCORE = env_profile_float(
+    "RISK_CONTEXT_MIN_BUY_SCORE",
+    "risk_context_min_buy_score",
+    0.50
+)
+RISK_CONTEXT_POSITION_SIZE_ENABLED = env_profile_bool(
+    "RISK_CONTEXT_POSITION_SIZE_ENABLED",
+    "risk_context_position_size_enabled",
+    True
+)
+RISK_CONTEXT_TARGET_PROFIT_ENABLED = env_profile_bool(
+    "RISK_CONTEXT_TARGET_PROFIT_ENABLED",
+    "risk_context_target_profit_enabled",
+    True
+)
+RISK_CONTEXT_MAX_POSITION_SIZE_MULTIPLIER = env_profile_float(
+    "RISK_CONTEXT_MAX_POSITION_SIZE_MULTIPLIER",
+    "risk_context_max_position_size_multiplier",
+    1.25
+)
 USE_BACKTEST_HEALTH_GATE = env_bool(
     "USE_BACKTEST_HEALTH_GATE",
     False,
@@ -568,6 +599,25 @@ DECISION_CSV_FIELDS = [
     "contributor_count",
     "signal_age_minutes",
     "source_status_result",
+    "risk_context_available",
+    "risk_context_stale",
+    "risk_context_recommended_posture",
+    "risk_context_market_risk_score",
+    "risk_context_buy_aggression_score",
+    "risk_context_downside_risk_score",
+    "risk_context_bottoming_score",
+    "risk_context_rebound_score",
+    "risk_context_breakout_score",
+    "risk_context_hard_safety_flags",
+    "risk_adjusted_buy_score",
+    "risk_adjusted_market_score",
+    "risk_adjusted_posture",
+    "risk_adjusted_reason",
+    "suggested_position_size_multiplier",
+    "suggested_entry_discount_multiplier",
+    "suggested_take_profit_multiplier",
+    "risk_context_source_processed_at",
+    "risk_context_age_minutes",
     "mean_reversion_opportunity",
     "range_position_24h",
     "flow_pressure",
@@ -1776,6 +1826,14 @@ def normalize_signal(signal):
     if not isinstance(action_policy, dict):
         action_policy = {}
 
+    risk_context = signal.get("risk_context")
+    if not isinstance(risk_context, dict):
+        risk_context = {}
+
+    active_strategy = signal.get("active_strategy")
+    if not isinstance(active_strategy, dict):
+        active_strategy = {}
+
     target_prices = signal.get("target_prices")
     if not isinstance(target_prices, list):
         target_prices = []
@@ -1815,6 +1873,8 @@ def normalize_signal(signal):
         "bot_action_allowed": signal.get("bot_action_allowed"),
         "action_recommendation": signal.get("action_recommendation"),
         "action_policy": action_policy,
+        "risk_context": risk_context,
+        "active_strategy": active_strategy,
         "contributor_count": signal.get("contributor_count"),
         "reason": signal.get("reason"),
         "processed_at": signal.get("processed_at"),
@@ -2272,6 +2332,36 @@ def signal_freshness_state(sentiment, now):
     if fresh_for is not None and age_minutes <= fresh_for:
         return "fresh"
     return "fresh"
+
+
+def derived_risk_context(sentiment, now):
+    freshness_state = signal_freshness_state(sentiment, now)
+    return derive_risk_context(
+        sentiment.get("risk_context"),
+        fallback_processed_at=sentiment.get("processed_at"),
+        stale=freshness_state == "stale",
+        now=now
+    )
+
+
+def risk_context_can_buy(risk_view):
+    if (
+        RISK_CONTEXT_HARD_SAFETY_BLOCK
+        and risk_view.get("risk_context_hard_safety_flags")
+    ):
+        return False, "risk_context_hard_safety_flags"
+
+    if risk_view.get("risk_context_stale"):
+        return None, "risk_context_stale"
+
+    posture = risk_view.get("risk_adjusted_posture")
+    buy_score = risk_view.get("risk_adjusted_buy_score")
+    if posture in ("constructive_buy", "cautious_accumulation") and (
+        buy_score is None or buy_score >= RISK_CONTEXT_MIN_BUY_SCORE
+    ):
+        return True, None
+
+    return False, "risk_context_" + (posture or "neutral_watch")
 
 
 def signal_gate_failure(sentiment, now):
@@ -2781,6 +2871,19 @@ def run_cycle():
     action_policy = sentiment.get("action_policy", {})
     action_policy_reason = action_policy.get("reason") or sentiment.get("reason")
     action_recommendation = sentiment.get("action_recommendation")
+    risk_view = derived_risk_context(sentiment, now)
+    risk_context_usable = (
+        USE_RISK_CONTEXT_POLICY
+        and risk_view.get("risk_context_available")
+        and not risk_view.get("risk_context_stale")
+    )
+    if risk_context_usable and RISK_CONTEXT_TARGET_PROFIT_ENABLED:
+        target_profit_pct = clamp(
+            target_profit_pct
+            * risk_view.get("suggested_take_profit_multiplier", 1.0),
+            MIN_TARGET_PROFIT_PCT,
+            MAX_TARGET_PROFIT_PCT
+        )
 
     log_event(
         "SIGNAL_UPDATE",
@@ -2815,6 +2918,26 @@ def run_cycle():
         action_policy_reason=action_policy_reason,
         contributor_count=sentiment.get("contributor_count"),
         signal_age_minutes=age_minutes,
+        risk_context=sentiment.get("risk_context"),
+        risk_context_available=risk_view.get("risk_context_available"),
+        risk_context_stale=risk_view.get("risk_context_stale"),
+        risk_context_recommended_posture=risk_view.get("risk_context_recommended_posture"),
+        risk_context_market_risk_score=risk_view.get("risk_context_market_risk_score"),
+        risk_context_buy_aggression_score=risk_view.get("risk_context_buy_aggression_score"),
+        risk_context_downside_risk_score=risk_view.get("risk_context_downside_risk_score"),
+        risk_context_bottoming_score=risk_view.get("risk_context_bottoming_score"),
+        risk_context_rebound_score=risk_view.get("risk_context_rebound_score"),
+        risk_context_breakout_score=risk_view.get("risk_context_breakout_score"),
+        risk_context_hard_safety_flags=risk_view.get("risk_context_hard_safety_flags"),
+        risk_adjusted_buy_score=risk_view.get("risk_adjusted_buy_score"),
+        risk_adjusted_market_score=risk_view.get("risk_adjusted_market_score"),
+        risk_adjusted_posture=risk_view.get("risk_adjusted_posture"),
+        risk_adjusted_reason=risk_view.get("risk_adjusted_reason"),
+        suggested_position_size_multiplier=risk_view.get("suggested_position_size_multiplier"),
+        suggested_entry_discount_multiplier=risk_view.get("suggested_entry_discount_multiplier"),
+        suggested_take_profit_multiplier=risk_view.get("suggested_take_profit_multiplier"),
+        risk_context_source_processed_at=risk_view.get("risk_context_source_processed_at"),
+        risk_context_age_minutes=risk_view.get("risk_context_age_minutes"),
         mean_reversion_opportunity=mean_reversion_opportunity,
         range_position_24h=range_position,
         flow_pressure=flow_pressure,
@@ -2840,7 +2963,25 @@ def run_cycle():
         )
         return
 
-    if action_recommendation != "bullish_allowed":
+    if risk_context_usable:
+        risk_allowed, risk_block_reason = risk_context_can_buy(risk_view)
+        if risk_allowed is False:
+            skip_cycle(
+                risk_block_reason,
+                cycle_id,
+                price=price,
+                execution_signal=raw_signal,
+                smoothed_signal=smoothed_signal,
+                weighted_signal=weighted_signal,
+                confidence=confidence,
+                action_recommendation=action_recommendation,
+                action_policy_reason=action_policy_reason,
+                contributor_count=sentiment.get("contributor_count"),
+                bot_action_allowed=sentiment.get("bot_action_allowed"),
+                **risk_view
+            )
+            return
+    elif action_recommendation != "bullish_allowed":
         skip_cycle(
             "action_policy_" + (action_recommendation or "missing"),
             cycle_id,
@@ -2852,7 +2993,8 @@ def run_cycle():
             action_recommendation=action_recommendation,
             action_policy_reason=action_policy_reason,
             contributor_count=sentiment.get("contributor_count"),
-            bot_action_allowed=sentiment.get("bot_action_allowed")
+            bot_action_allowed=sentiment.get("bot_action_allowed"),
+            **risk_view
         )
         return
 
@@ -2870,6 +3012,7 @@ def run_cycle():
             action_recommendation=action_recommendation,
             action_policy_reason=action_policy_reason,
             contributor_count=sentiment.get("contributor_count"),
+            **risk_view,
             **backtest_failure
         )
         return
@@ -2982,6 +3125,12 @@ def run_cycle():
     if MAX_TRADE_USD > 0:
         trade_value = min(trade_value, MAX_TRADE_USD)
     trade_value *= effective_multiplier
+    if risk_context_usable and RISK_CONTEXT_POSITION_SIZE_ENABLED:
+        trade_value *= clamp(
+            risk_view.get("suggested_position_size_multiplier", 1.0),
+            0.0,
+            RISK_CONTEXT_MAX_POSITION_SIZE_MULTIPLIER
+        )
     trade_value *= max(0, 1 - EXECUTION_BUFFER_PCT)
 
     projected_inventory = current_inventory_usd(price) + trade_value
@@ -3059,7 +3208,8 @@ def run_cycle():
                 effective_risk_multiplier=effective_multiplier,
                 mean_reversion_opportunity=mean_reversion_opportunity,
                 range_position_24h=range_position,
-                flow_pressure=flow_pressure
+                flow_pressure=flow_pressure,
+                **risk_view
             )
             append_decision_csv(
                 "trade_decision",
@@ -3088,7 +3238,8 @@ def run_cycle():
                 effective_risk_multiplier=effective_multiplier,
                 mean_reversion_opportunity=mean_reversion_opportunity,
                 range_position_24h=range_position,
-                flow_pressure=flow_pressure
+                flow_pressure=flow_pressure,
+                **risk_view
             )
 
             result = place_limit_buy(
@@ -3209,7 +3360,8 @@ def run_cycle():
         round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
         gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
         risk_multiplier=risk_multiplier,
-        effective_risk_multiplier=effective_multiplier
+        effective_risk_multiplier=effective_multiplier,
+        **risk_view
     )
     append_decision_csv(
         "trade_decision",
@@ -3233,7 +3385,8 @@ def run_cycle():
         round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
         gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
         risk_multiplier=risk_multiplier,
-        effective_risk_multiplier=effective_multiplier
+        effective_risk_multiplier=effective_multiplier,
+        **risk_view
     )
 
     result = place_market_buy(volume, cycle_id)
@@ -3264,6 +3417,7 @@ def run_cycle():
         gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
         risk_multiplier=risk_multiplier,
         effective_risk_multiplier=effective_multiplier,
+        **risk_view,
         **fill,
         result=result_payload or result
     )
@@ -3368,6 +3522,14 @@ def main():
         mean_reversion_buy_threshold=MEAN_REVERSION_BUY_THRESHOLD,
         mean_reversion_range_position_max=MEAN_REVERSION_RANGE_POSITION_MAX,
         mean_reversion_flow_pressure_min=MEAN_REVERSION_FLOW_PRESSURE_MIN,
+        use_risk_context_policy=USE_RISK_CONTEXT_POLICY,
+        risk_context_hard_safety_block=RISK_CONTEXT_HARD_SAFETY_BLOCK,
+        risk_context_min_buy_score=RISK_CONTEXT_MIN_BUY_SCORE,
+        risk_context_position_size_enabled=RISK_CONTEXT_POSITION_SIZE_ENABLED,
+        risk_context_target_profit_enabled=RISK_CONTEXT_TARGET_PROFIT_ENABLED,
+        risk_context_max_position_size_multiplier=(
+            RISK_CONTEXT_MAX_POSITION_SIZE_MULTIPLIER
+        ),
         use_backtest_health_gate=USE_BACKTEST_HEALTH_GATE,
         backtest_fail_closed=BACKTEST_FAIL_CLOSED,
         backtest_min_trades=BACKTEST_MIN_TRADES,

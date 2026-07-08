@@ -126,6 +126,10 @@ def normalize_signal_payload(signal, asset_id=None, pair=None):
     if not isinstance(risk_context, dict):
         risk_context = {}
 
+    active_strategy = signal.get("active_strategy")
+    if not isinstance(active_strategy, dict):
+        active_strategy = {}
+
     price_regime = signal.get("price_regime")
     if not isinstance(price_regime, dict):
         price_regime = signal.get("asset_price_regime")
@@ -182,6 +186,7 @@ def normalize_signal_payload(signal, asset_id=None, pair=None):
         "action_recommendation": signal.get("action_recommendation"),
         "action_policy": action_policy,
         "risk_context": risk_context,
+        "active_strategy": active_strategy,
         "contributor_count": signal.get("contributor_count"),
         "active_observation_count": signal.get("active_observation_count"),
         "reason": signal.get("reason"),

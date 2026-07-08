@@ -51,6 +51,12 @@ class LogSummary:
     stale_records: list[dict[str, Any]]
     longest_stale_streak: int
     contrarian_candidates: Counter[str]
+    structure_biases: Counter[str]
+    structure_blocks: Counter[str]
+    structure_records: list[dict[str, Any]]
+    risk_postures: Counter[str]
+    risk_safety_flags: Counter[str]
+    risk_records: list[dict[str, Any]]
 
 
 @dataclass
@@ -345,6 +351,12 @@ def collect_log_lines(log_file: Path, since: datetime) -> LogSummary:
     signal_ages: list[float] = []
     stale_records: list[dict[str, Any]] = []
     contrarian_candidates: Counter[str] = Counter()
+    structure_biases: Counter[str] = Counter()
+    structure_blocks: Counter[str] = Counter()
+    structure_records: list[dict[str, Any]] = []
+    risk_postures: Counter[str] = Counter()
+    risk_safety_flags: Counter[str] = Counter()
+    risk_records: list[dict[str, Any]] = []
     current_stale_streak = 0
     longest_stale_streak = 0
 
@@ -359,6 +371,12 @@ def collect_log_lines(log_file: Path, since: datetime) -> LogSummary:
             stale_records,
             longest_stale_streak,
             contrarian_candidates,
+            structure_biases,
+            structure_blocks,
+            structure_records,
+            risk_postures,
+            risk_safety_flags,
+            risk_records,
         )
 
     with log_file.open("r", encoding="utf-8", errors="replace") as handle:
@@ -373,7 +391,10 @@ def collect_log_lines(log_file: Path, since: datetime) -> LogSummary:
             event = str(payload.get("event") or "UNKNOWN")
             event_counts[event] += 1
             if event == "TRADE_DECISION":
-                decision_reasons[str(payload.get("reason") or "unknown")] += 1
+                reason = str(payload.get("reason") or "unknown")
+                decision_reasons[reason] += 1
+                if reason.startswith("market_structure_"):
+                    structure_blocks[reason] += 1
             if event == "SIGNAL_UPDATE":
                 raw_status = str(payload.get("signal_status") or "unknown")
                 freshness_state = str(payload.get("signal_freshness_state") or "")
@@ -421,6 +442,57 @@ def collect_log_lines(log_file: Path, since: datetime) -> LogSummary:
                         and (range_position is None or range_position <= 0.35)
                     ):
                         contrarian_candidates["contrarian_buy_watch_candidates"] += 1
+                bias = str(payload.get("structure_bias") or "")
+                support_distance = number_value(payload.get("support_distance_pct"))
+                upside = number_value(payload.get("upside_to_resistance_pct"))
+                risk_reward = number_value(payload.get("risk_reward_to_structure"))
+                if bias or support_distance is not None or upside is not None:
+                    structure_biases[bias or "unknown"] += 1
+                    structure_records.append(
+                        {
+                            "ts": payload.get("ts"),
+                            "bias": bias or "unknown",
+                            "support_price": number_value(payload.get("support_price")),
+                            "resistance_price": number_value(payload.get("resistance_price")),
+                            "support_distance_pct": support_distance,
+                            "upside_to_resistance_pct": upside,
+                            "risk_reward_to_structure": risk_reward,
+                            "range_position_24h": number_value(payload.get("range_position_24h")),
+                        }
+                    )
+                risk_available = payload.get("risk_context_available")
+                risk_posture = str(payload.get("risk_adjusted_posture") or "")
+                risk_score = number_value(payload.get("risk_adjusted_buy_score"))
+                market_score = number_value(payload.get("risk_adjusted_market_score"))
+                if risk_available is not None or risk_posture or risk_score is not None:
+                    risk_postures[risk_posture or "unknown"] += 1
+                    flags = payload.get("risk_context_hard_safety_flags")
+                    if isinstance(flags, list):
+                        for flag in flags:
+                            risk_safety_flags[str(flag)] += 1
+                    elif flags:
+                        risk_safety_flags[str(flags)] += 1
+                    risk_records.append(
+                        {
+                            "ts": payload.get("ts"),
+                            "available": risk_available,
+                            "stale": payload.get("risk_context_stale"),
+                            "recommended_posture": payload.get("risk_context_recommended_posture"),
+                            "adjusted_posture": risk_posture or "unknown",
+                            "buy_score": risk_score,
+                            "market_score": market_score,
+                            "market_risk_score": number_value(payload.get("risk_context_market_risk_score")),
+                            "buy_aggression_score": number_value(payload.get("risk_context_buy_aggression_score")),
+                            "downside_risk_score": number_value(payload.get("risk_context_downside_risk_score")),
+                            "bottoming_score": number_value(payload.get("risk_context_bottoming_score")),
+                            "rebound_score": number_value(payload.get("risk_context_rebound_score")),
+                            "breakout_score": number_value(payload.get("risk_context_breakout_score")),
+                            "position_size_multiplier": number_value(payload.get("suggested_position_size_multiplier")),
+                            "entry_discount_multiplier": number_value(payload.get("suggested_entry_discount_multiplier")),
+                            "take_profit_multiplier": number_value(payload.get("suggested_take_profit_multiplier")),
+                            "reason": payload.get("risk_adjusted_reason"),
+                        }
+                    )
             if event in {
                 "BUY_LIMIT_ORDER_PLACED",
                 "SELL_LIMIT_ORDER_PLACED",
@@ -441,6 +513,12 @@ def collect_log_lines(log_file: Path, since: datetime) -> LogSummary:
         stale_records,
         longest_stale_streak,
         contrarian_candidates,
+        structure_biases,
+        structure_blocks,
+        structure_records,
+        risk_postures,
+        risk_safety_flags,
+        risk_records,
     )
 
 
@@ -472,6 +550,12 @@ def load_json_source(url: str, path: Path, timeout: int) -> tuple[Optional[dict[
 def fmt_pct(value: Any) -> str:
     if isinstance(value, (int, float)):
         return f"{value:.4f}%"
+    return "n/a"
+
+
+def fmt_decimal_pct(value: Any) -> str:
+    if isinstance(value, (int, float)):
+        return f"{value * 100:.2f}%"
     return "n/a"
 
 
@@ -903,6 +987,56 @@ def render_live_vs_backtest(metrics: ReportMetrics) -> list[str]:
     return lines
 
 
+def render_risk_context_summary(log_summary: LogSummary) -> list[str]:
+    records = log_summary.risk_records
+    if not records:
+        return [
+            "## Risk Context",
+            "",
+            "No risk-context fields were present in the bot log window.",
+            "",
+        ]
+
+    available = sum(1 for record in records if record.get("available") is True)
+    stale = sum(1 for record in records if record.get("stale") is True)
+    latest = records[-1]
+    lines = [
+        "## Risk Context",
+        "",
+        f"- Signal updates with risk context data: {len(records)}",
+        f"- Risk context available: {available}",
+        f"- Risk context stale: {stale}",
+        f"- Avg risk-adjusted buy score: {fmt_count(avg_number(records, 'buy_score'))}",
+        f"- Avg risk-adjusted market score: {fmt_count(avg_number(records, 'market_score'))}",
+        f"- Avg suggested position multiplier: {fmt_count(avg_number(records, 'position_size_multiplier'))}",
+        f"- Avg suggested entry discount multiplier: {fmt_count(avg_number(records, 'entry_discount_multiplier'))}",
+        f"- Avg suggested take-profit multiplier: {fmt_count(avg_number(records, 'take_profit_multiplier'))}",
+        "",
+        "### Risk Postures",
+        "",
+        *render_counter(log_summary.risk_postures),
+        "",
+        "### Hard Safety Flags",
+        "",
+        *render_counter(log_summary.risk_safety_flags),
+        "",
+        "### Latest Risk Snapshot",
+        "",
+        f"- Timestamp: `{latest.get('ts', 'n/a')}`",
+        f"- Engine posture: `{latest.get('recommended_posture', 'n/a')}`",
+        f"- Bot posture: `{latest.get('adjusted_posture', 'n/a')}`",
+        f"- Buy score: {fmt_count(latest.get('buy_score'))}",
+        f"- Market score: {fmt_count(latest.get('market_score'))}",
+        f"- Buy aggression: {fmt_count(latest.get('buy_aggression_score'))}",
+        f"- Market risk: {fmt_count(latest.get('market_risk_score'))}",
+        f"- Downside risk: {fmt_count(latest.get('downside_risk_score'))}",
+        f"- Bottoming/rebound/breakout: {fmt_count(latest.get('bottoming_score'))}/{fmt_count(latest.get('rebound_score'))}/{fmt_count(latest.get('breakout_score'))}",
+        f"- Reason: {latest.get('reason', 'n/a')}",
+        "",
+    ]
+    return lines
+
+
 def render_contrarian_candidate_summary(log_summary: LogSummary) -> list[str]:
     candidates = log_summary.contrarian_candidates
     lines = [
@@ -919,6 +1053,65 @@ def render_contrarian_candidate_summary(log_summary: LogSummary) -> list[str]:
         f"- Contrarian buy watch candidates: {candidates.get('contrarian_buy_watch_candidates', 0)}",
         "",
     ]
+    return lines
+
+
+def avg_number(records: list[dict[str, Any]], key: str) -> Optional[float]:
+    values = [
+        value
+        for value in (number_value(record.get(key)) for record in records)
+        if value is not None
+    ]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def render_market_structure_summary(log_summary: LogSummary) -> list[str]:
+    records = log_summary.structure_records
+    if not records and not log_summary.structure_blocks:
+        return [
+            "## Market Structure",
+            "",
+            "No market-structure fields were present in the bot log window.",
+            "",
+        ]
+
+    lines = [
+        "## Market Structure",
+        "",
+        f"- Signal updates with structure data: {len(records)}",
+        f"- Avg support distance: {fmt_decimal_pct(avg_number(records, 'support_distance_pct'))}",
+        f"- Avg upside to resistance: {fmt_decimal_pct(avg_number(records, 'upside_to_resistance_pct'))}",
+        f"- Avg structure risk/reward: {fmt_count(avg_number(records, 'risk_reward_to_structure'))}",
+        "",
+        "### Structure Biases",
+        "",
+        *render_counter(log_summary.structure_biases),
+        "",
+        "### Structure Blocks",
+        "",
+        *render_counter(log_summary.structure_blocks),
+        "",
+    ]
+
+    latest = records[-1] if records else None
+    if latest:
+        lines.extend(
+            [
+                "### Latest Structure Snapshot",
+                "",
+                f"- Timestamp: `{latest.get('ts', 'n/a')}`",
+                f"- Bias: `{latest.get('bias', 'unknown')}`",
+                f"- Support: `{latest.get('support_price', 'n/a')}`",
+                f"- Resistance: `{latest.get('resistance_price', 'n/a')}`",
+                f"- Support distance: {fmt_decimal_pct(latest.get('support_distance_pct'))}",
+                f"- Upside to resistance: {fmt_decimal_pct(latest.get('upside_to_resistance_pct'))}",
+                f"- Risk/reward: {fmt_count(latest.get('risk_reward_to_structure'))}",
+                f"- Range position 24h: {fmt_count(latest.get('range_position_24h'))}",
+                "",
+            ]
+        )
     return lines
 
 
@@ -1231,6 +1424,8 @@ def write_report(args: argparse.Namespace, runs: list[BacktestRun]) -> Path:
     report.extend(render_signal_freshness_summary(log_summary))
     report.extend(render_rolling_summary(report_dir, report_path, metrics))
     report.extend(render_live_vs_backtest(metrics))
+    report.extend(render_risk_context_summary(log_summary))
+    report.extend(render_market_structure_summary(log_summary))
     report.extend(render_contrarian_candidate_summary(log_summary))
     report.extend(
         [
