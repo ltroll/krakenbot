@@ -17,6 +17,7 @@ def make_snapshot(
     state_summary_overrides=None,
     open_sell_orders=None,
     runtime_status_overrides=None,
+    risk_context=None,
 ):
     strategy_payload = {
         "grid_anchor": "low,high",
@@ -60,6 +61,8 @@ def make_snapshot(
             "market_data": {"status": "fresh"},
         },
     }
+    if risk_context is not None:
+        signal_payload["risk_context"] = risk_context
 
     return {
         "captured_at": captured_at,
@@ -210,6 +213,60 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(result["summary"]["raw_candidates"], 1)
         self.assertEqual(result["summary"]["approved_candidates"], 1)
         self.assertEqual(result["summary"]["approved_counts_by_source"]["llm_target"], 1)
+
+    def test_replay_summarizes_approved_candidate_risk_context(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                100.0,
+                strategy_modes=["llm_target"],
+                risk_context={
+                    "recommended_posture": "entry_allowed",
+                    "market_risk_score": 0.2,
+                    "buy_aggression_score": 0.6,
+                    "downside_risk_score": 0.3,
+                    "bottoming_score": 0.7,
+                    "rebound_score": 0.5,
+                    "breakout_score": 0.1,
+                    "position_size_multiplier": 0.4,
+                    "grid_aggression_multiplier": 0.8,
+                    "target_profit_multiplier": 0.9,
+                    "entry_discount_multiplier": 1.1,
+                    "hard_safety_flags": [],
+                },
+            ),
+            make_snapshot(
+                "2026-06-13T12:01:00+00:00",
+                100.0,
+                strategy_modes=["llm_target"],
+                risk_context={
+                    "recommended_posture": "entry_allowed",
+                    "market_risk_score": 0.4,
+                    "buy_aggression_score": 0.8,
+                    "hard_safety_flags": ["spread_wide"],
+                },
+            ),
+        ]
+
+        result = backtest.replay_from_snapshots(snapshots)
+        risk_summary = result["summary"]["approved_sentiment_risk"]
+
+        self.assertEqual(risk_summary["sentiment_risk_sample_count"], 2)
+        self.assertEqual(
+            risk_summary["sentiment_risk_posture_counts"],
+            {"entry_allowed": 2},
+        )
+        self.assertEqual(risk_summary["sentiment_hard_safety_flag_event_count"], 1)
+        self.assertEqual(
+            risk_summary["sentiment_hard_safety_flag_counts"],
+            {"spread_wide": 1},
+        )
+        self.assertEqual(risk_summary["avg_sentiment_market_risk_score"], 0.3)
+        self.assertEqual(risk_summary["avg_sentiment_buy_aggression_score"], 0.7)
+        self.assertEqual(
+            result["recent_approved_events"][0]["sentiment_risk_posture"],
+            "entry_allowed",
+        )
 
     def test_approved_event_profit_target_pct_uses_source_and_regime_policy(self):
         snapshot = make_snapshot(
@@ -1218,6 +1275,20 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "potential_avg_end_return_pct": 0.12,
                     "potential_avg_max_runup_pct": 0.4,
                     "potential_avg_max_drawdown_pct": -0.2,
+                    "approved_sentiment_risk_samples": 2,
+                    "approved_sentiment_risk_postures": '{"entry_allowed": 2}',
+                    "approved_sentiment_hard_safety_flag_events": 0,
+                    "approved_sentiment_hard_safety_flags": "{}",
+                    "approved_avg_sentiment_market_risk_score": 0.3,
+                    "approved_avg_sentiment_buy_aggression_score": 0.7,
+                    "approved_avg_sentiment_downside_risk_score": 0.2,
+                    "approved_avg_sentiment_bottoming_score": 0.5,
+                    "approved_avg_sentiment_rebound_score": 0.4,
+                    "approved_avg_sentiment_breakout_score": 0.1,
+                    "approved_avg_sentiment_position_size_multiplier": 0.35,
+                    "approved_avg_sentiment_grid_aggression_multiplier": 0.8,
+                    "approved_avg_sentiment_target_profit_multiplier": 0.95,
+                    "approved_avg_sentiment_entry_discount_multiplier": 1.05,
                 }
             ]
         }
@@ -1226,6 +1297,11 @@ class RangeGridBacktestTests(unittest.TestCase):
             resolved = backtest.write_strategy_comparison_csv(comparison, output_path)
 
             self.assertEqual(resolved, output_path)
+            with open(output_path, encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn("approved_avg_sentiment_market_risk_score", text)
+            self.assertIn("approved_sentiment_risk_postures", text)
+            self.assertIn("0.3", text)
             with open(output_path, encoding="utf-8") as f:
                 text = f.read()
             self.assertIn("strategy_label", text)
@@ -1342,6 +1418,20 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "potential_avg_end_return_pct": 0.12,
                     "potential_avg_max_runup_pct": 0.4,
                     "potential_avg_max_drawdown_pct": -0.2,
+                    "approved_sentiment_risk_samples": 2,
+                    "approved_sentiment_risk_postures": '{"entry_allowed": 2}',
+                    "approved_sentiment_hard_safety_flag_events": 0,
+                    "approved_sentiment_hard_safety_flags": "{}",
+                    "approved_avg_sentiment_market_risk_score": 0.3,
+                    "approved_avg_sentiment_buy_aggression_score": 0.7,
+                    "approved_avg_sentiment_downside_risk_score": 0.2,
+                    "approved_avg_sentiment_bottoming_score": 0.5,
+                    "approved_avg_sentiment_rebound_score": 0.4,
+                    "approved_avg_sentiment_breakout_score": 0.1,
+                    "approved_avg_sentiment_position_size_multiplier": 0.35,
+                    "approved_avg_sentiment_grid_aggression_multiplier": 0.8,
+                    "approved_avg_sentiment_target_profit_multiplier": 0.95,
+                    "approved_avg_sentiment_entry_discount_multiplier": 1.05,
                 }
             ]
         }
@@ -1354,6 +1444,8 @@ class RangeGridBacktestTests(unittest.TestCase):
                 text = f.read()
             self.assertIn("practical_score", text)
             self.assertIn("candidate_efficiency", text)
+            self.assertIn("approved_avg_sentiment_market_risk_score", text)
+            self.assertIn("approved_sentiment_risk_postures", text)
             self.assertIn("baseline", text)
 
     def test_build_anchor_winners_selects_top_eligible_per_anchor(self):

@@ -336,6 +336,89 @@ def signal_payload(snapshot):
     return normalize_signal_payload(payload)
 
 
+RISK_CONTEXT_NUMERIC_FIELDS = {
+    "market_risk_score": "sentiment_market_risk_score",
+    "buy_aggression_score": "sentiment_buy_aggression_score",
+    "downside_risk_score": "sentiment_downside_risk_score",
+    "bottoming_score": "sentiment_bottoming_score",
+    "rebound_score": "sentiment_rebound_score",
+    "breakout_score": "sentiment_breakout_score",
+    "position_size_multiplier": "sentiment_position_size_multiplier",
+    "grid_aggression_multiplier": "sentiment_grid_aggression_multiplier",
+    "target_profit_multiplier": "sentiment_target_profit_multiplier",
+    "entry_discount_multiplier": "sentiment_entry_discount_multiplier",
+}
+
+
+def risk_context_payload(signal):
+    risk_context = signal.get("risk_context")
+    return risk_context if isinstance(risk_context, dict) else {}
+
+
+def sentiment_risk_event_fields(signal):
+    risk_context = risk_context_payload(signal)
+    flags = risk_context.get("hard_safety_flags")
+    if not isinstance(flags, list):
+        flags = []
+    fields = {
+        "sentiment_risk_posture": risk_context.get("recommended_posture"),
+        "sentiment_hard_safety_flags": flags,
+    }
+    for source_key, output_key in RISK_CONTEXT_NUMERIC_FIELDS.items():
+        fields[output_key] = safe_float(risk_context.get(source_key))
+    return fields
+
+
+def summarize_sentiment_risk_events(events):
+    numeric_totals = Counter()
+    numeric_counts = Counter()
+    posture_counts = Counter()
+    hard_safety_flag_counts = Counter()
+    samples = 0
+
+    for event in events or []:
+        if not any(key in event for key in RISK_CONTEXT_NUMERIC_FIELDS.values()):
+            continue
+        samples += 1
+        posture = event.get("sentiment_risk_posture") or "unknown"
+        posture_counts[posture] += 1
+        for output_key in RISK_CONTEXT_NUMERIC_FIELDS.values():
+            value = safe_float(event.get(output_key))
+            if value is None:
+                continue
+            numeric_totals[output_key] += value
+            numeric_counts[output_key] += 1
+        flags = event.get("sentiment_hard_safety_flags")
+        if not isinstance(flags, list):
+            flags = []
+        for flag in flags:
+            hard_safety_flag_counts[str(flag)] += 1
+
+    summary = {
+        "sentiment_risk_sample_count": samples,
+        "sentiment_risk_posture_counts": dict(posture_counts.most_common()),
+        "sentiment_hard_safety_flag_counts": dict(
+            hard_safety_flag_counts.most_common()
+        ),
+        "sentiment_hard_safety_flag_event_count": sum(
+            1
+            for event in events or []
+            if isinstance(event.get("sentiment_hard_safety_flags"), list)
+            and event.get("sentiment_hard_safety_flags")
+        ),
+    }
+    for output_key in RISK_CONTEXT_NUMERIC_FIELDS.values():
+        avg_key = f"avg_{output_key}"
+        if numeric_counts[output_key]:
+            summary[avg_key] = round(
+                numeric_totals[output_key] / numeric_counts[output_key],
+                6,
+            )
+        else:
+            summary[avg_key] = None
+    return summary
+
+
 def state_payload(snapshot):
     payload = snapshot.get("state") or {}
     return payload if isinstance(payload, dict) else {}
@@ -1199,6 +1282,7 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
         replay = replay_from_snapshots(variant_snapshots)
         potential = summarize_potential_from_approved_events(replay, variant_snapshots)
         summary = replay["summary"]
+        risk_summary = summary.get("approved_sentiment_risk") or {}
         row = {
             "strategy_label": entry["label"],
             "strategy_file": strategy_path,
@@ -1222,6 +1306,50 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
             "potential_avg_end_return_pct": potential.get("avg_end_return_pct"),
             "potential_avg_max_runup_pct": potential.get("avg_max_runup_pct"),
             "potential_avg_max_drawdown_pct": potential.get("avg_max_drawdown_pct"),
+            "approved_sentiment_risk_samples": risk_summary.get(
+                "sentiment_risk_sample_count"
+            ),
+            "approved_sentiment_risk_postures": json.dumps(
+                risk_summary.get("sentiment_risk_posture_counts") or {},
+                sort_keys=True,
+            ),
+            "approved_sentiment_hard_safety_flag_events": risk_summary.get(
+                "sentiment_hard_safety_flag_event_count"
+            ),
+            "approved_sentiment_hard_safety_flags": json.dumps(
+                risk_summary.get("sentiment_hard_safety_flag_counts") or {},
+                sort_keys=True,
+            ),
+            "approved_avg_sentiment_market_risk_score": risk_summary.get(
+                "avg_sentiment_market_risk_score"
+            ),
+            "approved_avg_sentiment_buy_aggression_score": risk_summary.get(
+                "avg_sentiment_buy_aggression_score"
+            ),
+            "approved_avg_sentiment_downside_risk_score": risk_summary.get(
+                "avg_sentiment_downside_risk_score"
+            ),
+            "approved_avg_sentiment_bottoming_score": risk_summary.get(
+                "avg_sentiment_bottoming_score"
+            ),
+            "approved_avg_sentiment_rebound_score": risk_summary.get(
+                "avg_sentiment_rebound_score"
+            ),
+            "approved_avg_sentiment_breakout_score": risk_summary.get(
+                "avg_sentiment_breakout_score"
+            ),
+            "approved_avg_sentiment_position_size_multiplier": risk_summary.get(
+                "avg_sentiment_position_size_multiplier"
+            ),
+            "approved_avg_sentiment_grid_aggression_multiplier": risk_summary.get(
+                "avg_sentiment_grid_aggression_multiplier"
+            ),
+            "approved_avg_sentiment_target_profit_multiplier": risk_summary.get(
+                "avg_sentiment_target_profit_multiplier"
+            ),
+            "approved_avg_sentiment_entry_discount_multiplier": risk_summary.get(
+                "avg_sentiment_entry_discount_multiplier"
+            ),
         }
         rows.append(row)
         detailed.append({
@@ -1479,6 +1607,20 @@ def write_strategy_comparison_csv(comparison, output_path):
         "potential_avg_end_return_pct",
         "potential_avg_max_runup_pct",
         "potential_avg_max_drawdown_pct",
+        "approved_sentiment_risk_samples",
+        "approved_sentiment_risk_postures",
+        "approved_sentiment_hard_safety_flag_events",
+        "approved_sentiment_hard_safety_flags",
+        "approved_avg_sentiment_market_risk_score",
+        "approved_avg_sentiment_buy_aggression_score",
+        "approved_avg_sentiment_downside_risk_score",
+        "approved_avg_sentiment_bottoming_score",
+        "approved_avg_sentiment_rebound_score",
+        "approved_avg_sentiment_breakout_score",
+        "approved_avg_sentiment_position_size_multiplier",
+        "approved_avg_sentiment_grid_aggression_multiplier",
+        "approved_avg_sentiment_target_profit_multiplier",
+        "approved_avg_sentiment_entry_discount_multiplier",
     ]
     with open(resolved, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -1510,6 +1652,20 @@ def write_ranked_strategy_csv(comparison, output_path):
         "potential_avg_end_return_pct",
         "potential_avg_max_runup_pct",
         "potential_avg_max_drawdown_pct",
+        "approved_sentiment_risk_samples",
+        "approved_sentiment_risk_postures",
+        "approved_sentiment_hard_safety_flag_events",
+        "approved_sentiment_hard_safety_flags",
+        "approved_avg_sentiment_market_risk_score",
+        "approved_avg_sentiment_buy_aggression_score",
+        "approved_avg_sentiment_downside_risk_score",
+        "approved_avg_sentiment_bottoming_score",
+        "approved_avg_sentiment_rebound_score",
+        "approved_avg_sentiment_breakout_score",
+        "approved_avg_sentiment_position_size_multiplier",
+        "approved_avg_sentiment_grid_aggression_multiplier",
+        "approved_avg_sentiment_target_profit_multiplier",
+        "approved_avg_sentiment_entry_discount_multiplier",
         "raw_candidates",
         "hold_snapshots",
         "approved_range_low",
@@ -2032,6 +2188,7 @@ def replay_from_snapshots(snapshots):
         if not signal:
             summary["missing_signal"] += 1
             continue
+        sentiment_risk_fields = sentiment_risk_event_fields(signal)
 
         built = build_candidates(snapshot, price)
         if built["hold_reason"] is not None:
@@ -2070,6 +2227,7 @@ def replay_from_snapshots(snapshots):
                 ),
                 "hold_reason": built["hold_reason"],
                 "raw_candidate_count": len(built["raw_candidates"]),
+                **sentiment_risk_fields,
             })
             continue
 
@@ -2099,6 +2257,7 @@ def replay_from_snapshots(snapshots):
                     "sell_pct_override": candidate.get("sell_pct_override"),
                     "status": "approved_gate_only",
                     "reason": None,
+                    **sentiment_risk_fields,
                 }
                 recent.append(approved_event)
                 recent_approved.append(approved_event)
@@ -2121,6 +2280,7 @@ def replay_from_snapshots(snapshots):
                     "level": round(candidate["level"], 2),
                     "status": "blocked_gate_only",
                     "reason": reason,
+                    **sentiment_risk_fields,
                 })
 
     summary["hold_reason_counts"] = dict(hold_reason_counts.most_common())
@@ -2144,6 +2304,9 @@ def replay_from_snapshots(snapshots):
     summary["approved_counts_by_source"] = dict(approved_counts_by_source.most_common())
     summary["approved_counts_by_strategy_mode"] = dict(
         approved_counts_by_strategy_mode.most_common()
+    )
+    summary["approved_sentiment_risk"] = summarize_sentiment_risk_events(
+        approved_events
     )
 
     return {
