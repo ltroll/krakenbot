@@ -1225,6 +1225,14 @@ def summarize_potential_from_approved_events(replay, snapshots):
             continue
         potential = simulate_missed_opportunity(snapshot, event, snapshots or [])
         if potential:
+            size_multiplier = safe_float(
+                event.get("risk_context_position_size_effective_multiplier")
+            )
+            if size_multiplier is None:
+                size_multiplier = 1.0
+            potential["risk_context_position_size_effective_multiplier"] = (
+                size_multiplier
+            )
             potential_results.append(potential)
 
     end_returns = [
@@ -1245,6 +1253,29 @@ def summarize_potential_from_approved_events(replay, snapshots):
     take_profit_count = sum(
         1 for result in potential_results if result.get("take_profit_reached")
     )
+    risk_sized_end_returns = [
+        result["end_return_pct"]
+        * result.get("risk_context_position_size_effective_multiplier", 1.0)
+        for result in potential_results
+        if result.get("end_return_pct") is not None
+    ]
+    risk_sized_max_runups = [
+        result["max_runup_pct"]
+        * result.get("risk_context_position_size_effective_multiplier", 1.0)
+        for result in potential_results
+        if result.get("max_runup_pct") is not None
+    ]
+    risk_sized_max_drawdowns = [
+        result["max_drawdown_pct"]
+        * result.get("risk_context_position_size_effective_multiplier", 1.0)
+        for result in potential_results
+        if result.get("max_drawdown_pct") is not None
+    ]
+    size_multipliers = [
+        result.get("risk_context_position_size_effective_multiplier", 1.0)
+        for result in potential_results
+        if result.get("risk_context_position_size_effective_multiplier") is not None
+    ]
 
     return {
         "evaluated_count": len(potential_results),
@@ -1274,6 +1305,26 @@ def summarize_potential_from_approved_events(replay, snapshots):
         "avg_max_drawdown_pct": (
             round(statistics.mean(max_drawdowns), 6)
             if max_drawdowns
+            else None
+        ),
+        "avg_risk_size_multiplier": (
+            round(statistics.mean(size_multipliers), 6)
+            if size_multipliers
+            else None
+        ),
+        "risk_sized_avg_end_return_pct": (
+            round(statistics.mean(risk_sized_end_returns), 6)
+            if risk_sized_end_returns
+            else None
+        ),
+        "risk_sized_avg_max_runup_pct": (
+            round(statistics.mean(risk_sized_max_runups), 6)
+            if risk_sized_max_runups
+            else None
+        ),
+        "risk_sized_avg_max_drawdown_pct": (
+            round(statistics.mean(risk_sized_max_drawdowns), 6)
+            if risk_sized_max_drawdowns
             else None
         ),
     }
@@ -1329,6 +1380,18 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
             "potential_avg_end_return_pct": potential.get("avg_end_return_pct"),
             "potential_avg_max_runup_pct": potential.get("avg_max_runup_pct"),
             "potential_avg_max_drawdown_pct": potential.get("avg_max_drawdown_pct"),
+            "potential_avg_risk_size_multiplier": potential.get(
+                "avg_risk_size_multiplier"
+            ),
+            "potential_risk_sized_avg_end_return_pct": potential.get(
+                "risk_sized_avg_end_return_pct"
+            ),
+            "potential_risk_sized_avg_max_runup_pct": potential.get(
+                "risk_sized_avg_max_runup_pct"
+            ),
+            "potential_risk_sized_avg_max_drawdown_pct": potential.get(
+                "risk_sized_avg_max_drawdown_pct"
+            ),
             "approved_sentiment_risk_samples": risk_summary.get(
                 "sentiment_risk_sample_count"
             ),
@@ -1635,6 +1698,10 @@ def write_strategy_comparison_csv(comparison, output_path):
         "potential_avg_end_return_pct",
         "potential_avg_max_runup_pct",
         "potential_avg_max_drawdown_pct",
+        "potential_avg_risk_size_multiplier",
+        "potential_risk_sized_avg_end_return_pct",
+        "potential_risk_sized_avg_max_runup_pct",
+        "potential_risk_sized_avg_max_drawdown_pct",
         "approved_sentiment_risk_samples",
         "approved_sentiment_risk_postures",
         "approved_sentiment_hard_safety_flag_events",
@@ -1681,6 +1748,10 @@ def write_ranked_strategy_csv(comparison, output_path):
         "potential_avg_end_return_pct",
         "potential_avg_max_runup_pct",
         "potential_avg_max_drawdown_pct",
+        "potential_avg_risk_size_multiplier",
+        "potential_risk_sized_avg_end_return_pct",
+        "potential_risk_sized_avg_max_runup_pct",
+        "potential_risk_sized_avg_max_drawdown_pct",
         "approved_sentiment_risk_samples",
         "approved_sentiment_risk_postures",
         "approved_sentiment_hard_safety_flag_events",

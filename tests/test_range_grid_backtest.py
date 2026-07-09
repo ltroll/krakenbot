@@ -220,6 +220,12 @@ class RangeGridBacktestTests(unittest.TestCase):
                 "2026-06-13T12:00:00+00:00",
                 100.0,
                 strategy_modes=["llm_target"],
+                strategy_overrides={
+                    "risk_context_position_sizing_enabled": True,
+                    "risk_context_position_size_min_multiplier": 0.35,
+                    "risk_context_position_size_max_multiplier": 1.0,
+                    "risk_context_position_size_blend": 0.5,
+                },
                 risk_context={
                     "recommended_posture": "entry_allowed",
                     "market_risk_score": 0.2,
@@ -228,7 +234,7 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "bottoming_score": 0.7,
                     "rebound_score": 0.5,
                     "breakout_score": 0.1,
-                    "position_size_multiplier": 0.4,
+                    "position_size_multiplier": 0.35,
                     "grid_aggression_multiplier": 0.8,
                     "target_profit_multiplier": 0.9,
                     "entry_discount_multiplier": 1.1,
@@ -239,10 +245,17 @@ class RangeGridBacktestTests(unittest.TestCase):
                 "2026-06-13T12:01:00+00:00",
                 100.0,
                 strategy_modes=["llm_target"],
+                strategy_overrides={
+                    "risk_context_position_sizing_enabled": True,
+                    "risk_context_position_size_min_multiplier": 0.35,
+                    "risk_context_position_size_max_multiplier": 1.0,
+                    "risk_context_position_size_blend": 0.5,
+                },
                 risk_context={
                     "recommended_posture": "entry_allowed",
                     "market_risk_score": 0.4,
                     "buy_aggression_score": 0.8,
+                    "position_size_multiplier": 0.35,
                     "hard_safety_flags": ["spread_wide"],
                 },
             ),
@@ -264,8 +277,20 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(risk_summary["avg_sentiment_market_risk_score"], 0.3)
         self.assertEqual(risk_summary["avg_sentiment_buy_aggression_score"], 0.7)
         self.assertEqual(
+            risk_summary[
+                "avg_risk_context_position_size_effective_multiplier"
+            ],
+            0.675,
+        )
+        self.assertEqual(
             result["recent_approved_events"][0]["sentiment_risk_posture"],
             "entry_allowed",
+        )
+        self.assertEqual(
+            result["recent_approved_events"][0][
+                "risk_context_position_size_effective_multiplier"
+            ],
+            0.675,
         )
 
     def test_replay_does_not_count_missing_risk_context_as_sample(self):
@@ -1152,6 +1177,38 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(summary["potential_summary"]["evaluated_count"], 1)
         self.assertEqual(summary["potential_summary"]["take_profit_reached_count"], 1)
 
+    def test_potential_summary_reports_risk_sized_return_impact(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                100.0,
+            ),
+            make_snapshot(
+                "2026-06-13T12:10:00+00:00",
+                99.0,
+            ),
+        ]
+        replay = {
+            "approved_events": [
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "level": 100.0,
+                    "buy_source": "range_low",
+                    "risk_context_position_size_effective_multiplier": 0.675,
+                }
+            ]
+        }
+
+        summary = backtest.summarize_potential_from_approved_events(
+            replay,
+            snapshots,
+        )
+
+        self.assertEqual(summary["avg_end_return_pct"], -1.0)
+        self.assertEqual(summary["avg_risk_size_multiplier"], 0.675)
+        self.assertEqual(summary["risk_sized_avg_end_return_pct"], -0.675)
+        self.assertEqual(summary["risk_sized_avg_max_drawdown_pct"], -0.675)
+
     def test_missed_opportunities_prefer_runtime_status_block_reason(self):
         snapshots = [
             make_snapshot(
@@ -1423,6 +1480,10 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "potential_avg_end_return_pct": 0.12,
                     "potential_avg_max_runup_pct": 0.4,
                     "potential_avg_max_drawdown_pct": -0.2,
+                    "potential_avg_risk_size_multiplier": 0.675,
+                    "potential_risk_sized_avg_end_return_pct": 0.081,
+                    "potential_risk_sized_avg_max_runup_pct": 0.27,
+                    "potential_risk_sized_avg_max_drawdown_pct": -0.135,
                     "approved_sentiment_risk_samples": 2,
                     "approved_sentiment_risk_postures": '{"entry_allowed": 2}',
                     "approved_sentiment_hard_safety_flag_events": 0,
@@ -1449,7 +1510,9 @@ class RangeGridBacktestTests(unittest.TestCase):
                 text = f.read()
             self.assertIn("approved_avg_sentiment_market_risk_score", text)
             self.assertIn("approved_sentiment_risk_postures", text)
+            self.assertIn("potential_risk_sized_avg_end_return_pct", text)
             self.assertIn("0.3", text)
+            self.assertIn("0.081", text)
             with open(output_path, encoding="utf-8") as f:
                 text = f.read()
             self.assertIn("strategy_label", text)
@@ -1566,6 +1629,10 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "potential_avg_end_return_pct": 0.12,
                     "potential_avg_max_runup_pct": 0.4,
                     "potential_avg_max_drawdown_pct": -0.2,
+                    "potential_avg_risk_size_multiplier": 0.675,
+                    "potential_risk_sized_avg_end_return_pct": 0.081,
+                    "potential_risk_sized_avg_max_runup_pct": 0.27,
+                    "potential_risk_sized_avg_max_drawdown_pct": -0.135,
                     "approved_sentiment_risk_samples": 2,
                     "approved_sentiment_risk_postures": '{"entry_allowed": 2}',
                     "approved_sentiment_hard_safety_flag_events": 0,
@@ -1594,6 +1661,8 @@ class RangeGridBacktestTests(unittest.TestCase):
             self.assertIn("candidate_efficiency", text)
             self.assertIn("approved_avg_sentiment_market_risk_score", text)
             self.assertIn("approved_sentiment_risk_postures", text)
+            self.assertIn("potential_risk_sized_avg_end_return_pct", text)
+            self.assertIn("0.081", text)
             self.assertIn("baseline", text)
 
     def test_build_anchor_winners_selects_top_eligible_per_anchor(self):
