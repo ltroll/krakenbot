@@ -734,6 +734,10 @@ operating_mode = normalize_operating_mode(
     strategy_config.get("operating_mode", "range_plus_llm")
 )
 paper_trading_enabled = profile_bool("paper_trading_enabled", False)
+risk_context_shadow_buy_enabled = profile_bool(
+    "risk_context_shadow_buy_enabled",
+    env_default_bool("RANGE_GRID_RISK_CONTEXT_SHADOW_BUY_ENABLED", False)
+)
 anchor_strategy_router_enabled = profile_bool(
     "anchor_strategy_router_enabled",
     env_default_bool("RANGE_GRID_ANCHOR_ROUTER_ENABLED", False)
@@ -3289,6 +3293,7 @@ def main():
         config_file=CONFIG_FILE,
         operating_mode=operating_mode,
         paper_trading_enabled=paper_trading_enabled,
+        risk_context_shadow_buy_enabled=risk_context_shadow_buy_enabled,
         grid_anchor=grid_anchor,
         configured_strategy_modes=configured_strategy_modes,
         strategy_modes=strategy_modes,
@@ -5183,6 +5188,71 @@ def main():
                             route.get("strategy_file") if route else None
                         )
                     )
+
+                    if risk_context_shadow_buy_enabled:
+                        shadow_sell_price = compute_sell_target_price(
+                            level,
+                            active_sell_pct_override
+                        )
+                        shadow_payload = {
+                            "mode": "shadow",
+                            "cycle_id": cycle_id,
+                            "level": round(level, PRICE_DECIMALS),
+                            "volume": round(volume, VOLUME_DECIMALS),
+                            "trade_notional_usd": round(trade_notional_usd, 8),
+                            "market_price": price,
+                            "shadow_sell_price": round(
+                                shadow_sell_price,
+                                PRICE_DECIMALS
+                            ),
+                            "execution_signal": execution_signal,
+                            "buy_source": buy_source,
+                            "sell_pct_override": active_sell_pct_override,
+                            "effective_position_size_pct": (
+                                candidate_effective_position_size_pct
+                            ),
+                            "risk_context_position_sizing_enabled": (
+                                risk_context_size_adjustment["enabled"]
+                            ),
+                            "risk_context_position_size_raw_multiplier": (
+                                risk_context_size_adjustment["raw_multiplier"]
+                            ),
+                            "risk_context_position_size_clamped_multiplier": (
+                                risk_context_size_adjustment[
+                                    "clamped_multiplier"
+                                ]
+                            ),
+                            "risk_context_position_size_blend": (
+                                risk_context_size_adjustment["blend"]
+                            ),
+                            "risk_context_position_size_effective_multiplier": (
+                                risk_context_size_multiplier
+                            ),
+                            "sentiment_regime": regime["name"],
+                            "operating_mode": operating_mode,
+                            "sentiment_control_mode": sentiment_control_mode,
+                            "anchor_strategy_router_enabled": (
+                                anchor_strategy_router_enabled
+                            ),
+                            "anchor_strategy_router_anchor": route_anchor,
+                            "anchor_strategy_router_strategy_label": (
+                                route.get("strategy_label") if route else None
+                            ),
+                            "anchor_strategy_router_strategy_file": (
+                                route.get("strategy_file") if route else None
+                            ),
+                            "paper_trading_enabled": paper_trading_enabled,
+                            "shadow_reason": "approved_risk_scored_candidate",
+                        }
+                        shadow_payload.update(sentiment_risk_fields)
+                        log_event(
+                            "RISK_CONTEXT_PAPER_BUY_PLANNED",
+                            **shadow_payload,
+                        )
+                        log_trade_activity(
+                            "RISK_CONTEXT_PAPER_BUY_PLANNED",
+                            **shadow_payload,
+                        )
 
                     state["stats"]["approved_buy_candidates"] += 1
                     increment_source_stat(

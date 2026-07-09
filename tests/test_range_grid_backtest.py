@@ -954,6 +954,34 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertGreaterEqual(result["summary"]["raw_candidates"], 1)
         self.assertGreaterEqual(result["summary"]["approved_candidates"], 1)
 
+    def test_actual_trade_summary_counts_risk_context_paper_buys(self):
+        events = [
+            {
+                "ts": "2026-06-13T12:00:00+00:00",
+                "event": "RISK_CONTEXT_PAPER_BUY_PLANNED",
+                "buy_source": "range_high_band",
+                "level": 104.5,
+                "volume": 0.001,
+                "trade_notional_usd": 10.45,
+                "risk_context_position_size_effective_multiplier": 0.675,
+                "sentiment_risk_posture": "neutral_watch",
+            }
+        ]
+
+        summary = backtest.summarize_actual_trades(events)
+
+        self.assertEqual(summary["risk_context_paper_buys_planned"], 1)
+        self.assertEqual(
+            summary["risk_context_paper_buys_by_source"],
+            {"range_high_band": 1},
+        )
+        self.assertEqual(
+            summary["recent_risk_context_paper_buys"][0][
+                "risk_context_position_size_effective_multiplier"
+            ],
+            0.675,
+        )
+
     def test_replay_risk_modulated_blocks_high_range_during_blocked_calibration(self):
         snapshots = [
             make_snapshot(

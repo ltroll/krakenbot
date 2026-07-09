@@ -2590,16 +2590,20 @@ def summarize_actual_trades(events):
         "sell_orders_filled": 0,
         "order_rejected": 0,
         "sell_order_repriced": 0,
+        "risk_context_paper_buys_planned": 0,
         "realized_gross_pnl": 0.0,
         "realized_estimated_net_pnl": 0.0,
         "buy_orders_placed_by_source": {},
+        "risk_context_paper_buys_by_source": {},
         "buy_filled_by_source": {},
         "sell_filled_by_source": {},
         "rejected_by_side": {},
         "recent_fills": [],
         "recent_buy_orders": [],
+        "recent_risk_context_paper_buys": [],
     }
     buy_orders_placed_by_source = Counter()
+    risk_context_paper_buys_by_source = Counter()
     buy_filled_by_source = Counter()
     sell_filled_by_source = Counter()
     rejected_by_side = Counter()
@@ -2615,6 +2619,24 @@ def summarize_actual_trades(events):
                 "buy_source": event.get("buy_source"),
                 "price": event.get("price"),
                 "volume": event.get("volume"),
+            })
+        elif name == "RISK_CONTEXT_PAPER_BUY_PLANNED":
+            summary["risk_context_paper_buys_planned"] += 1
+            risk_context_paper_buys_by_source[
+                event.get("buy_source") or "unknown"
+            ] += 1
+            summary["recent_risk_context_paper_buys"].append({
+                "ts": event.get("ts"),
+                "buy_source": event.get("buy_source"),
+                "level": event.get("level"),
+                "volume": event.get("volume"),
+                "trade_notional_usd": event.get("trade_notional_usd"),
+                "risk_context_position_size_effective_multiplier": (
+                    event.get(
+                        "risk_context_position_size_effective_multiplier"
+                    )
+                ),
+                "sentiment_risk_posture": event.get("sentiment_risk_posture"),
             })
         elif name == "BUY_ORDER_FILLED":
             summary["buy_orders_filled"] += 1
@@ -2646,6 +2668,9 @@ def summarize_actual_trades(events):
     summary["buy_orders_placed_by_source"] = dict(
         buy_orders_placed_by_source.most_common()
     )
+    summary["risk_context_paper_buys_by_source"] = dict(
+        risk_context_paper_buys_by_source.most_common()
+    )
     summary["buy_filled_by_source"] = dict(buy_filled_by_source.most_common())
     summary["sell_filled_by_source"] = dict(sell_filled_by_source.most_common())
     summary["rejected_by_side"] = dict(rejected_by_side.most_common())
@@ -2654,6 +2679,9 @@ def summarize_actual_trades(events):
     summary["average_hold_minutes"] = round(statistics.mean(hold_minutes), 2) if hold_minutes else None
     summary["recent_fills"] = summary["recent_fills"][-BACKTEST_RECENT_LIMIT:]
     summary["recent_buy_orders"] = summary["recent_buy_orders"][-BACKTEST_RECENT_LIMIT:]
+    summary["recent_risk_context_paper_buys"] = (
+        summary["recent_risk_context_paper_buys"][-BACKTEST_RECENT_LIMIT:]
+    )
     return summary
 
 
