@@ -44,6 +44,16 @@ class RangeGridGuardrailsTests(unittest.TestCase):
         })
         self.assertTrue(any("execution_signal_threshold" in error for error in errors))
 
+    def test_validate_strategy_config_rejects_out_of_bounds_risk_context_threshold(self):
+        errors = guardrails.validate_strategy_config({
+            "grid_anchor": "low,high",
+            "operating_mode": "range_only",
+            "risk_context_high_band_min_breakout_score": 1.5,
+        })
+        self.assertTrue(
+            any("risk_context_high_band_min_breakout_score" in error for error in errors)
+        )
+
     def test_summarize_sell_backlog_counts_and_ages(self):
         now = datetime(2026, 6, 13, 12, 0, tzinfo=timezone.utc)
         summary = guardrails.summarize_sell_backlog(

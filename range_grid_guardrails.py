@@ -129,6 +129,24 @@ def validate_strategy_config(strategy_config):
             if numeric < -1 or numeric > 1:
                 errors.append("execution_signal_threshold must be between -1 and 1")
 
+    bounded_score_fields = (
+        "risk_context_high_band_min_buy_aggression_score",
+        "risk_context_high_band_min_breakout_score",
+        "risk_context_high_band_min_rebound_score",
+        "risk_context_high_band_max_market_risk_score",
+    )
+    for field in bounded_score_fields:
+        value = strategy_config.get(field)
+        if value is None:
+            continue
+        try:
+            numeric = float(value)
+        except Exception:
+            errors.append(f"{field} must be numeric")
+            continue
+        if numeric < 0 or numeric > 1:
+            errors.append(f"{field} must be between 0 and 1")
+
     try:
         profit_target_pct = float(strategy_config.get("profit_target_pct", 0.01))
         min_profit_target_pct = float(

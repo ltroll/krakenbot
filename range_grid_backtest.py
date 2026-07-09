@@ -1744,6 +1744,80 @@ def flow_adjustment(config, flow_pressure, buy_source):
     return {"size_multiplier": 1.0, "block_buy": False, "reason": None}
 
 
+def risk_context_high_band_guard(config, risk_context):
+    if not strategy_bool(config, "risk_context_high_band_guard_enabled", False):
+        return {"allowed": True, "reason": None}
+
+    if not isinstance(risk_context, dict):
+        risk_context = {}
+
+    flags = risk_context.get("hard_safety_flags")
+    if not isinstance(flags, list):
+        flags = []
+
+    market_risk = safe_float(risk_context.get("market_risk_score"))
+    buy_aggression = safe_float(risk_context.get("buy_aggression_score"))
+    rebound = safe_float(risk_context.get("rebound_score"))
+    breakout = safe_float(risk_context.get("breakout_score"))
+
+    max_market_risk = strategy_float(
+        config,
+        "risk_context_high_band_max_market_risk_score",
+        0.40,
+    )
+    min_buy_aggression = strategy_float(
+        config,
+        "risk_context_high_band_min_buy_aggression_score",
+        0.55,
+    )
+    min_rebound = strategy_float(
+        config,
+        "risk_context_high_band_min_rebound_score",
+        0.45,
+    )
+    min_breakout = strategy_float(
+        config,
+        "risk_context_high_band_min_breakout_score",
+        0.45,
+    )
+
+    if flags:
+        return {
+            "allowed": False,
+            "reason": "risk_context_high_band_hard_safety_flag",
+        }
+    if market_risk is None:
+        return {
+            "allowed": False,
+            "reason": "risk_context_high_band_missing_market_risk",
+        }
+    if market_risk > max_market_risk:
+        return {
+            "allowed": False,
+            "reason": "risk_context_high_band_market_risk_high",
+        }
+    if buy_aggression is None:
+        return {
+            "allowed": False,
+            "reason": "risk_context_high_band_missing_buy_aggression",
+        }
+    if buy_aggression < min_buy_aggression:
+        return {
+            "allowed": False,
+            "reason": "risk_context_high_band_buy_aggression_low",
+        }
+    if (
+        (rebound is None or rebound < min_rebound)
+        and (breakout is None or breakout < min_breakout)
+    ):
+        return {
+            "allowed": False,
+            "reason": "risk_context_high_band_confirmation_low",
+        }
+
+    return {"allowed": True, "reason": None}
+
+
 def find_llm_target(signal, price, llm_target_proximity_pct):
     targets = signal.get("target_prices")
     if not isinstance(targets, list):
@@ -2101,6 +2175,13 @@ def evaluate_candidate(snapshot, candidate, price):
         return False, "sentiment_action_not_high_range_permitted"
     if buy_source != "llm_target" and not range_core_buys_allowed:
         return False, "sentiment_action_not_range_permitted"
+    if buy_source == "range_high_band":
+        high_band_guard = risk_context_high_band_guard(
+            config,
+            risk_context_payload(signal),
+        )
+        if not high_band_guard["allowed"]:
+            return False, high_band_guard["reason"]
 
     flow_control = flow_adjustment(config, flow_pressure, buy_source)
     if flow_control["block_buy"]:

@@ -635,6 +635,26 @@ sentiment_defensive_extra_aging_reduction_pct = profile_float(
     "sentiment_defensive_extra_aging_reduction_pct",
     0.001
 )
+risk_context_high_band_guard_enabled = profile_bool(
+    "risk_context_high_band_guard_enabled",
+    False
+)
+risk_context_high_band_min_buy_aggression_score = profile_float(
+    "risk_context_high_band_min_buy_aggression_score",
+    0.55
+)
+risk_context_high_band_min_breakout_score = profile_float(
+    "risk_context_high_band_min_breakout_score",
+    0.45
+)
+risk_context_high_band_min_rebound_score = profile_float(
+    "risk_context_high_band_min_rebound_score",
+    0.45
+)
+risk_context_high_band_max_market_risk_score = profile_float(
+    "risk_context_high_band_max_market_risk_score",
+    0.40
+)
 range_fallback_execution_signal = profile_float(
     "range_fallback_execution_signal",
     max(execution_signal_threshold, sentiment_defensive_threshold)
@@ -2470,6 +2490,134 @@ def price_is_above_allowed_entry(
     return price > (level * (1 + tolerance_pct))
 
 
+def strategy_bool_with_fallback(config, fallback_config, key, default=False):
+    if key in config:
+        return strategy_bool(config, key, default)
+    if isinstance(fallback_config, dict) and key in fallback_config:
+        return strategy_bool(fallback_config, key, default)
+    return bool(default)
+
+
+def strategy_float_with_fallback(config, fallback_config, key, default):
+    if key in config:
+        return strategy_float(config, key, default)
+    if isinstance(fallback_config, dict) and key in fallback_config:
+        return strategy_float(fallback_config, key, default)
+    return float(default)
+
+
+def optional_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def risk_context_high_band_guard(
+    config,
+    risk_context,
+    fallback_config=None
+):
+    if not strategy_bool_with_fallback(
+        config,
+        fallback_config,
+        "risk_context_high_band_guard_enabled",
+        False
+    ):
+        return {"allowed": True, "reason": None}
+
+    if not isinstance(risk_context, dict):
+        risk_context = {}
+
+    flags = risk_context.get("hard_safety_flags")
+    if not isinstance(flags, list):
+        flags = []
+
+    market_risk = optional_float(risk_context.get("market_risk_score"))
+    buy_aggression = optional_float(risk_context.get("buy_aggression_score"))
+    rebound = optional_float(risk_context.get("rebound_score"))
+    breakout = optional_float(risk_context.get("breakout_score"))
+
+    max_market_risk = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "risk_context_high_band_max_market_risk_score",
+        0.40
+    )
+    min_buy_aggression = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "risk_context_high_band_min_buy_aggression_score",
+        0.55
+    )
+    min_rebound = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "risk_context_high_band_min_rebound_score",
+        0.45
+    )
+    min_breakout = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "risk_context_high_band_min_breakout_score",
+        0.45
+    )
+
+    details = {
+        "risk_context_high_band_max_market_risk_score": max_market_risk,
+        "risk_context_high_band_min_buy_aggression_score": min_buy_aggression,
+        "risk_context_high_band_min_rebound_score": min_rebound,
+        "risk_context_high_band_min_breakout_score": min_breakout,
+        "sentiment_market_risk_score": market_risk,
+        "sentiment_buy_aggression_score": buy_aggression,
+        "sentiment_rebound_score": rebound,
+        "sentiment_breakout_score": breakout,
+        "sentiment_hard_safety_flags": flags,
+    }
+
+    if flags:
+        return {
+            "allowed": False,
+            "reason": "risk_context_high_band_hard_safety_flag",
+            **details,
+        }
+    if market_risk is None:
+        return {
+            "allowed": False,
+            "reason": "risk_context_high_band_missing_market_risk",
+            **details,
+        }
+    if market_risk > max_market_risk:
+        return {
+            "allowed": False,
+            "reason": "risk_context_high_band_market_risk_high",
+            **details,
+        }
+    if buy_aggression is None:
+        return {
+            "allowed": False,
+            "reason": "risk_context_high_band_missing_buy_aggression",
+            **details,
+        }
+    if buy_aggression < min_buy_aggression:
+        return {
+            "allowed": False,
+            "reason": "risk_context_high_band_buy_aggression_low",
+            **details,
+        }
+    if (
+        (rebound is None or rebound < min_rebound)
+        and (breakout is None or breakout < min_breakout)
+    ):
+        return {
+            "allowed": False,
+            "reason": "risk_context_high_band_confirmation_low",
+            **details,
+        }
+
+    return {"allowed": True, "reason": None, **details}
+
+
 def clamp(value, minimum, maximum):
     return max(minimum, min(maximum, value))
 
@@ -3191,6 +3339,21 @@ def main():
         ),
         sentiment_defensive_extra_aging_reduction_pct=(
             sentiment_defensive_extra_aging_reduction_pct
+        ),
+        risk_context_high_band_guard_enabled=(
+            risk_context_high_band_guard_enabled
+        ),
+        risk_context_high_band_min_buy_aggression_score=(
+            risk_context_high_band_min_buy_aggression_score
+        ),
+        risk_context_high_band_min_breakout_score=(
+            risk_context_high_band_min_breakout_score
+        ),
+        risk_context_high_band_min_rebound_score=(
+            risk_context_high_band_min_rebound_score
+        ),
+        risk_context_high_band_max_market_risk_score=(
+            risk_context_high_band_max_market_risk_score
         ),
         anchor_strategy_router_enabled=anchor_strategy_router_enabled,
         anchor_strategy_router_file=anchor_strategy_router_file,
@@ -4488,6 +4651,7 @@ def main():
                     flow_control = flow_adjustment(flow_pressure, buy_source)
                     key = str(level)
                     skip_reason = None
+                    high_band_guard = {"allowed": True, "reason": None}
 
                     if key in state["open_buy_orders"]:
                         skip_reason = "open_buy_order"
@@ -4565,6 +4729,14 @@ def main():
                         skip_reason = (
                             "sentiment_action_not_range_permitted"
                         )
+                    elif buy_source == "range_high_band":
+                        high_band_guard = risk_context_high_band_guard(
+                            route_config,
+                            sentiment_payload.get("risk_context"),
+                            strategy_config
+                        )
+                        if not high_band_guard["allowed"]:
+                            skip_reason = high_band_guard["reason"]
                     elif flow_control["block_buy"]:
                         skip_reason = flow_control["reason"]
                     elif (
@@ -4644,6 +4816,32 @@ def main():
                             range_core_buys_allowed=range_core_buys_allowed,
                             range_high_buys_allowed=range_high_buys_allowed,
                             range_buys_allowed=range_buys_allowed,
+                            risk_context_high_band_guard_allowed=(
+                                high_band_guard.get("allowed")
+                            ),
+                            risk_context_high_band_guard_reason=(
+                                high_band_guard.get("reason")
+                            ),
+                            risk_context_high_band_max_market_risk_score=(
+                                high_band_guard.get(
+                                    "risk_context_high_band_max_market_risk_score"
+                                )
+                            ),
+                            risk_context_high_band_min_buy_aggression_score=(
+                                high_band_guard.get(
+                                    "risk_context_high_band_min_buy_aggression_score"
+                                )
+                            ),
+                            risk_context_high_band_min_rebound_score=(
+                                high_band_guard.get(
+                                    "risk_context_high_band_min_rebound_score"
+                                )
+                            ),
+                            risk_context_high_band_min_breakout_score=(
+                                high_band_guard.get(
+                                    "risk_context_high_band_min_breakout_score"
+                                )
+                            ),
                             operating_mode=operating_mode,
                             sentiment_control_mode=sentiment_control_mode,
                             anchor_strategy_router_enabled=(
