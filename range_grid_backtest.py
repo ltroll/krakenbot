@@ -1768,17 +1768,17 @@ def risk_context_high_band_guard(config, risk_context):
     min_buy_aggression = strategy_float(
         config,
         "risk_context_high_band_min_buy_aggression_score",
-        0.55,
+        0.50,
     )
     min_rebound = strategy_float(
         config,
         "risk_context_high_band_min_rebound_score",
-        0.45,
+        0.50,
     )
     min_breakout = strategy_float(
         config,
         "risk_context_high_band_min_breakout_score",
-        0.45,
+        0.50,
     )
 
     if flags:
@@ -1796,18 +1796,9 @@ def risk_context_high_band_guard(config, risk_context):
             "allowed": False,
             "reason": "risk_context_high_band_market_risk_high",
         }
-    if buy_aggression is None:
-        return {
-            "allowed": False,
-            "reason": "risk_context_high_band_missing_buy_aggression",
-        }
-    if buy_aggression < min_buy_aggression:
-        return {
-            "allowed": False,
-            "reason": "risk_context_high_band_buy_aggression_low",
-        }
     if (
-        (rebound is None or rebound < min_rebound)
+        (buy_aggression is None or buy_aggression < min_buy_aggression)
+        and (rebound is None or rebound < min_rebound)
         and (breakout is None or breakout < min_breakout)
     ):
         return {

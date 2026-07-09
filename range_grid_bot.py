@@ -641,19 +641,19 @@ risk_context_high_band_guard_enabled = profile_bool(
 )
 risk_context_high_band_min_buy_aggression_score = profile_float(
     "risk_context_high_band_min_buy_aggression_score",
-    0.55
+    0.50
 )
 risk_context_high_band_min_breakout_score = profile_float(
     "risk_context_high_band_min_breakout_score",
-    0.45
+    0.50
 )
 risk_context_high_band_min_rebound_score = profile_float(
     "risk_context_high_band_min_rebound_score",
-    0.45
+    0.50
 )
 risk_context_high_band_max_market_risk_score = profile_float(
     "risk_context_high_band_max_market_risk_score",
-    0.40
+    0.35
 )
 range_fallback_execution_signal = profile_float(
     "range_fallback_execution_signal",
@@ -2593,20 +2593,9 @@ def risk_context_high_band_guard(
             "reason": "risk_context_high_band_market_risk_high",
             **details,
         }
-    if buy_aggression is None:
-        return {
-            "allowed": False,
-            "reason": "risk_context_high_band_missing_buy_aggression",
-            **details,
-        }
-    if buy_aggression < min_buy_aggression:
-        return {
-            "allowed": False,
-            "reason": "risk_context_high_band_buy_aggression_low",
-            **details,
-        }
     if (
-        (rebound is None or rebound < min_rebound)
+        (buy_aggression is None or buy_aggression < min_buy_aggression)
+        and (rebound is None or rebound < min_rebound)
         and (breakout is None or breakout < min_breakout)
     ):
         return {

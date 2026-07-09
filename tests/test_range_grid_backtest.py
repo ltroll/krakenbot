@@ -391,15 +391,15 @@ class RangeGridBacktestTests(unittest.TestCase):
                 strategy_modes=["high"],
                 strategy_overrides={
                     "risk_context_high_band_guard_enabled": True,
-                    "risk_context_high_band_min_buy_aggression_score": 0.55,
-                    "risk_context_high_band_min_breakout_score": 0.45,
-                    "risk_context_high_band_min_rebound_score": 0.45,
-                    "risk_context_high_band_max_market_risk_score": 0.4,
+                    "risk_context_high_band_min_buy_aggression_score": 0.5,
+                    "risk_context_high_band_min_breakout_score": 0.5,
+                    "risk_context_high_band_min_rebound_score": 0.5,
+                    "risk_context_high_band_max_market_risk_score": 0.35,
                 },
                 risk_context={
                     "recommended_posture": "neutral_watch",
                     "market_risk_score": 0.24,
-                    "buy_aggression_score": 0.49,
+                    "buy_aggression_score": 0.48,
                     "rebound_score": 0.41,
                     "breakout_score": 0.34,
                     "hard_safety_flags": [],
@@ -412,7 +412,7 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(result["summary"]["approved_candidates"], 0)
         self.assertEqual(
             result["summary"]["blocked_reason_counts"],
-            {"risk_context_high_band_buy_aggression_low": 1},
+            {"risk_context_high_band_confirmation_low": 1},
         )
 
     def test_high_band_risk_context_guard_allows_confirmed_breakout(self):
@@ -424,17 +424,50 @@ class RangeGridBacktestTests(unittest.TestCase):
                 strategy_modes=["high"],
                 strategy_overrides={
                     "risk_context_high_band_guard_enabled": True,
-                    "risk_context_high_band_min_buy_aggression_score": 0.55,
-                    "risk_context_high_band_min_breakout_score": 0.45,
-                    "risk_context_high_band_min_rebound_score": 0.45,
-                    "risk_context_high_band_max_market_risk_score": 0.4,
+                    "risk_context_high_band_min_buy_aggression_score": 0.5,
+                    "risk_context_high_band_min_breakout_score": 0.5,
+                    "risk_context_high_band_min_rebound_score": 0.5,
+                    "risk_context_high_band_max_market_risk_score": 0.35,
                 },
                 risk_context={
                     "recommended_posture": "entry_allowed",
                     "market_risk_score": 0.24,
-                    "buy_aggression_score": 0.58,
+                    "buy_aggression_score": 0.48,
                     "rebound_score": 0.41,
-                    "breakout_score": 0.47,
+                    "breakout_score": 0.51,
+                    "hard_safety_flags": [],
+                },
+            )
+        ]
+
+        result = backtest.replay_from_snapshots(snapshots)
+
+        self.assertEqual(result["summary"]["approved_candidates"], 1)
+        self.assertEqual(
+            result["summary"]["approved_counts_by_source"],
+            {"range_high_band": 1},
+        )
+
+    def test_high_band_risk_context_guard_allows_confirmed_rebound(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                104.5,
+                action_recommendation="watch_only",
+                strategy_modes=["high"],
+                strategy_overrides={
+                    "risk_context_high_band_guard_enabled": True,
+                    "risk_context_high_band_min_buy_aggression_score": 0.5,
+                    "risk_context_high_band_min_breakout_score": 0.5,
+                    "risk_context_high_band_min_rebound_score": 0.5,
+                    "risk_context_high_band_max_market_risk_score": 0.35,
+                },
+                risk_context={
+                    "recommended_posture": "neutral_watch",
+                    "market_risk_score": 0.24,
+                    "buy_aggression_score": 0.48,
+                    "rebound_score": 0.51,
+                    "breakout_score": 0.40,
                     "hard_safety_flags": [],
                 },
             )
@@ -457,10 +490,10 @@ class RangeGridBacktestTests(unittest.TestCase):
                 strategy_modes=["low"],
                 strategy_overrides={
                     "risk_context_high_band_guard_enabled": True,
-                    "risk_context_high_band_min_buy_aggression_score": 0.55,
-                    "risk_context_high_band_min_breakout_score": 0.45,
-                    "risk_context_high_band_min_rebound_score": 0.45,
-                    "risk_context_high_band_max_market_risk_score": 0.4,
+                    "risk_context_high_band_min_buy_aggression_score": 0.5,
+                    "risk_context_high_band_min_breakout_score": 0.5,
+                    "risk_context_high_band_min_rebound_score": 0.5,
+                    "risk_context_high_band_max_market_risk_score": 0.35,
                 },
                 risk_context={
                     "recommended_posture": "neutral_watch",
