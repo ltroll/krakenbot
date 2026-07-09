@@ -396,6 +396,16 @@ def summarize_sentiment_risk_events(events):
                 continue
             numeric_totals[output_key] += value
             numeric_counts[output_key] += 1
+        risk_size_multiplier = safe_float(
+            event.get("risk_context_position_size_effective_multiplier")
+        )
+        if risk_size_multiplier is not None:
+            numeric_totals[
+                "risk_context_position_size_effective_multiplier"
+            ] += risk_size_multiplier
+            numeric_counts[
+                "risk_context_position_size_effective_multiplier"
+            ] += 1
         for flag in flags:
             hard_safety_flag_counts[str(flag)] += 1
 
@@ -421,6 +431,14 @@ def summarize_sentiment_risk_events(events):
             )
         else:
             summary[avg_key] = None
+    output_key = "risk_context_position_size_effective_multiplier"
+    if numeric_counts[output_key]:
+        summary[f"avg_{output_key}"] = round(
+            numeric_totals[output_key] / numeric_counts[output_key],
+            6,
+        )
+    else:
+        summary[f"avg_{output_key}"] = None
     return summary
 
 
@@ -1355,6 +1373,11 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
             "approved_avg_sentiment_entry_discount_multiplier": risk_summary.get(
                 "avg_sentiment_entry_discount_multiplier"
             ),
+            "approved_avg_risk_context_position_size_effective_multiplier": (
+                risk_summary.get(
+                    "avg_risk_context_position_size_effective_multiplier"
+                )
+            ),
         }
         rows.append(row)
         detailed.append({
@@ -1626,6 +1649,7 @@ def write_strategy_comparison_csv(comparison, output_path):
         "approved_avg_sentiment_grid_aggression_multiplier",
         "approved_avg_sentiment_target_profit_multiplier",
         "approved_avg_sentiment_entry_discount_multiplier",
+        "approved_avg_risk_context_position_size_effective_multiplier",
     ]
     with open(resolved, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -1671,6 +1695,7 @@ def write_ranked_strategy_csv(comparison, output_path):
         "approved_avg_sentiment_grid_aggression_multiplier",
         "approved_avg_sentiment_target_profit_multiplier",
         "approved_avg_sentiment_entry_discount_multiplier",
+        "approved_avg_risk_context_position_size_effective_multiplier",
         "raw_candidates",
         "hold_snapshots",
         "approved_range_low",
@@ -1809,6 +1834,59 @@ def risk_context_high_band_guard(config, risk_context):
     return {"allowed": True, "reason": None}
 
 
+def risk_context_position_size_adjustment(config, risk_context):
+    if not strategy_bool(config, "risk_context_position_sizing_enabled", False):
+        return {
+            "enabled": False,
+            "raw_multiplier": None,
+            "clamped_multiplier": 1.0,
+            "blend": 0.0,
+            "effective_multiplier": 1.0,
+        }
+
+    if not isinstance(risk_context, dict):
+        risk_context = {}
+
+    raw_multiplier = safe_float(risk_context.get("position_size_multiplier"))
+    blend = max(
+        0.0,
+        min(
+            1.0,
+            strategy_float(config, "risk_context_position_size_blend", 0.5),
+        ),
+    )
+    if raw_multiplier is None:
+        return {
+            "enabled": True,
+            "raw_multiplier": None,
+            "clamped_multiplier": 1.0,
+            "blend": blend,
+            "effective_multiplier": 1.0,
+        }
+
+    min_multiplier = strategy_float(
+        config,
+        "risk_context_position_size_min_multiplier",
+        0.35,
+    )
+    max_multiplier = strategy_float(
+        config,
+        "risk_context_position_size_max_multiplier",
+        1.0,
+    )
+    lower = min(min_multiplier, max_multiplier)
+    upper = max(min_multiplier, max_multiplier)
+    clamped_multiplier = max(lower, min(upper, raw_multiplier))
+    effective_multiplier = 1.0 + ((clamped_multiplier - 1.0) * blend)
+    return {
+        "enabled": True,
+        "raw_multiplier": raw_multiplier,
+        "clamped_multiplier": clamped_multiplier,
+        "blend": blend,
+        "effective_multiplier": effective_multiplier,
+    }
+
+
 def find_llm_target(signal, price, llm_target_proximity_pct):
     targets = signal.get("target_prices")
     if not isinstance(targets, list):
@@ -1941,6 +2019,10 @@ def build_candidates(snapshot, price):
         effective_max_inventory_usd,
         config,
     )
+    risk_context_size_adjustment = risk_context_position_size_adjustment(
+        config,
+        risk_context_payload(signal),
+    )
 
     result = {
         "freshness_allows_trading": freshness_allows_trading,
@@ -1957,6 +2039,21 @@ def build_candidates(snapshot, price):
         "effective_entry_step_pct": effective_step_pct,
         "inventory_pressure_usage_ratio": inventory_pressure["usage_ratio"],
         "inventory_pressure_size_multiplier": inventory_pressure["size_multiplier"],
+        "risk_context_position_sizing_enabled": (
+            risk_context_size_adjustment["enabled"]
+        ),
+        "risk_context_position_size_raw_multiplier": (
+            risk_context_size_adjustment["raw_multiplier"]
+        ),
+        "risk_context_position_size_clamped_multiplier": (
+            risk_context_size_adjustment["clamped_multiplier"]
+        ),
+        "risk_context_position_size_blend": (
+            risk_context_size_adjustment["blend"]
+        ),
+        "risk_context_position_size_effective_multiplier": (
+            risk_context_size_adjustment["effective_multiplier"]
+        ),
         "sentiment_control_mode": sentiment_control_mode,
         "low": low,
         "high": high,
@@ -2302,6 +2399,12 @@ def replay_from_snapshots(snapshots):
                 "inventory_pressure_size_multiplier": built.get(
                     "inventory_pressure_size_multiplier"
                 ),
+                "risk_context_position_sizing_enabled": built.get(
+                    "risk_context_position_sizing_enabled"
+                ),
+                "risk_context_position_size_effective_multiplier": built.get(
+                    "risk_context_position_size_effective_multiplier"
+                ),
                 "hold_reason": built["hold_reason"],
                 "raw_candidate_count": len(built["raw_candidates"]),
                 **sentiment_risk_fields,
@@ -2328,6 +2431,12 @@ def replay_from_snapshots(snapshots):
                     "inventory_pressure_size_multiplier": built.get(
                         "inventory_pressure_size_multiplier"
                     ),
+                    "risk_context_position_sizing_enabled": built.get(
+                        "risk_context_position_sizing_enabled"
+                    ),
+                    "risk_context_position_size_effective_multiplier": built.get(
+                        "risk_context_position_size_effective_multiplier"
+                    ),
                     "buy_source": candidate["buy_source"],
                     "strategy_mode": candidate["strategy_mode"],
                     "level": round(candidate["level"], 2),
@@ -2351,6 +2460,12 @@ def replay_from_snapshots(snapshots):
                     ),
                     "inventory_pressure_size_multiplier": built.get(
                         "inventory_pressure_size_multiplier"
+                    ),
+                    "risk_context_position_sizing_enabled": built.get(
+                        "risk_context_position_sizing_enabled"
+                    ),
+                    "risk_context_position_size_effective_multiplier": built.get(
+                        "risk_context_position_size_effective_multiplier"
                     ),
                     "buy_source": candidate["buy_source"],
                     "strategy_mode": candidate["strategy_mode"],

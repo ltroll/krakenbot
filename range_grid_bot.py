@@ -655,6 +655,22 @@ risk_context_high_band_max_market_risk_score = profile_float(
     "risk_context_high_band_max_market_risk_score",
     0.35
 )
+risk_context_position_sizing_enabled = profile_bool(
+    "risk_context_position_sizing_enabled",
+    False
+)
+risk_context_position_size_min_multiplier = profile_float(
+    "risk_context_position_size_min_multiplier",
+    0.35
+)
+risk_context_position_size_max_multiplier = profile_float(
+    "risk_context_position_size_max_multiplier",
+    1.0
+)
+risk_context_position_size_blend = profile_float(
+    "risk_context_position_size_blend",
+    0.5
+)
 range_fallback_execution_signal = profile_float(
     "range_fallback_execution_signal",
     max(execution_signal_threshold, sentiment_defensive_threshold)
@@ -2607,6 +2623,49 @@ def risk_context_high_band_guard(
     return {"allowed": True, "reason": None, **details}
 
 
+def risk_context_position_size_adjustment(risk_context):
+    if not risk_context_position_sizing_enabled:
+        return {
+            "enabled": False,
+            "raw_multiplier": None,
+            "clamped_multiplier": 1.0,
+            "blend": 0.0,
+            "effective_multiplier": 1.0,
+        }
+
+    if not isinstance(risk_context, dict):
+        risk_context = {}
+
+    raw_multiplier = optional_float(risk_context.get("position_size_multiplier"))
+    if raw_multiplier is None:
+        return {
+            "enabled": True,
+            "raw_multiplier": None,
+            "clamped_multiplier": 1.0,
+            "blend": risk_context_position_size_blend,
+            "effective_multiplier": 1.0,
+        }
+
+    min_multiplier = min(
+        risk_context_position_size_min_multiplier,
+        risk_context_position_size_max_multiplier,
+    )
+    max_multiplier = max(
+        risk_context_position_size_min_multiplier,
+        risk_context_position_size_max_multiplier,
+    )
+    clamped_multiplier = clamp(raw_multiplier, min_multiplier, max_multiplier)
+    blend = clamp(risk_context_position_size_blend, 0.0, 1.0)
+    effective_multiplier = 1.0 + ((clamped_multiplier - 1.0) * blend)
+    return {
+        "enabled": True,
+        "raw_multiplier": raw_multiplier,
+        "clamped_multiplier": clamped_multiplier,
+        "blend": blend,
+        "effective_multiplier": effective_multiplier,
+    }
+
+
 def clamp(value, minimum, maximum):
     return max(minimum, min(maximum, value))
 
@@ -3344,6 +3403,18 @@ def main():
         risk_context_high_band_max_market_risk_score=(
             risk_context_high_band_max_market_risk_score
         ),
+        risk_context_position_sizing_enabled=(
+            risk_context_position_sizing_enabled
+        ),
+        risk_context_position_size_min_multiplier=(
+            risk_context_position_size_min_multiplier
+        ),
+        risk_context_position_size_max_multiplier=(
+            risk_context_position_size_max_multiplier
+        ),
+        risk_context_position_size_blend=(
+            risk_context_position_size_blend
+        ),
         anchor_strategy_router_enabled=anchor_strategy_router_enabled,
         anchor_strategy_router_file=anchor_strategy_router_file,
         anchor_strategy_router_refresh_seconds=(
@@ -3607,6 +3678,13 @@ def main():
                     effective_max_open_sell_orders * smoothed_risk_multiplier
                 ))
             )
+            risk_context_size_adjustment = risk_context_position_size_adjustment(
+                sentiment_payload.get("risk_context")
+            )
+            risk_context_size_multiplier = risk_context_size_adjustment[
+                "effective_multiplier"
+            ]
+            effective_position_size_pct *= risk_context_size_multiplier
             deployed_inventory_usd = current_inventory_usd(price)
             inventory_pressure = inventory_pressure_adjustment(
                 deployed_inventory_usd,
@@ -3662,6 +3740,21 @@ def main():
                 freshness_allows_trading=freshness_allows_trading,
                 freshness_block_reason=freshness_block_reason,
                 smoothed_risk_multiplier=smoothed_risk_multiplier,
+                risk_context_position_sizing_enabled=(
+                    risk_context_size_adjustment["enabled"]
+                ),
+                risk_context_position_size_raw_multiplier=(
+                    risk_context_size_adjustment["raw_multiplier"]
+                ),
+                risk_context_position_size_clamped_multiplier=(
+                    risk_context_size_adjustment["clamped_multiplier"]
+                ),
+                risk_context_position_size_blend=(
+                    risk_context_size_adjustment["blend"]
+                ),
+                risk_context_position_size_effective_multiplier=(
+                    risk_context_size_multiplier
+                ),
                 flow_pressure=flow_pressure,
                 mean_reversion_opportunity=mean_reversion_opportunity,
                 inventory_pressure_usage_ratio=inventory_pressure_usage_ratio,
@@ -4586,7 +4679,7 @@ def main():
                     route_limits = routed_effective_limits(
                         route_config,
                         regime,
-                        smoothed_risk_multiplier,
+                        smoothed_risk_multiplier * risk_context_size_multiplier,
                     )
                     route_inventory_pressure = inventory_pressure_adjustment(
                         deployed_inventory_usd,
@@ -4882,6 +4975,21 @@ def main():
                                 candidate_effective_max_open_sell_orders
                             ),
                             smoothed_risk_multiplier=smoothed_risk_multiplier,
+                            risk_context_position_sizing_enabled=(
+                                risk_context_size_adjustment["enabled"]
+                            ),
+                            risk_context_position_size_raw_multiplier=(
+                                risk_context_size_adjustment["raw_multiplier"]
+                            ),
+                            risk_context_position_size_clamped_multiplier=(
+                                risk_context_size_adjustment["clamped_multiplier"]
+                            ),
+                            risk_context_position_size_blend=(
+                                risk_context_size_adjustment["blend"]
+                            ),
+                            risk_context_position_size_effective_multiplier=(
+                                risk_context_size_multiplier
+                            ),
                             flow_pressure=flow_pressure,
                             flow_control_reason=flow_control["reason"],
                             mean_reversion_opportunity=(
@@ -4947,6 +5055,21 @@ def main():
                                 candidate_effective_max_open_sell_orders
                             ),
                             smoothed_risk_multiplier=smoothed_risk_multiplier,
+                            risk_context_position_sizing_enabled=(
+                                risk_context_size_adjustment["enabled"]
+                            ),
+                            risk_context_position_size_raw_multiplier=(
+                                risk_context_size_adjustment["raw_multiplier"]
+                            ),
+                            risk_context_position_size_clamped_multiplier=(
+                                risk_context_size_adjustment["clamped_multiplier"]
+                            ),
+                            risk_context_position_size_blend=(
+                                risk_context_size_adjustment["blend"]
+                            ),
+                            risk_context_position_size_effective_multiplier=(
+                                risk_context_size_multiplier
+                            ),
                             flow_pressure=flow_pressure,
                             flow_control_reason=flow_control["reason"],
                             mean_reversion_opportunity=(
@@ -5007,6 +5130,21 @@ def main():
                             candidate_effective_position_size_pct
                         ),
                         smoothed_risk_multiplier=smoothed_risk_multiplier,
+                        risk_context_position_sizing_enabled=(
+                            risk_context_size_adjustment["enabled"]
+                        ),
+                        risk_context_position_size_raw_multiplier=(
+                            risk_context_size_adjustment["raw_multiplier"]
+                        ),
+                        risk_context_position_size_clamped_multiplier=(
+                            risk_context_size_adjustment["clamped_multiplier"]
+                        ),
+                        risk_context_position_size_blend=(
+                            risk_context_size_adjustment["blend"]
+                        ),
+                        risk_context_position_size_effective_multiplier=(
+                            risk_context_size_multiplier
+                        ),
                         flow_pressure=flow_pressure,
                         flow_control_reason=flow_control["reason"],
                         mean_reversion_opportunity=mean_reversion_opportunity,
@@ -5064,6 +5202,15 @@ def main():
                             execution_signal=execution_signal,
                             buy_source=buy_source,
                             sell_pct_override=active_sell_pct_override,
+                            effective_position_size_pct=(
+                                candidate_effective_position_size_pct
+                            ),
+                            risk_context_position_sizing_enabled=(
+                                risk_context_size_adjustment["enabled"]
+                            ),
+                            risk_context_position_size_effective_multiplier=(
+                                risk_context_size_multiplier
+                            ),
                             operating_mode=operating_mode,
                             llm_target_active=(buy_source == "llm_target"),
                             anchor_strategy_router_enabled=(
@@ -5089,6 +5236,15 @@ def main():
                             execution_signal=execution_signal,
                             buy_source=buy_source,
                             sell_pct_override=active_sell_pct_override,
+                            effective_position_size_pct=(
+                                candidate_effective_position_size_pct
+                            ),
+                            risk_context_position_sizing_enabled=(
+                                risk_context_size_adjustment["enabled"]
+                            ),
+                            risk_context_position_size_effective_multiplier=(
+                                risk_context_size_multiplier
+                            ),
                             operating_mode=operating_mode,
                             anchor_strategy_router_enabled=(
                                 anchor_strategy_router_enabled
@@ -5125,6 +5281,15 @@ def main():
                             execution_signal=execution_signal,
                             buy_source=buy_source,
                             sell_pct_override=active_sell_pct_override,
+                            effective_position_size_pct=(
+                                candidate_effective_position_size_pct
+                            ),
+                            risk_context_position_sizing_enabled=(
+                                risk_context_size_adjustment["enabled"]
+                            ),
+                            risk_context_position_size_effective_multiplier=(
+                                risk_context_size_multiplier
+                            ),
                             anchor_strategy_router_enabled=(
                                 anchor_strategy_router_enabled
                             ),
@@ -5150,6 +5315,15 @@ def main():
                             execution_signal=execution_signal,
                             buy_source=buy_source,
                             sell_pct_override=active_sell_pct_override,
+                            effective_position_size_pct=(
+                                candidate_effective_position_size_pct
+                            ),
+                            risk_context_position_sizing_enabled=(
+                                risk_context_size_adjustment["enabled"]
+                            ),
+                            risk_context_position_size_effective_multiplier=(
+                                risk_context_size_multiplier
+                            ),
                             anchor_strategy_router_enabled=(
                                 anchor_strategy_router_enabled
                             ),
@@ -5214,6 +5388,15 @@ def main():
                         price=round(level, PRICE_DECIMALS),
                         buy_source=buy_source,
                         sell_pct_override=active_sell_pct_override,
+                        effective_position_size_pct=(
+                            candidate_effective_position_size_pct
+                        ),
+                        risk_context_position_sizing_enabled=(
+                            risk_context_size_adjustment["enabled"]
+                        ),
+                        risk_context_position_size_effective_multiplier=(
+                            risk_context_size_multiplier
+                        ),
                         **sentiment_risk_fields,
                         anchor_strategy_router_enabled=(
                             anchor_strategy_router_enabled
@@ -5236,6 +5419,15 @@ def main():
                         trade_notional_usd=round(level * volume, 8),
                         buy_source=buy_source,
                         sell_pct_override=active_sell_pct_override,
+                        effective_position_size_pct=(
+                            candidate_effective_position_size_pct
+                        ),
+                        risk_context_position_sizing_enabled=(
+                            risk_context_size_adjustment["enabled"]
+                        ),
+                        risk_context_position_size_effective_multiplier=(
+                            risk_context_size_multiplier
+                        ),
                         **sentiment_risk_fields,
                         anchor_strategy_router_enabled=(
                             anchor_strategy_router_enabled
@@ -5300,6 +5492,21 @@ def main():
                     ),
                     external_block_reason=external_block_reason,
                     smoothed_risk_multiplier=smoothed_risk_multiplier,
+                    risk_context_position_sizing_enabled=(
+                        risk_context_size_adjustment["enabled"]
+                    ),
+                    risk_context_position_size_raw_multiplier=(
+                        risk_context_size_adjustment["raw_multiplier"]
+                    ),
+                    risk_context_position_size_clamped_multiplier=(
+                        risk_context_size_adjustment["clamped_multiplier"]
+                    ),
+                    risk_context_position_size_blend=(
+                        risk_context_size_adjustment["blend"]
+                    ),
+                    risk_context_position_size_effective_multiplier=(
+                        risk_context_size_multiplier
+                    ),
                     flow_pressure=flow_pressure,
                     mean_reversion_opportunity=mean_reversion_opportunity,
                     effective_entry_step_pct=current_entry_step_pct,
@@ -5389,6 +5596,21 @@ def main():
                 ),
                 external_block_reason=external_block_reason,
                 smoothed_risk_multiplier=smoothed_risk_multiplier,
+                risk_context_position_sizing_enabled=(
+                    risk_context_size_adjustment["enabled"]
+                ),
+                risk_context_position_size_raw_multiplier=(
+                    risk_context_size_adjustment["raw_multiplier"]
+                ),
+                risk_context_position_size_clamped_multiplier=(
+                    risk_context_size_adjustment["clamped_multiplier"]
+                ),
+                risk_context_position_size_blend=(
+                    risk_context_size_adjustment["blend"]
+                ),
+                risk_context_position_size_effective_multiplier=(
+                    risk_context_size_multiplier
+                ),
                 flow_pressure=flow_pressure,
                 mean_reversion_opportunity=mean_reversion_opportunity,
                 effective_entry_step_pct=current_entry_step_pct,
