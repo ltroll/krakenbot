@@ -238,6 +238,10 @@ def signal_snapshot():
                 result["payload"],
                 asset_id=selected_asset_id(),
             )
+            if isinstance(normalized, dict):
+                freshness = result["payload"].get("freshness")
+                if isinstance(freshness, dict) and not normalized.get("freshness"):
+                    normalized["freshness"] = freshness
         except Exception as exc:
             result = {
                 "ok": False,

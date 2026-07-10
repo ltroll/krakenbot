@@ -659,6 +659,7 @@ def base_event(status, reason, snapshot, price, signal, config, weighted=None, r
     at_time = snapshot_time(snapshot)
     risk_view = risk_view or {}
     price_regime = signal.get("price_regime") if isinstance(signal.get("price_regime"), dict) else {}
+    freshness = freshness_contract(signal)
     return {
         "status": status,
         "reason": reason,
@@ -672,6 +673,12 @@ def base_event(status, reason, snapshot, price, signal, config, weighted=None, r
             if at_time and signal
             else None
         ),
+        "signal_status": signal.get("signal_status"),
+        "signal_freshness_state": signal_freshness_state(signal, at_time) if at_time else None,
+        "freshness_fresh_for_minutes": freshness_minutes(signal, "fresh_for_minutes"),
+        "freshness_warn_after_minutes": freshness_minutes(signal, "warn_after_minutes"),
+        "freshness_stale_after_minutes": freshness_minutes(signal, "stale_after_minutes"),
+        "freshness_processed_at": freshness.get("processed_at"),
         "range_position_24h": safe_float(price_regime.get("range_position_24h")),
         "weather_market_range_position": risk_view.get("weather_market_range_position"),
         "weather_market_range_zone": risk_view.get("weather_market_range_zone"),
