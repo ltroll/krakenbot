@@ -136,17 +136,18 @@ best bid or one tick inside the spread, records it as an open buy, and exits.
 Start the service loop afterward to track the fill and place the profit-taking
 sell.
 
-The sentiment bot can use `risk_context` from `multi_asset_signal.json` as its
-primary risk interpretation layer. When `USE_RISK_CONTEXT_POLICY=true` and the
-payload is present/fresh, the bot derives `risk_adjusted_buy_score`,
-`risk_adjusted_posture`, and suggested size/target multipliers, then uses those
-fields for buy/add decisions. If `risk_context` is missing or stale, it falls
-back to the legacy `action_recommendation` behavior.
+The sentiment bot can use `risk_context.weather_report` from
+`multi_asset_signal.json` as an advisory market-weather layer. When
+`USE_RISK_CONTEXT_POLICY=true` and the payload is present/fresh, the bot keeps
+trade authority, logs the weather condition, applies size/target multipliers,
+and only treats `weather_emergency_bell=true` as a hard pause. Legacy
+`action_recommendation`, `recommended_posture`, and hard-safety fields are
+diagnostics, not the main trade gate.
 
 ```bash
 USE_RISK_CONTEXT_POLICY=true
-RISK_CONTEXT_HARD_SAFETY_BLOCK=true
-RISK_CONTEXT_MIN_BUY_SCORE=0.50
+RISK_CONTEXT_HARD_SAFETY_BLOCK=false
+# RISK_CONTEXT_MIN_BUY_SCORE=0.50  # Legacy risk-context fallback only.
 RISK_CONTEXT_POSITION_SIZE_ENABLED=true
 RISK_CONTEXT_TARGET_PROFIT_ENABLED=true
 ```

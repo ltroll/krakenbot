@@ -489,8 +489,17 @@ def collect_log_lines(log_file: Path, since: datetime) -> LogSummary:
                             "rebound_score": number_value(payload.get("risk_context_rebound_score")),
                             "breakout_score": number_value(payload.get("risk_context_breakout_score")),
                             "position_size_multiplier": number_value(payload.get("suggested_position_size_multiplier")),
+                            "grid_aggression_multiplier": number_value(payload.get("suggested_grid_aggression_multiplier")),
                             "entry_discount_multiplier": number_value(payload.get("suggested_entry_discount_multiplier")),
                             "take_profit_multiplier": number_value(payload.get("suggested_take_profit_multiplier")),
+                            "weather_report_available": payload.get("weather_report_available"),
+                            "weather_trade_permission": payload.get("weather_trade_permission"),
+                            "weather_bot_decision_authority": payload.get("weather_bot_decision_authority"),
+                            "weather_condition": payload.get("weather_condition"),
+                            "weather_alert_level": payload.get("weather_alert_level"),
+                            "weather_emergency_bell": payload.get("weather_emergency_bell"),
+                            "weather_opportunity_tags": payload.get("weather_opportunity_tags"),
+                            "weather_risk_warnings": payload.get("weather_risk_warnings"),
                             "reason": payload.get("risk_adjusted_reason"),
                             "action_recommendation": payload.get("action_recommendation"),
                             "action_policy_reason": payload.get("action_policy_reason"),
@@ -588,6 +597,14 @@ def md_cell(value: Any) -> str:
     if value is None:
         return "n/a"
     return str(value).replace("|", "\\|").replace("\n", " ")
+
+
+def list_items(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    if value in (None, ""):
+        return []
+    return [str(value)]
 
 
 def number_value(value: Any) -> Optional[float]:
@@ -1039,6 +1056,25 @@ def render_risk_context_summary(log_summary: LogSummary) -> list[str]:
 
     available = sum(1 for record in records if record.get("available") is True)
     stale = sum(1 for record in records if record.get("stale") is True)
+    weather_available = sum(1 for record in records if record.get("weather_report_available") is True)
+    emergency_bells = sum(1 for record in records if record.get("weather_emergency_bell") is True)
+    weather_conditions = Counter(
+        str(record.get("weather_condition") or "unknown")
+        for record in records
+        if record.get("weather_report_available") is True
+    )
+    weather_alerts = Counter(
+        str(record.get("weather_alert_level") or "unknown")
+        for record in records
+        if record.get("weather_report_available") is True
+    )
+    opportunity_tags = Counter()
+    risk_warnings = Counter()
+    for record in records:
+        for tag in list_items(record.get("weather_opportunity_tags")):
+            opportunity_tags[tag] += 1
+        for warning in list_items(record.get("weather_risk_warnings")):
+            risk_warnings[warning] += 1
     latest = records[-1]
     lines = [
         "## Risk Context",
@@ -1046,11 +1082,30 @@ def render_risk_context_summary(log_summary: LogSummary) -> list[str]:
         f"- Signal updates with risk context data: {len(records)}",
         f"- Risk context available: {available}",
         f"- Risk context stale: {stale}",
+        f"- Weather reports available: {weather_available}",
+        f"- Weather emergency bells: {emergency_bells}",
         f"- Avg risk-adjusted buy score: {fmt_count(avg_number(records, 'buy_score'))}",
         f"- Avg risk-adjusted market score: {fmt_count(avg_number(records, 'market_score'))}",
         f"- Avg suggested position multiplier: {fmt_count(avg_number(records, 'position_size_multiplier'))}",
+        f"- Avg suggested grid aggression multiplier: {fmt_count(avg_number(records, 'grid_aggression_multiplier'))}",
         f"- Avg suggested entry discount multiplier: {fmt_count(avg_number(records, 'entry_discount_multiplier'))}",
         f"- Avg suggested take-profit multiplier: {fmt_count(avg_number(records, 'take_profit_multiplier'))}",
+        "",
+        "### Weather Conditions",
+        "",
+        *render_counter(weather_conditions),
+        "",
+        "### Weather Alert Levels",
+        "",
+        *render_counter(weather_alerts),
+        "",
+        "### Weather Opportunity Tags",
+        "",
+        *render_counter(opportunity_tags),
+        "",
+        "### Weather Risk Warnings",
+        "",
+        *render_counter(risk_warnings),
         "",
         "### Risk Postures",
         "",
@@ -1063,6 +1118,11 @@ def render_risk_context_summary(log_summary: LogSummary) -> list[str]:
         "### Latest Risk Snapshot",
         "",
         f"- Timestamp: `{latest.get('ts', 'n/a')}`",
+        f"- Weather condition: `{latest.get('weather_condition', 'n/a')}`",
+        f"- Weather alert: `{latest.get('weather_alert_level', 'n/a')}`",
+        f"- Weather emergency bell: `{latest.get('weather_emergency_bell', 'n/a')}`",
+        f"- Weather opportunity tags: {', '.join(list_items(latest.get('weather_opportunity_tags'))) or 'n/a'}",
+        f"- Weather risk warnings: {', '.join(list_items(latest.get('weather_risk_warnings'))) or 'n/a'}",
         f"- Engine posture: `{latest.get('recommended_posture', 'n/a')}`",
         f"- Bot posture: `{latest.get('adjusted_posture', 'n/a')}`",
         f"- Buy score: {fmt_count(latest.get('buy_score'))}",
@@ -1173,8 +1233,8 @@ def render_price_target_policy_context(
             "",
             "### Recent Price-Target Trades",
             "",
-            "| decision time | entry | exit reason | net | nearest delta | posture | buy score | market score | action | risk reason |",
-            "| --- | ---: | --- | ---: | ---: | --- | ---: | ---: | --- | --- |",
+            "| decision time | entry | exit reason | net | nearest delta | weather | alert | emergency | posture | buy score | action | risk reason |",
+            "| --- | ---: | --- | ---: | ---: | --- | --- | --- | --- | ---: | --- | --- |",
         ]
     )
 
@@ -1188,9 +1248,11 @@ def render_price_target_policy_context(
                     md_cell(trade.get("exit_reason")),
                     fmt_pct(number_value(trade.get("net_return_pct"))),
                     fmt_signed_minutes(delta),
+                    md_cell(risk_record.get("weather_condition") if risk_record else None),
+                    md_cell(risk_record.get("weather_alert_level") if risk_record else None),
+                    md_cell(risk_record.get("weather_emergency_bell") if risk_record else None),
                     md_cell(risk_record.get("adjusted_posture") if risk_record else None),
                     fmt_count(risk_record.get("buy_score") if risk_record else None),
-                    fmt_count(risk_record.get("market_score") if risk_record else None),
                     md_cell(risk_record.get("action_recommendation") if risk_record else None),
                     md_cell(risk_record.get("reason") if risk_record else None),
                 ]

@@ -469,7 +469,7 @@ USE_RISK_CONTEXT_POLICY = env_profile_bool(
 RISK_CONTEXT_HARD_SAFETY_BLOCK = env_profile_bool(
     "RISK_CONTEXT_HARD_SAFETY_BLOCK",
     "risk_context_hard_safety_block",
-    True
+    False
 )
 RISK_CONTEXT_MIN_BUY_SCORE = env_profile_float(
     "RISK_CONTEXT_MIN_BUY_SCORE",
@@ -609,11 +609,20 @@ DECISION_CSV_FIELDS = [
     "risk_context_rebound_score",
     "risk_context_breakout_score",
     "risk_context_hard_safety_flags",
+    "weather_report_available",
+    "weather_trade_permission",
+    "weather_bot_decision_authority",
+    "weather_condition",
+    "weather_alert_level",
+    "weather_emergency_bell",
+    "weather_opportunity_tags",
+    "weather_risk_warnings",
     "risk_adjusted_buy_score",
     "risk_adjusted_market_score",
     "risk_adjusted_posture",
     "risk_adjusted_reason",
     "suggested_position_size_multiplier",
+    "suggested_grid_aggression_multiplier",
     "suggested_entry_discount_multiplier",
     "suggested_take_profit_multiplier",
     "risk_context_source_processed_at",
@@ -2344,24 +2353,34 @@ def derived_risk_context(sentiment, now):
     )
 
 
-def risk_context_can_buy(risk_view):
+def risk_context_trade_pause(risk_view):
+    if risk_view.get("weather_emergency_bell"):
+        return True, "weather_emergency_bell"
+
     if (
         RISK_CONTEXT_HARD_SAFETY_BLOCK
+        and not risk_view.get("weather_report_available")
         and risk_view.get("risk_context_hard_safety_flags")
     ):
-        return False, "risk_context_hard_safety_flags"
+        return True, "risk_context_hard_safety_flags"
 
     if risk_view.get("risk_context_stale"):
-        return None, "risk_context_stale"
+        return False, "risk_context_stale"
 
-    posture = risk_view.get("risk_adjusted_posture")
-    buy_score = risk_view.get("risk_adjusted_buy_score")
-    if posture in ("constructive_buy", "cautious_accumulation") and (
-        buy_score is None or buy_score >= RISK_CONTEXT_MIN_BUY_SCORE
-    ):
-        return True, None
+    return False, None
 
-    return False, "risk_context_" + (posture or "neutral_watch")
+
+def weather_report_bot_decides(sentiment):
+    risk_context = sentiment.get("risk_context")
+    if not isinstance(risk_context, dict):
+        return False
+    weather = risk_context.get("weather_report")
+    if not isinstance(weather, dict):
+        return False
+    return (
+        weather.get("bot_decision_authority") == "bot"
+        or weather.get("trade_permission") == "bot_decides"
+    )
 
 
 def signal_gate_failure(sentiment, now):
@@ -2395,6 +2414,7 @@ def signal_gate_failure(sentiment, now):
     if (
         REQUIRE_BOT_ACTION_ALLOWED
         and sentiment.get("bot_action_allowed") is False
+        and not weather_report_bot_decides(sentiment)
     ):
         return {
             "reason": "bot_action_not_allowed",
@@ -2929,11 +2949,20 @@ def run_cycle():
         risk_context_rebound_score=risk_view.get("risk_context_rebound_score"),
         risk_context_breakout_score=risk_view.get("risk_context_breakout_score"),
         risk_context_hard_safety_flags=risk_view.get("risk_context_hard_safety_flags"),
+        weather_report_available=risk_view.get("weather_report_available"),
+        weather_trade_permission=risk_view.get("weather_trade_permission"),
+        weather_bot_decision_authority=risk_view.get("weather_bot_decision_authority"),
+        weather_condition=risk_view.get("weather_condition"),
+        weather_alert_level=risk_view.get("weather_alert_level"),
+        weather_emergency_bell=risk_view.get("weather_emergency_bell"),
+        weather_opportunity_tags=risk_view.get("weather_opportunity_tags"),
+        weather_risk_warnings=risk_view.get("weather_risk_warnings"),
         risk_adjusted_buy_score=risk_view.get("risk_adjusted_buy_score"),
         risk_adjusted_market_score=risk_view.get("risk_adjusted_market_score"),
         risk_adjusted_posture=risk_view.get("risk_adjusted_posture"),
         risk_adjusted_reason=risk_view.get("risk_adjusted_reason"),
         suggested_position_size_multiplier=risk_view.get("suggested_position_size_multiplier"),
+        suggested_grid_aggression_multiplier=risk_view.get("suggested_grid_aggression_multiplier"),
         suggested_entry_discount_multiplier=risk_view.get("suggested_entry_discount_multiplier"),
         suggested_take_profit_multiplier=risk_view.get("suggested_take_profit_multiplier"),
         risk_context_source_processed_at=risk_view.get("risk_context_source_processed_at"),
@@ -2964,8 +2993,8 @@ def run_cycle():
         return
 
     if risk_context_usable:
-        risk_allowed, risk_block_reason = risk_context_can_buy(risk_view)
-        if risk_allowed is False:
+        should_pause, risk_block_reason = risk_context_trade_pause(risk_view)
+        if should_pause:
             skip_cycle(
                 risk_block_reason,
                 cycle_id,
@@ -2981,22 +3010,6 @@ def run_cycle():
                 **risk_view
             )
             return
-    elif action_recommendation != "bullish_allowed":
-        skip_cycle(
-            "action_policy_" + (action_recommendation or "missing"),
-            cycle_id,
-            price=price,
-            execution_signal=raw_signal,
-            smoothed_signal=smoothed_signal,
-            weighted_signal=weighted_signal,
-            confidence=confidence,
-            action_recommendation=action_recommendation,
-            action_policy_reason=action_policy_reason,
-            contributor_count=sentiment.get("contributor_count"),
-            bot_action_allowed=sentiment.get("bot_action_allowed"),
-            **risk_view
-        )
-        return
 
     backtest_failure = backtest_health_failure()
     if backtest_failure is not None:
@@ -3023,6 +3036,24 @@ def run_cycle():
         and bool(target_limit_candidates)
     )
     allow_market_buy = not allow_target_limit_buy
+
+    if allow_market_buy and weighted_signal < SENTIMENT_BUY_THRESHOLD:
+        skip_cycle(
+            "local_signal_below_buy_threshold",
+            cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD,
+            action_recommendation=action_recommendation,
+            action_policy_reason=action_policy_reason,
+            contributor_count=sentiment.get("contributor_count"),
+            bot_action_allowed=sentiment.get("bot_action_allowed"),
+            **risk_view
+        )
+        return
 
     price_high = numeric_or_none(price_regime.get("price_high_24h"))
     if price_high is not None and HIGH_PRICE_BUY_BLOCK_PCT >= 0:

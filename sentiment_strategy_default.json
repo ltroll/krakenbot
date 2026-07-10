@@ -39,7 +39,7 @@
   "mean_reversion_range_position_max": 0.15,
   "mean_reversion_flow_pressure_min": 0,
   "use_risk_context_policy": true,
-  "risk_context_hard_safety_block": true,
+  "risk_context_hard_safety_block": false,
   "risk_context_min_buy_score": 0.5,
   "risk_context_position_size_enabled": true,
   "risk_context_target_profit_enabled": true,

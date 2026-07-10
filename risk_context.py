@@ -40,6 +40,10 @@ def list_value(value):
     return [value]
 
 
+def dict_value(value):
+    return value if isinstance(value, dict) else {}
+
+
 def risk_context_available(risk_context):
     return isinstance(risk_context, dict) and bool(risk_context)
 
@@ -69,11 +73,20 @@ def derive_risk_context(risk_context, *, fallback_processed_at=None, stale=False
         return {
             "risk_context_available": False,
             "risk_context_stale": False,
+            "weather_report_available": False,
+            "weather_trade_permission": None,
+            "weather_bot_decision_authority": None,
+            "weather_condition": None,
+            "weather_alert_level": None,
+            "weather_emergency_bell": False,
+            "weather_opportunity_tags": [],
+            "weather_risk_warnings": [],
             "risk_adjusted_buy_score": None,
             "risk_adjusted_market_score": None,
             "risk_adjusted_posture": None,
             "risk_adjusted_reason": "risk_context_missing",
             "suggested_position_size_multiplier": 1.0,
+            "suggested_grid_aggression_multiplier": 1.0,
             "suggested_entry_discount_multiplier": 1.0,
             "suggested_take_profit_multiplier": 1.0,
             "risk_context_source_processed_at": fallback_processed_at,
@@ -81,6 +94,8 @@ def derive_risk_context(risk_context, *, fallback_processed_at=None, stale=False
             "risk_context_hard_safety_flags": [],
         }
 
+    weather = dict_value(risk_context.get("weather_report"))
+    bot_tuning = dict_value(weather.get("bot_tuning"))
     market_risk = clamp(numeric_or_default(risk_context.get("market_risk_score"), 0.5))
     buy_aggression = clamp(numeric_or_default(risk_context.get("buy_aggression_score"), 0.0))
     downside_risk = clamp(numeric_or_default(risk_context.get("downside_risk_score"), 0.5))
@@ -98,7 +113,16 @@ def derive_risk_context(risk_context, *, fallback_processed_at=None, stale=False
     )
     market_score = clamp(market_risk * 0.70 + downside_risk * 0.30)
 
-    if hard_safety_flags:
+    if weather:
+        condition = weather.get("condition") or "neutral"
+        alert_level = weather.get("alert_level") or "normal"
+        emergency_bell = bool(weather.get("emergency_bell"))
+        posture = "emergency_bell" if emergency_bell else str(condition)
+        reason = (
+            f"weather_report condition={condition}; "
+            f"alert_level={alert_level}; trade_permission={weather.get('trade_permission', 'n/a')}"
+        )
+    elif hard_safety_flags:
         posture = "risk_off"
         reason = "hard safety flags present: " + ", ".join(hard_safety_flags)
     elif buy_score >= 0.65 and market_risk < 0.55:
@@ -118,13 +142,25 @@ def derive_risk_context(risk_context, *, fallback_processed_at=None, stale=False
         reason = "risk context is not strong enough for a buy"
 
     if stale:
-        reason = "risk context stale; legacy policy should be used"
+        reason = "risk context stale; bot-local policy should be used"
 
     position_multiplier = numeric_or_default(
-        risk_context.get("position_size_multiplier"),
+        bot_tuning.get(
+            "position_size_multiplier",
+            risk_context.get("position_size_multiplier")
+        ),
         1.0
     )
-    if hard_safety_flags:
+    if weather:
+        if bool(weather.get("emergency_bell")):
+            position_multiplier = 0.0
+        elif weather.get("alert_level") == "watch":
+            position_multiplier = min(position_multiplier, 0.75)
+        elif weather.get("alert_level") == "caution":
+            position_multiplier = min(position_multiplier, 0.50)
+        elif weather.get("alert_level") == "danger":
+            position_multiplier = min(position_multiplier, 0.25)
+    elif hard_safety_flags:
         position_multiplier = 0.0
     elif posture in ("defensive_watch", "neutral_watch", "breakout_watch"):
         position_multiplier = min(position_multiplier, 0.5)
@@ -145,14 +181,40 @@ def derive_risk_context(risk_context, *, fallback_processed_at=None, stale=False
         "risk_context_active_strategy": risk_context.get("active_strategy") or {},
         "risk_context_legacy_action_recommendation": risk_context.get("legacy_action_recommendation"),
         "risk_context_legacy_action_reason": risk_context.get("legacy_action_reason"),
+        "weather_report_available": bool(weather),
+        "weather_trade_permission": weather.get("trade_permission"),
+        "weather_bot_decision_authority": weather.get("bot_decision_authority"),
+        "weather_condition": weather.get("condition"),
+        "weather_alert_level": weather.get("alert_level"),
+        "weather_emergency_bell": bool(weather.get("emergency_bell")),
+        "weather_opportunity_tags": [
+            str(tag) for tag in list_value(weather.get("opportunity_tags")) if str(tag)
+        ],
+        "weather_risk_warnings": [
+            str(warning) for warning in list_value(weather.get("risk_warnings")) if str(warning)
+        ],
         "risk_adjusted_buy_score": round(buy_score, 6),
         "risk_adjusted_market_score": round(market_score, 6),
         "risk_adjusted_posture": posture,
         "risk_adjusted_reason": reason,
         "suggested_position_size_multiplier": round(clamp(position_multiplier, 0.0, 2.0), 6),
+        "suggested_grid_aggression_multiplier": round(
+            clamp(
+                numeric_or_default(bot_tuning.get("grid_aggression_multiplier"), 1.0),
+                0.1,
+                3.0,
+            ),
+            6,
+        ),
         "suggested_entry_discount_multiplier": round(
             clamp(
-                numeric_or_default(risk_context.get("entry_discount_multiplier"), 1.0),
+                numeric_or_default(
+                    bot_tuning.get(
+                        "entry_discount_multiplier",
+                        risk_context.get("entry_discount_multiplier")
+                    ),
+                    1.0
+                ),
                 0.0,
                 3.0,
             ),
@@ -160,7 +222,13 @@ def derive_risk_context(risk_context, *, fallback_processed_at=None, stale=False
         ),
         "suggested_take_profit_multiplier": round(
             clamp(
-                numeric_or_default(risk_context.get("target_profit_multiplier"), 1.0),
+                numeric_or_default(
+                    bot_tuning.get(
+                        "target_profit_multiplier",
+                        risk_context.get("target_profit_multiplier")
+                    ),
+                    1.0
+                ),
                 0.1,
                 3.0,
             ),

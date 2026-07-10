@@ -47,6 +47,56 @@ class RiskContextTests(unittest.TestCase):
         self.assertEqual(derived["suggested_position_size_multiplier"], 0.0)
         self.assertIn("source_health_block", derived["risk_context_hard_safety_flags"])
 
+    def test_weather_report_is_advisory_and_applies_tuning(self):
+        derived = derive_risk_context(
+            {
+                "recommended_posture": "risk_off",
+                "hard_safety_flags": ["risk_off"],
+                "weather_report": {
+                    "mode": "weather_report",
+                    "bot_decision_authority": "bot",
+                    "trade_permission": "bot_decides",
+                    "condition": "breakout_tailwind",
+                    "alert_level": "watch",
+                    "emergency_bell": False,
+                    "opportunity_tags": ["breakout_tailwind"],
+                    "risk_warnings": ["source_health_degraded"],
+                    "bot_tuning": {
+                        "position_size_multiplier": 0.8,
+                        "grid_aggression_multiplier": 0.68,
+                        "target_profit_multiplier": 1.08,
+                        "entry_discount_multiplier": 0.96,
+                    },
+                },
+            }
+        )
+
+        self.assertTrue(derived["weather_report_available"])
+        self.assertFalse(derived["weather_emergency_bell"])
+        self.assertEqual(derived["risk_adjusted_posture"], "breakout_tailwind")
+        self.assertEqual(derived["suggested_position_size_multiplier"], 0.75)
+        self.assertEqual(derived["suggested_grid_aggression_multiplier"], 0.68)
+        self.assertEqual(derived["suggested_entry_discount_multiplier"], 0.96)
+        self.assertEqual(derived["suggested_take_profit_multiplier"], 1.08)
+
+    def test_weather_emergency_bell_forces_zero_size(self):
+        derived = derive_risk_context(
+            {
+                "weather_report": {
+                    "condition": "storm_warning",
+                    "alert_level": "danger",
+                    "emergency_bell": True,
+                    "bot_tuning": {
+                        "position_size_multiplier": 1.0,
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(derived["risk_adjusted_posture"], "emergency_bell")
+        self.assertTrue(derived["weather_emergency_bell"])
+        self.assertEqual(derived["suggested_position_size_multiplier"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
