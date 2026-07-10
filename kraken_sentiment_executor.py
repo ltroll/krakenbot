@@ -163,6 +163,11 @@ LOG_FILE = (
     or os.getenv("TRADE_LOG_FILE")
     or "sentiment_trade_log.jsonl"
 )
+TRADE_ACTIVITY_FILE = (
+    os.getenv("SENTIMENT_TRADE_ACTIVITY_FILE")
+    or os.getenv("TRADE_ACTIVITY_FILE")
+    or "sentiment_trade_activity.jsonl"
+)
 DECISION_CSV_FILE = os.getenv(
     "SENTIMENT_DECISION_CSV_FILE",
     "sentiment_decisions.csv"
@@ -400,6 +405,11 @@ MIN_TRADE_USD = profile_float("min_trade_usd", 30)
 CONF_THRESHOLD = profile_float("confidence_threshold", 0.45)
 CONFIDENCE_WEIGHTING = profile_bool("confidence_weighting", True)
 DRY_RUN = profile_bool("dry_run", False)
+SHADOW_TRADES_ENABLED = env_profile_bool(
+    "SENTIMENT_SHADOW_TRADES_ENABLED",
+    "shadow_trades_enabled",
+    False
+)
 EXECUTION_BUFFER_PCT = profile_float("execution_buffer_pct", 0.0025)
 REBALANCE_COOLDOWN_MINUTES = profile_float("rebalance_cooldown_minutes", 15)
 COOLDOWN_OVERRIDE_SIGNAL_ABS = profile_float("cooldown_override_signal_abs", 0.20)
@@ -721,6 +731,34 @@ def log_event(event, message="", **kwargs):
             f.flush()
     except Exception as e:
         console(f"LOG_WRITE_ERROR: {e}")
+
+
+def log_trade_activity(event, mode="real", message="", **kwargs):
+    if not TRADE_ACTIVITY_FILE:
+        return
+
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event": event,
+        "mode": mode,
+        "message": message,
+        "bot": "sentiment_executor",
+        "pair": KRAKEN_PAIR,
+        "signal_asset_id": SELECTED_SIGNAL_ASSET_ID,
+        "dry_run": DRY_RUN
+    }
+    record.update(kwargs)
+
+    try:
+        log_dir = os.path.dirname(TRADE_ACTIVITY_FILE)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+
+        with open(TRADE_ACTIVITY_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+            f.flush()
+    except Exception as e:
+        console(f"TRADE_ACTIVITY_WRITE_ERROR: {e}")
 
 
 def log_and_console(event, message="", **kwargs):
@@ -1997,6 +2035,50 @@ def sell_target_price(buy_price, target_profit_pct=None):
     return buy_price * (1 + profit_pct + ROUND_TRIP_FEE_PCT)
 
 
+def log_shadow_buy_plan(
+    cycle_id,
+    *,
+    reason,
+    ordertype,
+    price,
+    volume,
+    trade_value,
+    target_profit_pct=None,
+    fill_mode=None,
+    **kwargs
+):
+    if not SHADOW_TRADES_ENABLED:
+        return
+
+    profit_pct = (
+        TARGET_PROFIT_PCT
+        if target_profit_pct is None
+        else target_profit_pct
+    )
+    projected_sell_price = sell_target_price(price, profit_pct) if price else None
+    log_trade_activity(
+        "SHADOW_BUY_PLANNED",
+        mode="shadow",
+        cycle_id=cycle_id,
+        reason=reason,
+        side="buy",
+        ordertype=ordertype,
+        fill_mode=fill_mode,
+        price=price,
+        volume=volume,
+        trade_value=trade_value,
+        target_profit_pct=profit_pct,
+        round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+        gross_target_pct=profit_pct + ROUND_TRIP_FEE_PCT,
+        projected_sell_price=(
+            round_price(projected_sell_price)
+            if projected_sell_price is not None
+            else None
+        ),
+        **kwargs
+    )
+
+
 def place_market_buy(volume, cycle_id):
     if DRY_RUN:
         state["stats"]["dry_run_trades"] += 1
@@ -2018,6 +2100,13 @@ def place_market_buy(volume, cycle_id):
             side="buy",
             volume=volume
         )
+        log_trade_activity(
+            "BUY_ORDER_DRY_RUN",
+            cycle_id=cycle_id,
+            side="buy",
+            ordertype="market",
+            volume=volume
+        )
         return {"dry_run": True}
 
     result = safe_kraken_private(
@@ -2030,6 +2119,17 @@ def place_market_buy(volume, cycle_id):
             "volume": volume
         }
     )
+
+    if not result:
+        log_trade_activity(
+            "BUY_ORDER_REJECTED",
+            cycle_id=cycle_id,
+            side="buy",
+            ordertype="market",
+            reason="api_no_result",
+            volume=volume
+        )
+        return result
 
     if result:
         txids = result.get("result", {}).get("txid", [])
@@ -2058,6 +2158,15 @@ def place_market_buy(volume, cycle_id):
             txid=txid,
             **fill,
             result=result.get("result")
+        )
+        log_trade_activity(
+            "BUY_ORDER_PLACED",
+            cycle_id=cycle_id,
+            side="buy",
+            ordertype="market",
+            volume=volume,
+            txid=txid,
+            **fill
         )
         result["fill"] = fill
 
@@ -2103,6 +2212,18 @@ def place_limit_buy(price, volume, cycle_id, target_profit_pct=None, post_only=F
             round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
             gross_target_pct=profit_pct + ROUND_TRIP_FEE_PCT
         )
+        log_trade_activity(
+            "BUY_LIMIT_ORDER_DRY_RUN",
+            cycle_id=cycle_id,
+            side="buy",
+            ordertype="limit",
+            volume=buy_volume,
+            price=buy_price,
+            post_only=post_only,
+            target_profit_pct=profit_pct,
+            round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+            gross_target_pct=profit_pct + ROUND_TRIP_FEE_PCT
+        )
         return {"dry_run": True}
 
     order_payload = {
@@ -2121,6 +2242,20 @@ def place_limit_buy(price, volume, cycle_id, target_profit_pct=None, post_only=F
         order_payload
     )
 
+    if not result:
+        log_trade_activity(
+            "BUY_ORDER_REJECTED",
+            cycle_id=cycle_id,
+            side="buy",
+            ordertype="limit",
+            reason="api_no_result",
+            price=buy_price,
+            volume=buy_volume,
+            post_only=post_only,
+            target_profit_pct=profit_pct
+        )
+        return result
+
     if result:
         txids = result.get("result", {}).get("txid", [])
         txid = txids[0] if txids else None
@@ -2130,6 +2265,16 @@ def place_limit_buy(price, volume, cycle_id, target_profit_pct=None, post_only=F
                 cycle_id=cycle_id,
                 side="buy",
                 reason="missing_txid",
+                result=result.get("result")
+            )
+            log_trade_activity(
+                "BUY_ORDER_REJECTED",
+                cycle_id=cycle_id,
+                side="buy",
+                ordertype="limit",
+                reason="missing_txid",
+                price=buy_price,
+                volume=buy_volume,
                 result=result.get("result")
             )
             return result
@@ -2177,6 +2322,21 @@ def place_limit_buy(price, volume, cycle_id, target_profit_pct=None, post_only=F
             txid=txid,
             result=result.get("result")
         )
+        log_trade_activity(
+            "BUY_LIMIT_ORDER_PLACED",
+            cycle_id=cycle_id,
+            side="buy",
+            ordertype="limit",
+            volume=buy_volume,
+            price=buy_price,
+            post_only=post_only,
+            target_profit_pct=profit_pct,
+            round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+            gross_target_pct=profit_pct + ROUND_TRIP_FEE_PCT,
+            txid=txid,
+            trade_id=txid,
+            result=result.get("result")
+        )
         notify_order_tracker(
             trade_id=txid,
             side="buy",
@@ -2219,6 +2379,24 @@ def place_limit_sell(
                 else None
             )
         )
+        log_trade_activity(
+            "SELL_ORDER_DRY_RUN",
+            cycle_id=cycle_id,
+            side="sell",
+            ordertype="limit",
+            volume=sell_volume,
+            price=sell_price,
+            buy_price=buy_price,
+            buy_txid=buy_txid,
+            trade_id=buy_txid,
+            target_profit_pct=target_profit_pct,
+            round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+            gross_target_pct=(
+                target_profit_pct + ROUND_TRIP_FEE_PCT
+                if target_profit_pct is not None
+                else None
+            )
+        )
         return {"dry_run": True}
 
     result = safe_kraken_private(
@@ -2233,6 +2411,21 @@ def place_limit_sell(
         }
     )
 
+    if not result:
+        log_trade_activity(
+            "SELL_ORDER_REJECTED",
+            cycle_id=cycle_id,
+            side="sell",
+            ordertype="limit",
+            reason="api_no_result",
+            price=sell_price,
+            volume=sell_volume,
+            buy_price=buy_price,
+            buy_txid=buy_txid,
+            target_profit_pct=target_profit_pct
+        )
+        return result
+
     if result:
         txids = result.get("result", {}).get("txid", [])
         txid = txids[0] if txids else None
@@ -2242,6 +2435,18 @@ def place_limit_sell(
                 cycle_id=cycle_id,
                 side="sell",
                 reason="missing_txid",
+                result=result.get("result")
+            )
+            log_trade_activity(
+                "SELL_ORDER_REJECTED",
+                cycle_id=cycle_id,
+                side="sell",
+                ordertype="limit",
+                reason="missing_txid",
+                price=sell_price,
+                volume=sell_volume,
+                buy_price=buy_price,
+                buy_txid=buy_txid,
                 result=result.get("result")
             )
             return result
@@ -2275,6 +2480,26 @@ def place_limit_sell(
                 if target_profit_pct is not None
                 else None
             )
+        )
+        log_trade_activity(
+            "SELL_ORDER_PLACED",
+            cycle_id=cycle_id,
+            side="sell",
+            ordertype="limit",
+            txid=txid,
+            trade_id=buy_txid or txid,
+            volume=sell_volume,
+            price=sell_price,
+            buy_price=buy_price,
+            buy_txid=buy_txid,
+            target_profit_pct=target_profit_pct,
+            round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
+            gross_target_pct=(
+                target_profit_pct + ROUND_TRIP_FEE_PCT
+                if target_profit_pct is not None
+                else None
+            ),
+            result=result.get("result")
         )
         notify_order_tracker(
             trade_id=buy_txid or txid,
@@ -2856,6 +3081,19 @@ def process_open_buy_orders(cycle_id):
                 cost=fill["cost"],
                 fee=fill["fee"]
             )
+            log_trade_activity(
+                "BUY_ORDER_FILLED",
+                cycle_id=cycle_id,
+                side="buy",
+                txid=txid,
+                trade_id=order.get("trade_id") or txid,
+                volume=fill["volume"],
+                price=fill["price"],
+                cost=fill["cost"],
+                fee=fill["fee"],
+                target_profit_pct=order.get("target_profit_pct"),
+                round_trip_fee_pct=order.get("round_trip_fee_pct")
+            )
             place_profit_sell_for_buy(
                 cycle_id,
                 txid,
@@ -2872,6 +3110,16 @@ def process_open_buy_orders(cycle_id):
                 cycle_id=cycle_id,
                 txid=txid,
                 side="buy"
+            )
+            log_trade_activity(
+                "BUY_ORDER_" + order_status.upper(),
+                cycle_id=cycle_id,
+                side="buy",
+                txid=txid,
+                trade_id=order.get("trade_id") or txid,
+                price=order.get("price"),
+                volume=order.get("volume"),
+                order_status=order_status
             )
             notify_order_tracker(
                 trade_id=order.get("trade_id") or txid,
@@ -2916,6 +3164,21 @@ def process_open_sell_orders(cycle_id):
                 fee=fill["fee"],
                 buy_price=order.get("buy_price")
             )
+            log_trade_activity(
+                "SELL_ORDER_FILLED",
+                cycle_id=cycle_id,
+                side="sell",
+                txid=txid,
+                trade_id=order.get("trade_id") or order.get("buy_txid") or txid,
+                volume=fill["volume"],
+                price=state["last_sell_price"],
+                cost=fill["cost"],
+                fee=fill["fee"],
+                buy_price=order.get("buy_price"),
+                buy_txid=order.get("buy_txid"),
+                target_profit_pct=order.get("target_profit_pct"),
+                round_trip_fee_pct=order.get("round_trip_fee_pct")
+            )
         elif order_status in ("canceled", "expired"):
             del state["open_sell_orders"][txid]
             save_state(state)
@@ -2925,6 +3188,18 @@ def process_open_sell_orders(cycle_id):
                 cycle_id=cycle_id,
                 txid=txid,
                 side="sell"
+            )
+            log_trade_activity(
+                "SELL_ORDER_" + order_status.upper(),
+                cycle_id=cycle_id,
+                side="sell",
+                txid=txid,
+                trade_id=order.get("trade_id") or order.get("buy_txid") or txid,
+                price=order.get("sell_price"),
+                volume=order.get("volume"),
+                buy_price=order.get("buy_price"),
+                buy_txid=order.get("buy_txid"),
+                order_status=order_status
             )
             notify_order_tracker(
                 trade_id=order.get("trade_id") or order.get("buy_txid") or txid,
@@ -2954,6 +3229,17 @@ def maybe_handle_submitted_buy(
     if DRY_RUN:
         state["stats"]["buy_orders_filled"] += 1
         save_state(state)
+        log_trade_activity(
+            "BUY_ORDER_FILLED",
+            cycle_id=cycle_id,
+            side="buy",
+            txid="dry_run_buy",
+            trade_id="dry_run_buy",
+            volume=volume,
+            price=price,
+            target_profit_pct=profit_pct,
+            round_trip_fee_pct=ROUND_TRIP_FEE_PCT
+        )
         place_profit_sell_for_buy(
             cycle_id,
             "dry_run_buy",
@@ -2994,6 +3280,19 @@ def maybe_handle_submitted_buy(
     if txid and order_status == "closed" and fill_volume > 0 and fill_price > 0:
         state["stats"]["buy_orders_filled"] += 1
         save_state(state)
+        log_trade_activity(
+            "BUY_ORDER_FILLED",
+            cycle_id=cycle_id,
+            side="buy",
+            txid=txid,
+            trade_id=txid,
+            volume=fill_volume,
+            price=fill_price,
+            fee=fill.get("fill_fee"),
+            cost=fill.get("fill_cost"),
+            target_profit_pct=profit_pct,
+            round_trip_fee_pct=ROUND_TRIP_FEE_PCT
+        )
         place_profit_sell_for_buy(
             cycle_id,
             txid,
@@ -3486,6 +3785,31 @@ def run_cycle():
                 **risk_view
             )
 
+            log_shadow_buy_plan(
+                cycle_id,
+                reason="mean_reversion_target_limit_buy",
+                ordertype="limit",
+                fill_mode="limit",
+                price=target_price,
+                volume=volume,
+                trade_value=target_trade_value,
+                target_profit_pct=target_profit_pct,
+                target_buy_price=target_price,
+                target_allocation_pct=order["allocation_pct"],
+                execution_signal=raw_signal,
+                smoothed_signal=smoothed_signal,
+                weighted_signal=weighted_signal,
+                confidence=confidence,
+                action_recommendation=action_recommendation,
+                action_policy_reason=action_policy_reason,
+                risk_multiplier=risk_multiplier,
+                effective_risk_multiplier=effective_multiplier,
+                mean_reversion_opportunity=mean_reversion_opportunity,
+                range_position_24h=range_position,
+                flow_pressure=flow_pressure,
+                **risk_view
+            )
+
             result = place_limit_buy(
                 target_price,
                 volume,
@@ -3639,6 +3963,29 @@ def run_cycle():
         **risk_view
     )
 
+    log_shadow_buy_plan(
+        cycle_id,
+        reason="sentiment_buy",
+        ordertype="market",
+        fill_mode="market",
+        price=price,
+        volume=volume,
+        trade_value=trade_value,
+        target_profit_pct=target_profit_pct,
+        execution_signal=raw_signal,
+        smoothed_signal=smoothed_signal,
+        weighted_signal=weighted_signal,
+        confidence=confidence,
+        action_recommendation=action_recommendation,
+        action_policy_reason=action_policy_reason,
+        risk_multiplier=risk_multiplier,
+        effective_risk_multiplier=effective_multiplier,
+        high_entry_near_high=high_entry["near_high"],
+        high_entry_quality_reason=high_entry["reason"],
+        high_entry_size_multiplier=high_entry["size_multiplier"],
+        **risk_view
+    )
+
     result = place_market_buy(volume, cycle_id)
     result_payload = result.get("result") if isinstance(result, dict) else None
     fill = result.get("fill", {}) if isinstance(result, dict) else {}
@@ -3733,6 +4080,8 @@ def main():
         strategy_profile=STRATEGY_PROFILE,
         state_file=STATE_FILE,
         log_file=LOG_FILE,
+        trade_activity_file=TRADE_ACTIVITY_FILE,
+        shadow_trades_enabled=SHADOW_TRADES_ENABLED,
         pair=KRAKEN_PAIR,
         signal_asset_id=SELECTED_SIGNAL_ASSET_ID,
         signal_url=LLM_SIGNAL_URL,
