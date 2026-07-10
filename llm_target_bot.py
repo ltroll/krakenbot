@@ -14,6 +14,7 @@ import requests
 from dotenv import load_dotenv
 
 from fee_config import effective_round_trip_fee_pct
+from risk_context import derive_risk_context
 from target_quality import (
     evaluate_quality_target,
     load_target_quality_snapshot,
@@ -182,6 +183,28 @@ TARGET_LIMIT_MAX_PREMIUM_PCT = profile_float(
 DRY_RUN = profile_bool("dry_run", False)
 PROBE_ONLY = profile_bool("probe_only", False)
 EXECUTION_BUFFER_PCT = profile_float("execution_buffer_pct", 0.0025)
+USE_WEATHER_REPORT_POLICY = profile_bool("use_weather_report_policy", False)
+WEATHER_REPORT_REQUIRED = profile_bool("weather_report_required", False)
+WEATHER_EMERGENCY_BELL_BLOCK = profile_bool(
+    "weather_emergency_bell_block",
+    True
+)
+WEATHER_POSITION_SIZE_ENABLED = profile_bool(
+    "weather_position_size_enabled",
+    True
+)
+WEATHER_TARGET_PROFIT_ENABLED = profile_bool(
+    "weather_target_profit_enabled",
+    True
+)
+WEATHER_MIN_POSITION_SIZE_MULTIPLIER = profile_float(
+    "weather_min_position_size_multiplier",
+    0.25
+)
+WEATHER_MAX_POSITION_SIZE_MULTIPLIER = profile_float(
+    "weather_max_position_size_multiplier",
+    1.0
+)
 
 TARGET_QUALITY_FILE = env_or_profile(
     "TARGET_QUALITY_FILE",
@@ -897,6 +920,106 @@ def signal_gate_failure(signal, now):
     return None
 
 
+def clamped(value, lower, upper):
+    return max(lower, min(upper, value))
+
+
+def weather_policy_fields(derived):
+    return {
+        "risk_context_available": derived.get("risk_context_available"),
+        "risk_context_stale": derived.get("risk_context_stale"),
+        "risk_adjusted_posture": derived.get("risk_adjusted_posture"),
+        "risk_adjusted_reason": derived.get("risk_adjusted_reason"),
+        "risk_adjusted_buy_score": derived.get("risk_adjusted_buy_score"),
+        "risk_adjusted_market_score": derived.get("risk_adjusted_market_score"),
+        "risk_context_market_risk_score": derived.get(
+            "risk_context_market_risk_score"
+        ),
+        "risk_context_buy_aggression_score": derived.get(
+            "risk_context_buy_aggression_score"
+        ),
+        "risk_context_downside_risk_score": derived.get(
+            "risk_context_downside_risk_score"
+        ),
+        "risk_context_bottoming_score": derived.get("risk_context_bottoming_score"),
+        "risk_context_rebound_score": derived.get("risk_context_rebound_score"),
+        "risk_context_breakout_score": derived.get("risk_context_breakout_score"),
+        "risk_context_hard_safety_flags": derived.get(
+            "risk_context_hard_safety_flags"
+        ),
+        "weather_report_available": derived.get("weather_report_available"),
+        "weather_trade_permission": derived.get("weather_trade_permission"),
+        "weather_bot_decision_authority": derived.get(
+            "weather_bot_decision_authority"
+        ),
+        "weather_condition": derived.get("weather_condition"),
+        "weather_alert_level": derived.get("weather_alert_level"),
+        "weather_emergency_bell": derived.get("weather_emergency_bell"),
+        "weather_opportunity_tags": derived.get("weather_opportunity_tags"),
+        "weather_risk_warnings": derived.get("weather_risk_warnings"),
+        "suggested_position_size_multiplier": derived.get(
+            "suggested_position_size_multiplier"
+        ),
+        "suggested_take_profit_multiplier": derived.get(
+            "suggested_take_profit_multiplier"
+        ),
+    }
+
+
+def weather_report_is_bot_decides(derived):
+    return (
+        derived.get("weather_report_available")
+        and derived.get("weather_bot_decision_authority") == "bot"
+        and derived.get("weather_trade_permission") == "bot_decides"
+    )
+
+
+def weather_policy_gate_failure(derived):
+    if not USE_WEATHER_REPORT_POLICY:
+        return None
+
+    if WEATHER_REPORT_REQUIRED and not derived.get("weather_report_available"):
+        return {"reason": "weather_report_missing"}
+
+    if WEATHER_EMERGENCY_BELL_BLOCK and derived.get("weather_emergency_bell"):
+        return {"reason": "weather_emergency_bell"}
+
+    return None
+
+
+def should_apply_legacy_action_gate(derived):
+    if not USE_WEATHER_REPORT_POLICY:
+        return True
+
+    return not weather_report_is_bot_decides(derived)
+
+
+def weather_position_multiplier(derived):
+    if not (USE_WEATHER_REPORT_POLICY and WEATHER_POSITION_SIZE_ENABLED):
+        return 1.0
+
+    multiplier = float(derived.get("suggested_position_size_multiplier") or 1.0)
+    if multiplier <= 0:
+        return 0.0
+
+    return clamped(
+        multiplier,
+        WEATHER_MIN_POSITION_SIZE_MULTIPLIER,
+        WEATHER_MAX_POSITION_SIZE_MULTIPLIER
+    )
+
+
+def weather_target_profit_multiplier(derived):
+    if not (USE_WEATHER_REPORT_POLICY and WEATHER_TARGET_PROFIT_ENABLED):
+        return 1.0
+
+    return clamped(
+        float(derived.get("suggested_take_profit_multiplier") or 1.0),
+        0.5,
+        2.0
+    )
+
+
 def target_limit_orders(signal, current_price, total_trade_value, max_buy_price=None):
     if not ENABLE_TARGET_LIMIT_BUYS:
         return []
@@ -1201,6 +1324,12 @@ def run_cycle():
     sentiment = normalize_signal(signal)
     action_policy = sentiment.get("action_policy", {})
     action_recommendation = sentiment.get("action_recommendation")
+    risk_derived = derive_risk_context(
+        sentiment.get("risk_context"),
+        fallback_processed_at=sentiment.get("processed_at"),
+        now=now
+    )
+    weather_fields = weather_policy_fields(risk_derived)
     log_event(
         "SIGNAL_UPDATE",
         cycle_id=cycle_id,
@@ -1214,15 +1343,46 @@ def run_cycle():
         signal_status=sentiment.get("signal_status"),
         processed_at=sentiment.get("processed_at"),
         freshness=sentiment.get("freshness"),
-        llm_target_count=len(sentiment.get("target_prices", []))
+        llm_target_count=len(sentiment.get("target_prices", [])),
+        use_weather_report_policy=USE_WEATHER_REPORT_POLICY,
+        **weather_fields
     )
 
     gate_failure = signal_gate_failure(sentiment, now)
+    if (
+        gate_failure is not None
+        and gate_failure.get("reason") == "bot_action_not_allowed"
+        and weather_report_is_bot_decides(risk_derived)
+    ):
+        log_event(
+            "LEGACY_SIGNAL_GATE_BYPASSED",
+            cycle_id=cycle_id,
+            reason="bot_action_not_allowed",
+            **weather_fields
+        )
+        gate_failure = None
     if gate_failure is not None:
-        skip_cycle(gate_failure.pop("reason"), cycle_id, price=price, **gate_failure)
+        skip_cycle(
+            gate_failure.pop("reason"),
+            cycle_id,
+            price=price,
+            **gate_failure,
+            **weather_fields
+        )
         return
 
-    if action_recommendation != "bullish_allowed":
+    weather_failure = weather_policy_gate_failure(risk_derived)
+    if weather_failure is not None:
+        skip_cycle(
+            weather_failure.pop("reason"),
+            cycle_id,
+            price=price,
+            **weather_failure,
+            **weather_fields
+        )
+        return
+
+    if should_apply_legacy_action_gate(risk_derived) and action_recommendation != "bullish_allowed":
         skip_cycle(
             "action_policy_" + (action_recommendation or "missing"),
             cycle_id,
@@ -1230,15 +1390,24 @@ def run_cycle():
             action_recommendation=action_recommendation,
             action_policy_reason=action_policy.get("reason") or sentiment.get("reason"),
             contributor_count=sentiment.get("contributor_count"),
+            **weather_fields
         )
         return
+    if action_recommendation != "bullish_allowed":
+        log_event(
+            "LEGACY_ACTION_GATE_BYPASSED",
+            cycle_id=cycle_id,
+            action_recommendation=action_recommendation,
+            action_policy_reason=action_policy.get("reason") or sentiment.get("reason"),
+            **weather_fields
+        )
 
     if len(state["open_buy_orders"]) >= MAX_OPEN_BUY_ORDERS:
-        skip_cycle("max_open_buy_orders", cycle_id, price=price)
+        skip_cycle("max_open_buy_orders", cycle_id, price=price, **weather_fields)
         return
 
     if len(state["open_sell_orders"]) >= MAX_OPEN_SELL_ORDERS:
-        skip_cycle("max_open_sell_orders", cycle_id, price=price)
+        skip_cycle("max_open_sell_orders", cycle_id, price=price, **weather_fields)
         return
 
     if current_inventory_usd(price) >= MAX_INVENTORY_USD:
@@ -1246,17 +1415,20 @@ def run_cycle():
             "max_inventory_usd",
             cycle_id,
             price=price,
-            deployed_inventory_usd=current_inventory_usd(price)
+            deployed_inventory_usd=current_inventory_usd(price),
+            **weather_fields
         )
         return
 
     balances = get_balances()
     if balances is None:
-        skip_cycle("balance_fetch_failed", cycle_id, price=price)
+        skip_cycle("balance_fetch_failed", cycle_id, price=price, **weather_fields)
         return
 
     _, quote_balance = balances
     trade_value = min(quote_balance * POSITION_SIZE_PCT, MAX_TRADE_USD)
+    position_multiplier = weather_position_multiplier(risk_derived)
+    trade_value *= position_multiplier
     trade_value *= max(0, 1 - EXECUTION_BUFFER_PCT)
     trade_value = max(0, min(trade_value, MAX_INVENTORY_USD - current_inventory_usd(price)))
     if trade_value < MIN_TRADE_USD:
@@ -1265,7 +1437,9 @@ def run_cycle():
             cycle_id,
             price=price,
             trade_value=trade_value,
-            min_trade_usd=MIN_TRADE_USD
+            min_trade_usd=MIN_TRADE_USD,
+            weather_position_size_multiplier=position_multiplier,
+            **weather_fields
         )
         return
 
@@ -1293,7 +1467,8 @@ def run_cycle():
             price=price,
             target_prices_source=sentiment.get("target_prices_source"),
             target_quality_available=quality_snapshot.get("available"),
-            target_quality_reason=quality_snapshot.get("reason")
+            target_quality_reason=quality_snapshot.get("reason"),
+            **weather_fields
         )
         return
 
@@ -1315,7 +1490,9 @@ def run_cycle():
                 target_buy_price=target_price,
                 trade_value=order["trade_value"],
                 volume=volume,
-                min_volume=min_volume
+                min_volume=min_volume,
+                weather_position_size_multiplier=position_multiplier,
+                **weather_fields
             )
             continue
 
@@ -1341,7 +1518,8 @@ def run_cycle():
                 reason=quality["quality_reason"],
                 price=price,
                 target_buy_price=target_price,
-                quality_allowed=False
+                quality_allowed=False,
+                **weather_fields
             )
             continue
 
@@ -1350,6 +1528,8 @@ def run_cycle():
             target_profit_pct = normalize_profit_target_pct(order["signal_sell_pct"])
         if target_profit_pct is None:
             target_profit_pct = TARGET_PROFIT_PCT
+        target_profit_multiplier = weather_target_profit_multiplier(risk_derived)
+        target_profit_pct *= target_profit_multiplier
 
         result = place_limit_buy(target_price, volume)
         if not result or not result.get("result", {}).get("txid"):
@@ -1360,7 +1540,10 @@ def run_cycle():
                 price=round_price(target_price),
                 volume=volume,
                 target_profit_pct=target_profit_pct,
-                quality_reason=quality["quality_reason"]
+                quality_reason=quality["quality_reason"],
+                weather_position_size_multiplier=position_multiplier,
+                weather_target_profit_multiplier=target_profit_multiplier,
+                **weather_fields
             )
             continue
 
@@ -1385,7 +1568,10 @@ def run_cycle():
             price=target_price,
             target_profit_pct=target_profit_pct,
             quality_reason=quality["quality_reason"],
-            target_prices_source=sentiment.get("target_prices_source")
+            target_prices_source=sentiment.get("target_prices_source"),
+            weather_position_size_multiplier=position_multiplier,
+            weather_target_profit_multiplier=target_profit_multiplier,
+            **weather_fields
         )
         notify_order_tracker(
             trade_id=txid,
@@ -1415,7 +1601,9 @@ def run_cycle():
         target_quality_enabled=TARGET_QUALITY_ENABLED,
         target_quality_fail_closed=TARGET_QUALITY_FAIL_CLOSED,
         target_prices_source=sentiment.get("target_prices_source"),
-        used_quality_target_fallback=used_quality_target_fallback
+        used_quality_target_fallback=used_quality_target_fallback,
+        weather_position_size_multiplier=position_multiplier,
+        **weather_fields
     )
 
 
@@ -1462,6 +1650,13 @@ def main():
         kill_switch_file=KILL_SWITCH_FILE,
         max_daily_realized_loss_usd=MAX_DAILY_REALIZED_LOSS_USD,
         max_consecutive_losing_sells=MAX_CONSECUTIVE_LOSING_SELLS,
+        use_weather_report_policy=USE_WEATHER_REPORT_POLICY,
+        weather_report_required=WEATHER_REPORT_REQUIRED,
+        weather_emergency_bell_block=WEATHER_EMERGENCY_BELL_BLOCK,
+        weather_position_size_enabled=WEATHER_POSITION_SIZE_ENABLED,
+        weather_target_profit_enabled=WEATHER_TARGET_PROFIT_ENABLED,
+        weather_min_position_size_multiplier=WEATHER_MIN_POSITION_SIZE_MULTIPLIER,
+        weather_max_position_size_multiplier=WEATHER_MAX_POSITION_SIZE_MULTIPLIER,
         order_tracker_configured=bool(
             ORDER_TRACKER_URL and ORDER_TRACKER_USER_AGENT
         ),

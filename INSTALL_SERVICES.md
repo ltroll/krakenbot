@@ -98,6 +98,11 @@ SENTIMENT_TRADE_LOG_FILE=sentiment_trade_log.jsonl
 SENTIMENT_DECISION_CSV_FILE=sentiment_decisions.csv
 SENTIMENT_STRATEGY_PROFILE=sentiment_strategy_default.json
 
+LLM_TARGET_CONFIG_FILE=sentiment_bot_config.json
+LLM_TARGET_STATE_FILE=llm_target_state.json
+LLM_TARGET_TRADE_LOG_FILE=llm_target_trade_log.jsonl
+LLM_TARGET_STRATEGY_PROFILE=llm_target_strategy_weather_dryrun.json
+
 KRAKEN_PAIR=XXBTZUSD
 SIGNAL_FILE=
 REQUEST_TIMEOUT_SECONDS=10
@@ -279,7 +284,73 @@ journalctl -u kraken-sentiment.service -f
 tail -f /home/<user>/tradingbot/krakenbot/sentiment_trade_log.jsonl
 ```
 
-## 5. Install The OLED Status Display
+## 5. Install The LLM Target Service
+
+Create `/etc/systemd/system/kraken-llm-target.service`:
+
+```ini
+[Unit]
+Description=Kraken LLM Target Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<user>
+Group=<user>
+WorkingDirectory=/home/<user>/tradingbot/krakenbot
+EnvironmentFile=/home/<user>/tradingbot/krakenbot/.env
+ExecStart=/home/<user>/tradingbot/krakenbot/.venv/bin/python /home/<user>/tradingbot/krakenbot/llm_target_bot.py
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Start with the dry-run weather profile:
+
+```env
+LLM_SIGNAL_URL=http://<host>/bot/multi_asset_signal.json
+SIGNAL_ASSET_ID=BTC
+LLM_TARGET_STRATEGY_PROFILE=llm_target_strategy_weather_dryrun.json
+LLM_TARGET_STATE_FILE=llm_target_state.json
+LLM_TARGET_TRADE_LOG_FILE=llm_target_trade_log.jsonl
+```
+
+Enable and start it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable kraken-llm-target.service
+sudo systemctl start kraken-llm-target.service
+```
+
+Check status and logs:
+
+```bash
+sudo systemctl status kraken-llm-target.service
+journalctl -u kraken-llm-target.service -f
+tail -f /home/<user>/tradingbot/krakenbot/llm_target_trade_log.jsonl
+```
+
+After dry-run service logs show clean signal reads, target-quality reads,
+order-ledger checkins, and sane `LEGACY_ACTION_GATE_BYPASSED` events, switch
+to the tiny live profile:
+
+```env
+LLM_TARGET_STRATEGY_PROFILE=llm_target_strategy_weather_tiny_live.json
+```
+
+Then restart:
+
+```bash
+sudo systemctl restart kraken-llm-target.service
+```
+
+## 6. Install The OLED Status Display
 
 Create `/etc/systemd/system/kraken-status-display.service`:
 
@@ -295,8 +366,8 @@ User=<user>
 Group=<user>
 WorkingDirectory=/home/<user>/tradingbot/krakenbot
 EnvironmentFile=/home/<user>/tradingbot/krakenbot/.env
-Environment=BOT_DISPLAY_SERVICES=kraken-range-grid.service,kraken-sentiment.service
-Environment=BOT_DISPLAY_LOG_FILES=trade_log.jsonl,sentiment_trade_log.jsonl,stats_trend_trade_log.jsonl
+Environment=BOT_DISPLAY_SERVICES=kraken-range-grid.service,kraken-sentiment.service,kraken-llm-target.service
+Environment=BOT_DISPLAY_LOG_FILES=trade_log.jsonl,sentiment_trade_log.jsonl,llm_target_trade_log.jsonl,stats_trend_trade_log.jsonl
 ExecStart=/home/<user>/tradingbot/krakenbot/.venv/bin/python /home/<user>/tradingbot/krakenbot/bot_status_display.py
 Restart=always
 RestartSec=10
@@ -352,13 +423,14 @@ active. `last event` is the age of the newest JSONL log timestamp. `errors` is
 the number of error events in the last hour. `Bot Name` is read from the
 `ORDER_TRACKER_USER_AGENT` environment variable.
 
-## 6. Common Operations
+## 7. Common Operations
 
 Stop a bot:
 
 ```bash
 sudo systemctl stop kraken-range-grid.service
 sudo systemctl stop kraken-sentiment.service
+sudo systemctl stop kraken-llm-target.service
 sudo systemctl stop kraken-status-display.service
 ```
 
@@ -367,6 +439,7 @@ Restart after changing `.env` or config:
 ```bash
 sudo systemctl restart kraken-range-grid.service
 sudo systemctl restart kraken-sentiment.service
+sudo systemctl restart kraken-llm-target.service
 sudo systemctl restart kraken-status-display.service
 ```
 
@@ -375,6 +448,7 @@ Disable a bot from starting on boot:
 ```bash
 sudo systemctl disable kraken-range-grid.service
 sudo systemctl disable kraken-sentiment.service
+sudo systemctl disable kraken-llm-target.service
 sudo systemctl disable kraken-status-display.service
 ```
 
@@ -383,10 +457,11 @@ View recent service logs:
 ```bash
 journalctl -u kraken-range-grid.service -n 100 --no-pager
 journalctl -u kraken-sentiment.service -n 100 --no-pager
+journalctl -u kraken-llm-target.service -n 100 --no-pager
 journalctl -u kraken-status-display.service -n 100 --no-pager
 ```
 
-## 7. Safety Checklist
+## 8. Safety Checklist
 
 Before enabling live trading:
 
@@ -396,6 +471,11 @@ Before enabling live trading:
 - Confirm only one service is controlling the same strategy state file.
 - Confirm `LLM_SIGNAL_URL` and `PRICE_LOG_URL` are reachable from the server.
 - Confirm Kraken API keys have only the permissions the bot needs.
+- For the LLM target bot, confirm `LLM_TARGET_STRATEGY_PROFILE` is
+  `llm_target_strategy_weather_dryrun.json` before the first service run.
+- Before switching the LLM target bot live, confirm the logs contain weather
+  fields and no repeated `weather_report_missing`, `SIGNAL_ERROR`, or
+  `TARGET_QUALITY_EVAL` failures.
 
 Do not run both bots against the same account unless you intentionally want both
 strategies managing inventory at the same time.
