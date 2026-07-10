@@ -546,6 +546,10 @@ high_anchor_profit_target_pct = profile_float(
 prevent_buy_above_last_sell = bool(
     strategy_config.get("prevent_buy_above_last_sell", True)
 )
+allow_high_band_breakout_above_last_sell = profile_bool(
+    "allow_high_band_breakout_above_last_sell",
+    False
+)
 buy_after_sell_discount_pct = profile_float(
     "buy_after_sell_discount_pct",
     0.001
@@ -2104,6 +2108,18 @@ def weather_high_anchor_tailwind(weather_report):
     return condition in constructive or bool(tags & constructive)
 
 
+def allow_above_last_sell_for_candidate(config, buy_source, weather_report):
+    if buy_source != "range_high_band":
+        return False
+    if not strategy_bool(
+        config,
+        "allow_high_band_breakout_above_last_sell",
+        allow_high_band_breakout_above_last_sell
+    ):
+        return False
+    return weather_high_anchor_tailwind(weather_report)
+
+
 # ----------------------
 # RANGE REFRESH
 # ----------------------
@@ -3454,6 +3470,9 @@ def main():
         high_anchor_profit_target_pct=high_anchor_profit_target_pct,
         prevent_buy_above_last_sell=prevent_buy_above_last_sell,
         buy_after_sell_discount_pct=buy_after_sell_discount_pct,
+        allow_high_band_breakout_above_last_sell=(
+            allow_high_band_breakout_above_last_sell
+        ),
         llm_buy_cooldown_minutes_after_sell=(
             llm_buy_cooldown_minutes_after_sell
         ),
@@ -4844,6 +4863,13 @@ def main():
                     key = str(level)
                     skip_reason = None
                     high_band_guard = {"allowed": True, "reason": None}
+                    above_last_sell_breakout_bypass = (
+                        allow_above_last_sell_for_candidate(
+                            route_config,
+                            buy_source,
+                            weather_report
+                        )
+                    )
 
                     if key in state["open_buy_orders"]:
                         skip_reason = "open_buy_order"
@@ -4853,6 +4879,7 @@ def main():
                         skip_reason = "open_sell_order"
                     elif (
                         prevent_buy_above_last_sell
+                        and not above_last_sell_breakout_bypass
                         and last_sell_price is not None
                         and level > (
                             last_sell_price * (1 - buy_after_sell_discount_pct)
@@ -5123,6 +5150,9 @@ def main():
                                 route_inventory_pressure["size_multiplier"]
                             ),
                             last_sell_price=last_sell_price,
+                            above_last_sell_breakout_bypass=(
+                                above_last_sell_breakout_bypass
+                            ),
                             candidate_volume_btc=round(volume, VOLUME_DECIMALS),
                             candidate_sell_pct_override=active_sell_pct_override,
                             reason=skip_reason
@@ -5151,6 +5181,9 @@ def main():
                                 2
                             ),
                             last_sell_price=last_sell_price,
+                            above_last_sell_breakout_bypass=(
+                                above_last_sell_breakout_bypass
+                            ),
                             action_recommendation=action_recommendation,
                             action_policy_reason=action_policy.get("reason"),
                             **sentiment_risk_fields,
@@ -5281,6 +5314,9 @@ def main():
                         bucket_inventory_cap_usd=round(bucket_cap_usd, 8),
                         high_anchor_order_count=high_anchor_order_count,
                         last_sell_price=last_sell_price,
+                        above_last_sell_breakout_bypass=(
+                            above_last_sell_breakout_bypass
+                        ),
                         sell_pct_override=active_sell_pct_override,
                         anchor_strategy_router_enabled=(
                             anchor_strategy_router_enabled
@@ -5347,6 +5383,9 @@ def main():
                                 route.get("strategy_file") if route else None
                             ),
                             "paper_trading_enabled": paper_trading_enabled,
+                            "above_last_sell_breakout_bypass": (
+                                above_last_sell_breakout_bypass
+                            ),
                             "shadow_reason": "approved_risk_scored_candidate",
                         }
                         shadow_payload.update(sentiment_risk_fields)
@@ -5377,6 +5416,9 @@ def main():
                             execution_signal=execution_signal,
                             buy_source=buy_source,
                             sell_pct_override=active_sell_pct_override,
+                            above_last_sell_breakout_bypass=(
+                                above_last_sell_breakout_bypass
+                            ),
                             effective_position_size_pct=(
                                 candidate_effective_position_size_pct
                             ),
@@ -5411,6 +5453,9 @@ def main():
                             execution_signal=execution_signal,
                             buy_source=buy_source,
                             sell_pct_override=active_sell_pct_override,
+                            above_last_sell_breakout_bypass=(
+                                above_last_sell_breakout_bypass
+                            ),
                             effective_position_size_pct=(
                                 candidate_effective_position_size_pct
                             ),
@@ -5563,6 +5608,9 @@ def main():
                         price=round(level, PRICE_DECIMALS),
                         buy_source=buy_source,
                         sell_pct_override=active_sell_pct_override,
+                        above_last_sell_breakout_bypass=(
+                            above_last_sell_breakout_bypass
+                        ),
                         effective_position_size_pct=(
                             candidate_effective_position_size_pct
                         ),
@@ -5594,6 +5642,9 @@ def main():
                         trade_notional_usd=round(level * volume, 8),
                         buy_source=buy_source,
                         sell_pct_override=active_sell_pct_override,
+                        above_last_sell_breakout_bypass=(
+                            above_last_sell_breakout_bypass
+                        ),
                         effective_position_size_pct=(
                             candidate_effective_position_size_pct
                         ),

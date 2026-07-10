@@ -383,6 +383,35 @@ def weather_bot_decides(weather_report):
     )
 
 
+def weather_high_anchor_tailwind(weather_report):
+    if not weather_bot_decides(weather_report):
+        return False
+    if weather_report.get("emergency_bell"):
+        return False
+    if weather_report.get("alert_level") == "danger":
+        return False
+    condition = str(weather_report.get("condition") or "").strip().lower()
+    tags = set(weather_list(weather_report.get("opportunity_tags")))
+    constructive = {
+        "constructive",
+        "rebound_tailwind",
+        "breakout_tailwind",
+    }
+    return condition in constructive or bool(tags & constructive)
+
+
+def allow_above_last_sell_for_candidate(config, buy_source, weather_report):
+    if buy_source != "range_high_band":
+        return False
+    if not strategy_bool(
+        config,
+        "allow_high_band_breakout_above_last_sell",
+        False,
+    ):
+        return False
+    return weather_high_anchor_tailwind(weather_report)
+
+
 def sentiment_risk_event_fields(signal):
     risk_context = risk_context_payload(signal)
     flags = risk_context.get("hard_safety_flags")
@@ -2389,6 +2418,11 @@ def evaluate_candidate(snapshot, candidate, price):
         return False, "open_sell_order"
     if (
         prevent_buy_above_last_sell
+        and not allow_above_last_sell_for_candidate(
+            config,
+            buy_source,
+            weather_report,
+        )
         and last_sell_price is not None
         and level > (last_sell_price * (1 - buy_after_sell_discount_pct))
     ):

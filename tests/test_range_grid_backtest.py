@@ -771,6 +771,69 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertFalse(approved)
         self.assertEqual(reason, "price_above_level")
 
+    def test_high_band_above_last_sell_guard_stays_default_without_breakout_override(self):
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            104.5,
+            action_recommendation="blocked",
+            strategy_modes=["high"],
+            state_summary_overrides={"last_sell_price": 100.0},
+            risk_context={
+                "recommended_posture": "breakout_watch",
+                "weather_report": {
+                    "mode": "weather_report",
+                    "bot_decision_authority": "bot",
+                    "trade_permission": "bot_decides",
+                    "condition": "breakout_tailwind",
+                    "alert_level": "normal",
+                    "emergency_bell": False,
+                    "opportunity_tags": ["breakout_tailwind"],
+                },
+            },
+        )
+        candidate = {
+            "buy_source": "range_high_band",
+            "level": 104.5,
+        }
+
+        approved, reason = backtest.evaluate_candidate(snapshot, candidate, 104.5)
+
+        self.assertFalse(approved)
+        self.assertEqual(reason, "above_last_sell_discount")
+
+    def test_high_band_breakout_weather_can_bypass_above_last_sell_guard(self):
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            104.5,
+            action_recommendation="blocked",
+            strategy_modes=["high"],
+            strategy_overrides={
+                "allow_high_band_breakout_above_last_sell": True,
+            },
+            state_summary_overrides={"last_sell_price": 100.0},
+            risk_context={
+                "recommended_posture": "breakout_watch",
+                "weather_report": {
+                    "mode": "weather_report",
+                    "bot_decision_authority": "bot",
+                    "trade_permission": "bot_decides",
+                    "condition": "breakout_tailwind",
+                    "alert_level": "normal",
+                    "emergency_bell": False,
+                    "opportunity_tags": ["breakout_tailwind"],
+                },
+            },
+        )
+        candidate = {
+            "buy_source": "range_high_band",
+            "level": 104.5,
+        }
+
+        approved, reason = backtest.evaluate_candidate(snapshot, candidate, 104.5)
+
+        self.assertTrue(approved)
+        self.assertIsNone(reason)
+
     def test_momentum_entry_tolerance_can_fall_back_to_base_config(self):
         route_config = {}
         base_config = {"momentum_entry_tolerance_pct": 0.002}

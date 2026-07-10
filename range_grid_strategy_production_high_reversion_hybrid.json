@@ -77,6 +77,7 @@
   "high_anchor_profit_target_pct": 0.006,
   "prevent_buy_above_last_sell": true,
   "buy_after_sell_discount_pct": 0.001,
+  "allow_high_band_breakout_above_last_sell": true,
   "llm_buy_cooldown_minutes_after_sell": 30,
   "sentiment_defensive_threshold": 0.03,
   "sentiment_risk_on_threshold": 0.12,
