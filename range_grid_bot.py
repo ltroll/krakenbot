@@ -2011,9 +2011,32 @@ def sentiment_risk_log_fields(risk_context):
     flags = risk_context.get("hard_safety_flags")
     if not isinstance(flags, list):
         flags = []
+    weather = weather_report_payload(risk_context)
+    bot_tuning = weather_bot_tuning(weather)
 
     return {
         "sentiment_risk_posture": risk_context.get("recommended_posture"),
+        "weather_condition": weather.get("condition"),
+        "weather_alert_level": weather.get("alert_level"),
+        "weather_trade_permission": weather.get("trade_permission"),
+        "weather_bot_decision_authority": (
+            weather.get("bot_decision_authority")
+        ),
+        "weather_emergency_bell": bool(weather.get("emergency_bell")),
+        "weather_opportunity_tags": weather_list(weather.get("opportunity_tags")),
+        "weather_risk_warnings": weather_list(weather.get("risk_warnings")),
+        "weather_position_size_multiplier": (
+            bot_tuning.get("position_size_multiplier")
+        ),
+        "weather_grid_aggression_multiplier": (
+            bot_tuning.get("grid_aggression_multiplier")
+        ),
+        "weather_target_profit_multiplier": (
+            bot_tuning.get("target_profit_multiplier")
+        ),
+        "weather_entry_discount_multiplier": (
+            bot_tuning.get("entry_discount_multiplier")
+        ),
         "sentiment_market_risk_score": risk_context.get("market_risk_score"),
         "sentiment_buy_aggression_score": risk_context.get("buy_aggression_score"),
         "sentiment_downside_risk_score": risk_context.get("downside_risk_score"),
@@ -2034,6 +2057,51 @@ def sentiment_risk_log_fields(risk_context):
         ),
         "sentiment_hard_safety_flags": flags,
     }
+
+
+def weather_report_payload(risk_context):
+    if not isinstance(risk_context, dict):
+        return {}
+    weather = risk_context.get("weather_report")
+    return weather if isinstance(weather, dict) else {}
+
+
+def weather_bot_tuning(weather_report):
+    tuning = weather_report.get("bot_tuning") if isinstance(weather_report, dict) else {}
+    return tuning if isinstance(tuning, dict) else {}
+
+
+def weather_list(value):
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return []
+
+
+def weather_bot_decides(weather_report):
+    if not isinstance(weather_report, dict):
+        return False
+    return (
+        weather_report.get("mode") == "weather_report"
+        and weather_report.get("bot_decision_authority") == "bot"
+        and weather_report.get("trade_permission") == "bot_decides"
+    )
+
+
+def weather_high_anchor_tailwind(weather_report):
+    if not weather_bot_decides(weather_report):
+        return False
+    if weather_report.get("emergency_bell"):
+        return False
+    if weather_report.get("alert_level") == "danger":
+        return False
+    condition = str(weather_report.get("condition") or "").strip().lower()
+    tags = set(weather_list(weather_report.get("opportunity_tags")))
+    constructive = {
+        "constructive",
+        "rebound_tailwind",
+        "breakout_tailwind",
+    }
+    return condition in constructive or bool(tags & constructive)
 
 
 # ----------------------
@@ -2640,7 +2708,24 @@ def risk_context_position_size_adjustment(risk_context):
     if not isinstance(risk_context, dict):
         risk_context = {}
 
-    raw_multiplier = optional_float(risk_context.get("position_size_multiplier"))
+    weather = weather_report_payload(risk_context)
+    bot_tuning = weather_bot_tuning(weather)
+    if weather.get("emergency_bell"):
+        return {
+            "enabled": True,
+            "raw_multiplier": 0.0,
+            "clamped_multiplier": 0.0,
+            "blend": risk_context_position_size_blend,
+            "effective_multiplier": 0.0,
+        }
+    else:
+        raw_multiplier = optional_float(
+            bot_tuning.get("position_size_multiplier")
+        )
+        if raw_multiplier is None:
+            raw_multiplier = optional_float(
+                risk_context.get("position_size_multiplier")
+            )
     if raw_multiplier is None:
         return {
             "enabled": True,
@@ -2739,7 +2824,8 @@ def sentiment_buy_permissions(
     *,
     operating_mode=None,
     allow_range_buy_on_confidence_block=False,
-    sentiment_control_mode=None
+    sentiment_control_mode=None,
+    weather_report=None
 ):
     normalized = (action_recommendation or "neutral").strip().lower()
     sentiment_control_mode = normalize_sentiment_control_mode(
@@ -2747,13 +2833,22 @@ def sentiment_buy_permissions(
         operating_mode
     )
     llm_buys_allowed = normalized == "bullish_allowed"
+    weather_bot_authority = weather_bot_decides(weather_report)
+    weather_emergency = bool(
+        weather_report.get("emergency_bell")
+        if isinstance(weather_report, dict)
+        else False
+    )
     range_core_buys_allowed = normalized in (
         "bullish_allowed",
         "neutral",
         "watch_only"
     )
     range_high_buys_allowed = range_core_buys_allowed
-    if (
+    if weather_bot_authority:
+        range_core_buys_allowed = not weather_emergency
+        range_high_buys_allowed = not weather_emergency
+    elif (
         not range_core_buys_allowed
         and allow_range_buy_on_confidence_block
         and operating_mode == "range_only"
@@ -3557,8 +3652,10 @@ def main():
                 sentiment_payload.get("action_recommendation") or "neutral"
             )
             action_policy = sentiment_payload.get("action_policy", {})
+            risk_context = sentiment_payload.get("risk_context")
+            weather_report = weather_report_payload(risk_context)
             sentiment_risk_fields = sentiment_risk_log_fields(
-                sentiment_payload.get("risk_context")
+                risk_context
             )
             allow_range_buy_on_confidence_block = profile_bool(
                 "allow_range_buy_on_confidence_block",
@@ -3575,7 +3672,8 @@ def main():
                 allow_range_buy_on_confidence_block=(
                     allow_range_buy_on_confidence_block
                 ),
-                sentiment_control_mode=sentiment_control_mode
+                sentiment_control_mode=sentiment_control_mode,
+                weather_report=weather_report
             )
             llm_buys_allowed = buy_permissions["llm_buys_allowed"]
             range_core_buys_allowed = buy_permissions[
@@ -3684,7 +3782,7 @@ def main():
                 ))
             )
             risk_context_size_adjustment = risk_context_position_size_adjustment(
-                sentiment_payload.get("risk_context")
+                risk_context
             )
             risk_context_size_multiplier = risk_context_size_adjustment[
                 "effective_multiplier"
@@ -3701,6 +3799,12 @@ def main():
                 "size_multiplier"
             ]
             effective_position_size_pct *= inventory_pressure_size_multiplier
+            weather_high_anchor_allowed = weather_high_anchor_tailwind(
+                weather_report
+            )
+            effective_high_anchor_enabled = (
+                regime["allow_high_anchor"] or weather_high_anchor_allowed
+            )
 
             log_event(
                 "SIGNAL_UPDATE",
@@ -3778,7 +3882,8 @@ def main():
                 effective_position_size_pct=effective_position_size_pct,
                 effective_max_inventory_usd=effective_max_inventory_usd,
                 effective_max_open_sell_orders=effective_max_open_sell_orders,
-                high_anchor_enabled=regime["allow_high_anchor"]
+                high_anchor_enabled=effective_high_anchor_enabled,
+                weather_high_anchor_allowed=weather_high_anchor_allowed
             )
             console(f"Price: {price} | Signal: {execution_signal}")
 
@@ -4555,7 +4660,7 @@ def main():
                             )
                             sell_pct_override = None
                         elif strategy_mode == "high":
-                            if not regime["allow_high_anchor"]:
+                            if not effective_high_anchor_enabled:
                                 continue
                             buy_source = "range_high_band"
                             route_context = anchor_strategy_route_for_source(
@@ -5718,7 +5823,8 @@ def main():
                 effective_position_size_pct=effective_position_size_pct,
                 effective_max_inventory_usd=effective_max_inventory_usd,
                 effective_max_open_sell_orders=effective_max_open_sell_orders,
-                high_anchor_enabled=regime["allow_high_anchor"],
+                high_anchor_enabled=effective_high_anchor_enabled,
+                weather_high_anchor_allowed=weather_high_anchor_allowed,
                 grid_anchor=grid_anchor,
                 configured_strategy_modes=configured_strategy_modes,
                 buy_source=(
@@ -5815,7 +5921,8 @@ def main():
                 "effective_max_open_sell_orders": (
                     effective_max_open_sell_orders
                 ),
-                "high_anchor_enabled": regime["allow_high_anchor"],
+                "high_anchor_enabled": effective_high_anchor_enabled,
+                "weather_high_anchor_allowed": weather_high_anchor_allowed,
                 "realized_pnl_today": round(realized_pnl_today, 8),
                 "sell_backlog_count": sell_backlog["count"],
                 "sell_backlog_oldest_minutes": round(

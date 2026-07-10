@@ -886,6 +886,69 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertFalse(permissions["range_high_buys_allowed"])
         self.assertFalse(permissions["range_buys_allowed"])
 
+    def test_weather_report_bot_decides_allows_range_despite_legacy_block(self):
+        permissions = backtest.sentiment_buy_permissions(
+            "blocked",
+            {"reason": "legacy traffic light says blocked"},
+            operating_mode="range_only",
+            sentiment_control_mode="price_first",
+            weather_report={
+                "mode": "weather_report",
+                "bot_decision_authority": "bot",
+                "trade_permission": "bot_decides",
+                "condition": "breakout_tailwind",
+                "alert_level": "watch",
+                "emergency_bell": False,
+            },
+        )
+
+        self.assertFalse(permissions["llm_buys_allowed"])
+        self.assertTrue(permissions["range_core_buys_allowed"])
+        self.assertTrue(permissions["range_high_buys_allowed"])
+
+    def test_weather_report_emergency_bell_blocks_range_permission(self):
+        permissions = backtest.sentiment_buy_permissions(
+            "bullish_allowed",
+            operating_mode="range_only",
+            sentiment_control_mode="price_first",
+            weather_report={
+                "mode": "weather_report",
+                "bot_decision_authority": "bot",
+                "trade_permission": "bot_decides",
+                "condition": "storm_warning",
+                "alert_level": "danger",
+                "emergency_bell": True,
+            },
+        )
+
+        self.assertFalse(permissions["range_buys_allowed"])
+
+    def test_risk_context_position_sizing_prefers_weather_bot_tuning(self):
+        adjustment = backtest.risk_context_position_size_adjustment(
+            {
+                "risk_context_position_sizing_enabled": True,
+                "risk_context_position_size_min_multiplier": 0.35,
+                "risk_context_position_size_max_multiplier": 1.0,
+                "risk_context_position_size_blend": 0.5,
+            },
+            {
+                "position_size_multiplier": 0.9,
+                "weather_report": {
+                    "mode": "weather_report",
+                    "bot_decision_authority": "bot",
+                    "trade_permission": "bot_decides",
+                    "emergency_bell": False,
+                    "bot_tuning": {
+                        "position_size_multiplier": 0.32,
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(adjustment["raw_multiplier"], 0.32)
+        self.assertEqual(adjustment["clamped_multiplier"], 0.35)
+        self.assertEqual(adjustment["effective_multiplier"], 0.675)
+
     def test_replay_allows_range_only_override_on_confidence_liquidity_block(self):
         snapshots = [
             make_snapshot(

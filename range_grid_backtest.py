@@ -355,14 +355,63 @@ def risk_context_payload(signal):
     return risk_context if isinstance(risk_context, dict) else {}
 
 
+def weather_report_payload(risk_context):
+    if not isinstance(risk_context, dict):
+        return {}
+    weather = risk_context.get("weather_report")
+    return weather if isinstance(weather, dict) else {}
+
+
+def weather_bot_tuning(weather_report):
+    tuning = weather_report.get("bot_tuning") if isinstance(weather_report, dict) else {}
+    return tuning if isinstance(tuning, dict) else {}
+
+
+def weather_list(value):
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return []
+
+
+def weather_bot_decides(weather_report):
+    if not isinstance(weather_report, dict):
+        return False
+    return (
+        weather_report.get("mode") == "weather_report"
+        and weather_report.get("bot_decision_authority") == "bot"
+        and weather_report.get("trade_permission") == "bot_decides"
+    )
+
+
 def sentiment_risk_event_fields(signal):
     risk_context = risk_context_payload(signal)
     flags = risk_context.get("hard_safety_flags")
     if not isinstance(flags, list):
         flags = []
+    weather = weather_report_payload(risk_context)
+    bot_tuning = weather_bot_tuning(weather)
     fields = {
         "sentiment_risk_posture": risk_context.get("recommended_posture"),
         "sentiment_hard_safety_flags": flags,
+        "weather_condition": weather.get("condition"),
+        "weather_alert_level": weather.get("alert_level"),
+        "weather_trade_permission": weather.get("trade_permission"),
+        "weather_bot_decision_authority": weather.get("bot_decision_authority"),
+        "weather_emergency_bell": bool(weather.get("emergency_bell")),
+        "weather_opportunity_tags": weather_list(weather.get("opportunity_tags")),
+        "weather_risk_warnings": weather_list(weather.get("risk_warnings")),
+        "weather_position_size_multiplier": bot_tuning.get(
+            "position_size_multiplier"
+        ),
+        "weather_grid_aggression_multiplier": bot_tuning.get(
+            "grid_aggression_multiplier"
+        ),
+        "weather_target_profit_multiplier": bot_tuning.get(
+            "target_profit_multiplier"
+        ),
+        "weather_entry_discount_multiplier": bot_tuning.get(
+            "entry_discount_multiplier"
+        ),
     }
     for source_key, output_key in RISK_CONTEXT_NUMERIC_FIELDS.items():
         fields[output_key] = safe_float(risk_context.get(source_key))
@@ -793,6 +842,7 @@ def sentiment_buy_permissions(
     operating_mode=None,
     allow_range_buy_on_confidence_block=False,
     sentiment_control_mode=None,
+    weather_report=None,
 ):
     normalized = (action_recommendation or "neutral").strip().lower()
     sentiment_control_mode = normalize_sentiment_control_mode(
@@ -800,13 +850,22 @@ def sentiment_buy_permissions(
         operating_mode,
     )
     llm_buys_allowed = normalized == "bullish_allowed"
+    weather_bot_authority = weather_bot_decides(weather_report)
+    weather_emergency = bool(
+        weather_report.get("emergency_bell")
+        if isinstance(weather_report, dict)
+        else False
+    )
     range_core_buys_allowed = normalized in (
         "bullish_allowed",
         "neutral",
         "watch_only",
     )
     range_high_buys_allowed = range_core_buys_allowed
-    if (
+    if weather_bot_authority:
+        range_core_buys_allowed = not weather_emergency
+        range_high_buys_allowed = not weather_emergency
+    elif (
         not range_core_buys_allowed
         and allow_range_buy_on_confidence_block
         and operating_mode == "range_only"
@@ -1918,7 +1977,8 @@ def risk_context_position_size_adjustment(config, risk_context):
     if not isinstance(risk_context, dict):
         risk_context = {}
 
-    raw_multiplier = safe_float(risk_context.get("position_size_multiplier"))
+    weather = weather_report_payload(risk_context)
+    bot_tuning = weather_bot_tuning(weather)
     blend = max(
         0.0,
         min(
@@ -1926,6 +1986,17 @@ def risk_context_position_size_adjustment(config, risk_context):
             strategy_float(config, "risk_context_position_size_blend", 0.5),
         ),
     )
+    if weather.get("emergency_bell"):
+        return {
+            "enabled": True,
+            "raw_multiplier": 0.0,
+            "clamped_multiplier": 0.0,
+            "blend": blend,
+            "effective_multiplier": 0.0,
+        }
+    raw_multiplier = safe_float(bot_tuning.get("position_size_multiplier"))
+    if raw_multiplier is None:
+        raw_multiplier = safe_float(risk_context.get("position_size_multiplier"))
     if raw_multiplier is None:
         return {
             "enabled": True,
@@ -2026,6 +2097,8 @@ def build_candidates(snapshot, price):
         require_fresh_signal,
         min_signal_status
     )
+    risk_context = risk_context_payload(signal)
+    weather_report = weather_report_payload(risk_context)
     buy_permissions = sentiment_buy_permissions(
         action_recommendation,
         signal.get("action_policy"),
@@ -2034,6 +2107,7 @@ def build_candidates(snapshot, price):
             allow_range_buy_on_confidence_block
         ),
         sentiment_control_mode=sentiment_control_mode,
+        weather_report=weather_report,
     )
     llm_buys_allowed = buy_permissions["llm_buys_allowed"]
     range_core_buys_allowed = buy_permissions["range_core_buys_allowed"]
@@ -2092,7 +2166,7 @@ def build_candidates(snapshot, price):
     )
     risk_context_size_adjustment = risk_context_position_size_adjustment(
         config,
-        risk_context_payload(signal),
+        risk_context,
     )
 
     result = {
@@ -2245,6 +2319,8 @@ def evaluate_candidate(snapshot, candidate, price):
     state_info = state_summary(snapshot)
     state_data = state_payload(snapshot)
     signal = signal_payload(snapshot)
+    risk_context = risk_context_payload(signal)
+    weather_report = weather_report_payload(risk_context)
     buy_permissions = sentiment_buy_permissions(
         signal.get("action_recommendation") or "neutral",
         signal.get("action_policy"),
@@ -2255,6 +2331,7 @@ def evaluate_candidate(snapshot, candidate, price):
             config.get("allow_range_buy_on_confidence_block", False)
         ),
         sentiment_control_mode=config.get("sentiment_control_mode"),
+        weather_report=weather_report,
     )
     llm_buys_allowed = buy_permissions["llm_buys_allowed"]
     range_core_buys_allowed = buy_permissions["range_core_buys_allowed"]
@@ -2337,7 +2414,7 @@ def evaluate_candidate(snapshot, candidate, price):
     if buy_source == "range_high_band":
         high_band_guard = risk_context_high_band_guard(
             config,
-            risk_context_payload(signal),
+            risk_context,
         )
         if not high_band_guard["allowed"]:
             return False, high_band_guard["reason"]
