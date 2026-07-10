@@ -491,6 +491,41 @@ RISK_CONTEXT_MAX_POSITION_SIZE_MULTIPLIER = env_profile_float(
     "risk_context_max_position_size_multiplier",
     1.25
 )
+HIGH_ENTRY_QUALITY_ENABLED = env_profile_bool(
+    "HIGH_ENTRY_QUALITY_ENABLED",
+    "high_entry_quality_enabled",
+    True
+)
+HIGH_ENTRY_RANGE_POSITION_MIN = env_profile_float(
+    "HIGH_ENTRY_RANGE_POSITION_MIN",
+    "high_entry_range_position_min",
+    0.90
+)
+HIGH_ENTRY_DISTANCE_TO_HIGH_PCT = env_profile_float(
+    "HIGH_ENTRY_DISTANCE_TO_HIGH_PCT",
+    "high_entry_distance_to_high_pct",
+    0.75
+)
+HIGH_ENTRY_MAX_MARKET_RISK_SCORE = env_profile_float(
+    "HIGH_ENTRY_MAX_MARKET_RISK_SCORE",
+    "high_entry_max_market_risk_score",
+    0.35
+)
+HIGH_ENTRY_MIN_CONFIRMATION_SCORE = env_profile_float(
+    "HIGH_ENTRY_MIN_CONFIRMATION_SCORE",
+    "high_entry_min_confirmation_score",
+    0.65
+)
+HIGH_ENTRY_REQUIRE_POSITIVE_4H_RETURN = env_profile_bool(
+    "HIGH_ENTRY_REQUIRE_POSITIVE_4H_RETURN",
+    "high_entry_require_positive_4h_return",
+    True
+)
+HIGH_ENTRY_SIZE_MULTIPLIER = env_profile_float(
+    "HIGH_ENTRY_SIZE_MULTIPLIER",
+    "high_entry_size_multiplier",
+    0.50
+)
 USE_BACKTEST_HEALTH_GATE = env_bool(
     "USE_BACKTEST_HEALTH_GATE",
     False,
@@ -617,6 +652,15 @@ DECISION_CSV_FIELDS = [
     "weather_emergency_bell",
     "weather_opportunity_tags",
     "weather_risk_warnings",
+    "weather_market_current_price",
+    "weather_market_range_high",
+    "weather_market_range_low",
+    "weather_market_range_position",
+    "weather_market_range_zone",
+    "weather_market_distance_to_recent_high_pct",
+    "weather_market_distance_from_recent_low_pct",
+    "weather_market_price_return_24h_pct",
+    "weather_market_price_return_4h_pct",
     "risk_adjusted_buy_score",
     "risk_adjusted_market_score",
     "risk_adjusted_posture",
@@ -637,6 +681,9 @@ DECISION_CSV_FIELDS = [
     "price_high",
     "high_price_buy_block_pct",
     "max_high_buy_price",
+    "high_entry_near_high",
+    "high_entry_quality_reason",
+    "high_entry_size_multiplier",
     "backtest_kind",
     "backtest_policy_trades",
     "backtest_policy_win_rate",
@@ -2370,6 +2417,126 @@ def risk_context_trade_pause(risk_view):
     return False, None
 
 
+def effective_market_location_range_position(risk_view, range_position):
+    weather_range_position = risk_view.get("weather_market_range_position")
+    if weather_range_position is not None:
+        return weather_range_position
+    return range_position
+
+
+def market_location_near_high(risk_view, range_position):
+    if not HIGH_ENTRY_QUALITY_ENABLED:
+        return False
+
+    effective_range_position = effective_market_location_range_position(
+        risk_view,
+        range_position
+    )
+    distance_to_high = risk_view.get("weather_market_distance_to_recent_high_pct")
+    range_zone = str(risk_view.get("weather_market_range_zone") or "").lower()
+
+    if (
+        effective_range_position is not None
+        and effective_range_position >= HIGH_ENTRY_RANGE_POSITION_MIN
+    ):
+        return True
+    if (
+        distance_to_high is not None
+        and distance_to_high <= HIGH_ENTRY_DISTANCE_TO_HIGH_PCT
+    ):
+        return True
+    return range_zone in (
+        "upper_range",
+        "near_high",
+        "range_high",
+        "breakout_zone",
+    )
+
+
+def high_entry_quality_check(risk_view, range_position):
+    if not market_location_near_high(risk_view, range_position):
+        return {
+            "near_high": False,
+            "allowed": True,
+            "reason": None,
+            "size_multiplier": 1.0,
+        }
+
+    if risk_view.get("weather_emergency_bell"):
+        return {
+            "near_high": True,
+            "allowed": False,
+            "reason": "weather_emergency_bell",
+            "size_multiplier": 0.0,
+        }
+
+    alert_level = str(risk_view.get("weather_alert_level") or "normal").lower()
+    if alert_level in ("danger", "storm", "risk_off"):
+        return {
+            "near_high": True,
+            "allowed": False,
+            "reason": "high_entry_alert_level",
+            "size_multiplier": 0.0,
+        }
+
+    market_risk = risk_view.get("risk_context_market_risk_score")
+    if (
+        market_risk is not None
+        and market_risk > HIGH_ENTRY_MAX_MARKET_RISK_SCORE
+    ):
+        return {
+            "near_high": True,
+            "allowed": False,
+            "reason": "high_entry_market_risk_high",
+            "size_multiplier": 0.0,
+        }
+
+    condition = str(risk_view.get("weather_condition") or "").lower()
+    opportunity_tags = {
+        str(tag).lower()
+        for tag in (risk_view.get("weather_opportunity_tags") or [])
+    }
+    confirmation_score = max(
+        risk_view.get("risk_context_breakout_score") or 0.0,
+        risk_view.get("risk_context_rebound_score") or 0.0,
+        risk_view.get("risk_context_buy_aggression_score") or 0.0,
+    )
+    breakout_weather = (
+        condition == "breakout_tailwind"
+        or "breakout_tailwind" in opportunity_tags
+    )
+    if (
+        not breakout_weather
+        and confirmation_score < HIGH_ENTRY_MIN_CONFIRMATION_SCORE
+    ):
+        return {
+            "near_high": True,
+            "allowed": False,
+            "reason": "high_entry_confirmation_low",
+            "size_multiplier": 0.0,
+        }
+
+    price_return_4h = risk_view.get("weather_market_price_return_4h_pct")
+    if (
+        HIGH_ENTRY_REQUIRE_POSITIVE_4H_RETURN
+        and price_return_4h is not None
+        and price_return_4h <= 0
+    ):
+        return {
+            "near_high": True,
+            "allowed": False,
+            "reason": "high_entry_4h_momentum_negative",
+            "size_multiplier": 0.0,
+        }
+
+    return {
+        "near_high": True,
+        "allowed": True,
+        "reason": "high_entry_breakout_confirmed",
+        "size_multiplier": clamp(HIGH_ENTRY_SIZE_MULTIPLIER, 0.0, 1.0),
+    }
+
+
 def weather_report_bot_decides(sentiment):
     risk_context = sentiment.get("risk_context")
     if not isinstance(risk_context, dict):
@@ -2957,6 +3124,23 @@ def run_cycle():
         weather_emergency_bell=risk_view.get("weather_emergency_bell"),
         weather_opportunity_tags=risk_view.get("weather_opportunity_tags"),
         weather_risk_warnings=risk_view.get("weather_risk_warnings"),
+        weather_market_current_price=risk_view.get("weather_market_current_price"),
+        weather_market_range_high=risk_view.get("weather_market_range_high"),
+        weather_market_range_low=risk_view.get("weather_market_range_low"),
+        weather_market_range_position=risk_view.get("weather_market_range_position"),
+        weather_market_range_zone=risk_view.get("weather_market_range_zone"),
+        weather_market_distance_to_recent_high_pct=(
+            risk_view.get("weather_market_distance_to_recent_high_pct")
+        ),
+        weather_market_distance_from_recent_low_pct=(
+            risk_view.get("weather_market_distance_from_recent_low_pct")
+        ),
+        weather_market_price_return_24h_pct=(
+            risk_view.get("weather_market_price_return_24h_pct")
+        ),
+        weather_market_price_return_4h_pct=(
+            risk_view.get("weather_market_price_return_4h_pct")
+        ),
         risk_adjusted_buy_score=risk_view.get("risk_adjusted_buy_score"),
         risk_adjusted_market_score=risk_view.get("risk_adjusted_market_score"),
         risk_adjusted_posture=risk_view.get("risk_adjusted_posture"),
@@ -3055,23 +3239,50 @@ def run_cycle():
         )
         return
 
+    high_entry = high_entry_quality_check(risk_view, range_position)
+    if allow_market_buy and high_entry["near_high"] and not high_entry["allowed"]:
+        skip_cycle(
+            high_entry["reason"],
+            cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            action_recommendation=action_recommendation,
+            action_policy_reason=action_policy_reason,
+            contributor_count=sentiment.get("contributor_count"),
+            bot_action_allowed=sentiment.get("bot_action_allowed"),
+            high_entry_near_high=True,
+            high_entry_quality_reason=high_entry["reason"],
+            high_entry_size_multiplier=high_entry["size_multiplier"],
+            **risk_view
+        )
+        return
+
     price_high = numeric_or_none(price_regime.get("price_high_24h"))
-    if price_high is not None and HIGH_PRICE_BUY_BLOCK_PCT >= 0:
+    if price_high is None:
+        price_high = risk_view.get("weather_market_range_high")
+    if allow_market_buy and price_high is not None and HIGH_PRICE_BUY_BLOCK_PCT >= 0:
         max_high_buy_price = price_high * (1 - HIGH_PRICE_BUY_BLOCK_PCT)
         if price >= max_high_buy_price:
-            skip_cycle(
-                "price_near_regime_high",
-                cycle_id,
-                price=price,
-                execution_signal=raw_signal,
-                smoothed_signal=smoothed_signal,
-                weighted_signal=weighted_signal,
-                confidence=confidence,
-                price_high=price_high,
-                high_price_buy_block_pct=HIGH_PRICE_BUY_BLOCK_PCT,
-                max_high_buy_price=max_high_buy_price
-            )
-            return
+            if not (high_entry["near_high"] and high_entry["allowed"]):
+                skip_cycle(
+                    "price_near_regime_high",
+                    cycle_id,
+                    price=price,
+                    execution_signal=raw_signal,
+                    smoothed_signal=smoothed_signal,
+                    weighted_signal=weighted_signal,
+                    confidence=confidence,
+                    price_high=price_high,
+                    high_price_buy_block_pct=HIGH_PRICE_BUY_BLOCK_PCT,
+                    max_high_buy_price=max_high_buy_price,
+                    high_entry_near_high=high_entry["near_high"],
+                    high_entry_quality_reason=high_entry["reason"],
+                    **risk_view
+                )
+                return
 
     cooldown = cooldown_active(now, weighted_signal)
     if cooldown is not None:
@@ -3162,6 +3373,8 @@ def run_cycle():
             0.0,
             RISK_CONTEXT_MAX_POSITION_SIZE_MULTIPLIER
         )
+    if allow_market_buy and high_entry["near_high"] and high_entry["allowed"]:
+        trade_value *= high_entry["size_multiplier"]
     trade_value *= max(0, 1 - EXECUTION_BUFFER_PCT)
 
     projected_inventory = current_inventory_usd(price) + trade_value
@@ -3392,6 +3605,9 @@ def run_cycle():
         gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
         risk_multiplier=risk_multiplier,
         effective_risk_multiplier=effective_multiplier,
+        high_entry_near_high=high_entry["near_high"],
+        high_entry_quality_reason=high_entry["reason"],
+        high_entry_size_multiplier=high_entry["size_multiplier"],
         **risk_view
     )
     append_decision_csv(
@@ -3417,6 +3633,9 @@ def run_cycle():
         gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
         risk_multiplier=risk_multiplier,
         effective_risk_multiplier=effective_multiplier,
+        high_entry_near_high=high_entry["near_high"],
+        high_entry_quality_reason=high_entry["reason"],
+        high_entry_size_multiplier=high_entry["size_multiplier"],
         **risk_view
     )
 
@@ -3448,6 +3667,9 @@ def run_cycle():
         gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
         risk_multiplier=risk_multiplier,
         effective_risk_multiplier=effective_multiplier,
+        high_entry_near_high=high_entry["near_high"],
+        high_entry_quality_reason=high_entry["reason"],
+        high_entry_size_multiplier=high_entry["size_multiplier"],
         **risk_view,
         **fill,
         result=result_payload or result
@@ -3483,6 +3705,9 @@ def run_cycle():
         gross_target_pct=target_profit_pct + ROUND_TRIP_FEE_PCT,
         risk_multiplier=risk_multiplier,
         effective_risk_multiplier=effective_multiplier,
+        high_entry_near_high=high_entry["near_high"],
+        high_entry_quality_reason=high_entry["reason"],
+        high_entry_size_multiplier=high_entry["size_multiplier"],
         dry_run=DRY_RUN
     )
 

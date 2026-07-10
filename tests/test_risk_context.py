@@ -97,6 +97,43 @@ class RiskContextTests(unittest.TestCase):
         self.assertTrue(derived["weather_emergency_bell"])
         self.assertEqual(derived["suggested_position_size_multiplier"], 0.0)
 
+    def test_weather_market_location_is_exposed(self):
+        derived = derive_risk_context(
+            {
+                "weather_report": {
+                    "condition": "constructive",
+                    "alert_level": "normal",
+                    "market_location": {
+                        "current_price": 64051.0,
+                        "range_high": 64554.0,
+                        "range_low": 62618.0,
+                        "range_position": 0.7402,
+                        "range_zone": "middle_range",
+                        "distance_to_recent_high_pct": 0.7853,
+                        "distance_from_recent_low_pct": 2.2885,
+                        "price_return_24h_pct": 1.5441,
+                        "price_return_4h_pct": -0.4585,
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(derived["weather_market_current_price"], 64051.0)
+        self.assertEqual(derived["weather_market_range_high"], 64554.0)
+        self.assertEqual(derived["weather_market_range_low"], 62618.0)
+        self.assertEqual(derived["weather_market_range_position"], 0.7402)
+        self.assertEqual(derived["weather_market_range_zone"], "middle_range")
+        self.assertEqual(
+            derived["weather_market_distance_to_recent_high_pct"],
+            0.7853,
+        )
+        self.assertEqual(
+            derived["weather_market_distance_from_recent_low_pct"],
+            2.2885,
+        )
+        self.assertEqual(derived["weather_market_price_return_24h_pct"], 1.5441)
+        self.assertEqual(derived["weather_market_price_return_4h_pct"], -0.4585)
+
 
 if __name__ == "__main__":
     unittest.main()

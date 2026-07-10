@@ -81,6 +81,15 @@ def derive_risk_context(risk_context, *, fallback_processed_at=None, stale=False
             "weather_emergency_bell": False,
             "weather_opportunity_tags": [],
             "weather_risk_warnings": [],
+            "weather_market_current_price": None,
+            "weather_market_range_high": None,
+            "weather_market_range_low": None,
+            "weather_market_range_position": None,
+            "weather_market_range_zone": None,
+            "weather_market_distance_to_recent_high_pct": None,
+            "weather_market_distance_from_recent_low_pct": None,
+            "weather_market_price_return_24h_pct": None,
+            "weather_market_price_return_4h_pct": None,
             "risk_adjusted_buy_score": None,
             "risk_adjusted_market_score": None,
             "risk_adjusted_posture": None,
@@ -96,6 +105,7 @@ def derive_risk_context(risk_context, *, fallback_processed_at=None, stale=False
 
     weather = dict_value(risk_context.get("weather_report"))
     bot_tuning = dict_value(weather.get("bot_tuning"))
+    market_location = dict_value(weather.get("market_location"))
     market_risk = clamp(numeric_or_default(risk_context.get("market_risk_score"), 0.5))
     buy_aggression = clamp(numeric_or_default(risk_context.get("buy_aggression_score"), 0.0))
     downside_risk = clamp(numeric_or_default(risk_context.get("downside_risk_score"), 0.5))
@@ -193,6 +203,23 @@ def derive_risk_context(risk_context, *, fallback_processed_at=None, stale=False
         "weather_risk_warnings": [
             str(warning) for warning in list_value(weather.get("risk_warnings")) if str(warning)
         ],
+        "weather_market_current_price": numeric_or_none(market_location.get("current_price")),
+        "weather_market_range_high": numeric_or_none(market_location.get("range_high")),
+        "weather_market_range_low": numeric_or_none(market_location.get("range_low")),
+        "weather_market_range_position": numeric_or_none(market_location.get("range_position")),
+        "weather_market_range_zone": market_location.get("range_zone"),
+        "weather_market_distance_to_recent_high_pct": numeric_or_none(
+            market_location.get("distance_to_recent_high_pct")
+        ),
+        "weather_market_distance_from_recent_low_pct": numeric_or_none(
+            market_location.get("distance_from_recent_low_pct")
+        ),
+        "weather_market_price_return_24h_pct": numeric_or_none(
+            market_location.get("price_return_24h_pct")
+        ),
+        "weather_market_price_return_4h_pct": numeric_or_none(
+            market_location.get("price_return_4h_pct")
+        ),
         "risk_adjusted_buy_score": round(buy_score, 6),
         "risk_adjusted_market_score": round(market_score, 6),
         "risk_adjusted_posture": posture,
