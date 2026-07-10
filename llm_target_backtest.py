@@ -142,6 +142,15 @@ BACKTEST_STRATEGIES = {
         "ignore_sentiment": True,
         "exit_mode": "profit_only",
     },
+    "weather_target_quality": {
+        "base_strategy": "with_target_quality",
+        "ignore_legacy_action_gate": True,
+    },
+    "weather_target_quality_tp_0_8": {
+        "base_strategy": "with_target_quality",
+        "ignore_legacy_action_gate": True,
+        "profit_target_pct": 0.008,
+    },
     "sentiment_discount_with_quality": {
         "base_strategy": "with_target_quality",
         "sentiment_discount": True,
@@ -440,22 +449,61 @@ RISK_CONTEXT_NUMERIC_FIELDS = {
 }
 
 
+WEATHER_BOT_TUNING_NUMERIC_FIELDS = {
+    "position_size_multiplier": "sentiment_weather_position_size_multiplier",
+    "grid_aggression_multiplier": "sentiment_weather_grid_aggression_multiplier",
+    "target_profit_multiplier": "sentiment_weather_target_profit_multiplier",
+    "entry_discount_multiplier": "sentiment_weather_entry_discount_multiplier",
+}
+
+
 def risk_context_payload(signal):
     risk_context = signal.get("risk_context")
     return risk_context if isinstance(risk_context, dict) else {}
 
 
+def weather_report_payload(signal):
+    weather_report = risk_context_payload(signal).get("weather_report")
+    return weather_report if isinstance(weather_report, dict) else {}
+
+
 def sentiment_risk_event_fields(signal):
     risk_context = risk_context_payload(signal)
+    weather_report = weather_report_payload(signal)
+    bot_tuning = weather_report.get("bot_tuning")
+    if not isinstance(bot_tuning, dict):
+        bot_tuning = {}
     flags = risk_context.get("hard_safety_flags")
     if not isinstance(flags, list):
         flags = []
+    opportunity_tags = weather_report.get("opportunity_tags")
+    if not isinstance(opportunity_tags, list):
+        opportunity_tags = []
+    risk_warnings = weather_report.get("risk_warnings")
+    if not isinstance(risk_warnings, list):
+        risk_warnings = []
     fields = {
         "sentiment_risk_posture": risk_context.get("recommended_posture"),
         "sentiment_hard_safety_flags": flags,
+        "sentiment_weather_mode": weather_report.get("mode"),
+        "sentiment_weather_bot_decision_authority": weather_report.get(
+            "bot_decision_authority"
+        ),
+        "sentiment_weather_trade_permission": weather_report.get(
+            "trade_permission"
+        ),
+        "sentiment_weather_condition": weather_report.get("condition"),
+        "sentiment_weather_alert_level": weather_report.get("alert_level"),
+        "sentiment_weather_emergency_bell": bool(
+            weather_report.get("emergency_bell")
+        ),
+        "sentiment_weather_opportunity_tags": opportunity_tags,
+        "sentiment_weather_risk_warnings": risk_warnings,
     }
     for source_key, output_key in RISK_CONTEXT_NUMERIC_FIELDS.items():
         fields[output_key] = numeric_or_none(risk_context.get(source_key))
+    for source_key, output_key in WEATHER_BOT_TUNING_NUMERIC_FIELDS.items():
+        fields[output_key] = numeric_or_none(bot_tuning.get(source_key))
     return fields
 
 
@@ -464,21 +512,66 @@ def apply_sentiment_risk_summary(summary, events):
     context_present_count = 0
     numeric_sample_count = 0
     posture_present_count = 0
+    weather_present_count = 0
+    emergency_count = 0
     posture_counts = {}
+    weather_condition_counts = {}
+    weather_alert_level_counts = {}
+    weather_trade_permission_counts = {}
+    weather_opportunity_tag_counts = {}
+    weather_risk_warning_counts = {}
     hard_safety_flag_counts = {}
-    numeric_totals = {field: 0.0 for field in RISK_CONTEXT_NUMERIC_FIELDS.values()}
-    numeric_counts = {field: 0 for field in RISK_CONTEXT_NUMERIC_FIELDS.values()}
+    numeric_field_names = list(RISK_CONTEXT_NUMERIC_FIELDS.values()) + list(
+        WEATHER_BOT_TUNING_NUMERIC_FIELDS.values()
+    )
+    numeric_totals = {field: 0.0 for field in numeric_field_names}
+    numeric_counts = {field: 0 for field in numeric_field_names}
 
     for event in events:
         posture = event.get("sentiment_risk_posture")
         if posture:
             posture_present_count += 1
             posture_counts[posture] = posture_counts.get(posture, 0) + 1
+        weather_condition = event.get("sentiment_weather_condition")
+        weather_alert_level = event.get("sentiment_weather_alert_level")
+        weather_trade_permission = event.get("sentiment_weather_trade_permission")
+        weather_has_content = any((
+            event.get("sentiment_weather_mode"),
+            weather_condition,
+            weather_alert_level,
+            weather_trade_permission,
+            event.get("sentiment_weather_opportunity_tags"),
+            event.get("sentiment_weather_risk_warnings"),
+        ))
+        if weather_has_content:
+            weather_present_count += 1
+        if event.get("sentiment_weather_emergency_bell"):
+            emergency_count += 1
+        if weather_condition:
+            weather_condition_counts[weather_condition] = (
+                weather_condition_counts.get(weather_condition, 0) + 1
+            )
+        if weather_alert_level:
+            weather_alert_level_counts[weather_alert_level] = (
+                weather_alert_level_counts.get(weather_alert_level, 0) + 1
+            )
+        if weather_trade_permission:
+            weather_trade_permission_counts[weather_trade_permission] = (
+                weather_trade_permission_counts.get(weather_trade_permission, 0) + 1
+            )
+        for tag in event.get("sentiment_weather_opportunity_tags") or []:
+            weather_opportunity_tag_counts[tag] = (
+                weather_opportunity_tag_counts.get(tag, 0) + 1
+            )
+        for warning in event.get("sentiment_weather_risk_warnings") or []:
+            weather_risk_warning_counts[warning] = (
+                weather_risk_warning_counts.get(warning, 0) + 1
+            )
         flags = event.get("sentiment_hard_safety_flags") or []
         for flag in flags:
             hard_safety_flag_counts[flag] = hard_safety_flag_counts.get(flag, 0) + 1
         event_numeric_count = 0
-        for field in RISK_CONTEXT_NUMERIC_FIELDS.values():
+        for field in numeric_field_names:
             value = numeric_or_none(event.get(field))
             if value is None:
                 continue
@@ -504,9 +597,28 @@ def apply_sentiment_risk_summary(summary, events):
     summary["sentiment_risk_posture_missing_count"] = (
         len(events) - posture_present_count
     )
+    summary["sentiment_weather_report_present_count"] = weather_present_count
+    summary["sentiment_weather_report_missing_count"] = (
+        len(events) - weather_present_count
+    )
+    summary["sentiment_weather_report_coverage_pct"] = (
+        round(weather_present_count / len(events), 6)
+        if events else
+        None
+    )
+    summary["sentiment_weather_emergency_bell_count"] = emergency_count
     summary["sentiment_risk_posture_counts"] = posture_counts
     summary["sentiment_hard_safety_flag_counts"] = hard_safety_flag_counts
-    for field in RISK_CONTEXT_NUMERIC_FIELDS.values():
+    summary["sentiment_weather_condition_counts"] = weather_condition_counts
+    summary["sentiment_weather_alert_level_counts"] = weather_alert_level_counts
+    summary["sentiment_weather_trade_permission_counts"] = (
+        weather_trade_permission_counts
+    )
+    summary["sentiment_weather_opportunity_tag_counts"] = (
+        weather_opportunity_tag_counts
+    )
+    summary["sentiment_weather_risk_warning_counts"] = weather_risk_warning_counts
+    for field in numeric_field_names:
         summary[f"avg_{field}"] = (
             round(numeric_totals[field] / numeric_counts[field], 6)
             if numeric_counts[field] else
@@ -564,6 +676,10 @@ def strategy_uses_sentiment_discount(strategy_name):
 
 def strategy_ignores_sentiment(strategy_name):
     return bool(strategy_options(strategy_name).get("ignore_sentiment"))
+
+
+def strategy_ignores_legacy_action_gate(strategy_name):
+    return bool(strategy_options(strategy_name).get("ignore_legacy_action_gate"))
 
 
 def strategy_exit_mode(strategy_name):
@@ -708,6 +824,7 @@ def quality_decision(
     elif (
         not ignore_sentiment
         and not strategy_ignores_sentiment(strategy_name)
+        and not strategy_ignores_legacy_action_gate(strategy_name)
         and action_recommendation != "bullish_allowed"
     ):
         return {
@@ -1058,6 +1175,15 @@ def empty_summary():
         "sentiment_risk_posture_missing_count": 0,
         "sentiment_risk_posture_counts": {},
         "sentiment_hard_safety_flag_counts": {},
+        "sentiment_weather_report_present_count": 0,
+        "sentiment_weather_report_missing_count": 0,
+        "sentiment_weather_report_coverage_pct": None,
+        "sentiment_weather_emergency_bell_count": 0,
+        "sentiment_weather_condition_counts": {},
+        "sentiment_weather_alert_level_counts": {},
+        "sentiment_weather_trade_permission_counts": {},
+        "sentiment_weather_opportunity_tag_counts": {},
+        "sentiment_weather_risk_warning_counts": {},
         "signal_target_snapshots": 0,
         "quality_fallback_target_snapshots": 0,
         "missing_signal": 0,
@@ -1068,7 +1194,10 @@ def empty_summary():
         "fill_rate_after_approval": None,
         "terminal_rate_after_approval": None
     }
-    for output_key in RISK_CONTEXT_NUMERIC_FIELDS.values():
+    for output_key in (
+        list(RISK_CONTEXT_NUMERIC_FIELDS.values())
+        + list(WEATHER_BOT_TUNING_NUMERIC_FIELDS.values())
+    ):
         summary[f"avg_{output_key}"] = None
     return summary
 
@@ -1138,8 +1267,29 @@ def sentiment_risk_fields_from_record(record):
     fields = {
         "sentiment_risk_posture": record.get("sentiment_risk_posture"),
         "sentiment_hard_safety_flags": record.get("sentiment_hard_safety_flags") or [],
+        "sentiment_weather_mode": record.get("sentiment_weather_mode"),
+        "sentiment_weather_bot_decision_authority": record.get(
+            "sentiment_weather_bot_decision_authority"
+        ),
+        "sentiment_weather_trade_permission": record.get(
+            "sentiment_weather_trade_permission"
+        ),
+        "sentiment_weather_condition": record.get("sentiment_weather_condition"),
+        "sentiment_weather_alert_level": record.get("sentiment_weather_alert_level"),
+        "sentiment_weather_emergency_bell": record.get(
+            "sentiment_weather_emergency_bell"
+        ),
+        "sentiment_weather_opportunity_tags": record.get(
+            "sentiment_weather_opportunity_tags"
+        ) or [],
+        "sentiment_weather_risk_warnings": record.get(
+            "sentiment_weather_risk_warnings"
+        ) or [],
     }
-    for output_key in RISK_CONTEXT_NUMERIC_FIELDS.values():
+    for output_key in (
+        list(RISK_CONTEXT_NUMERIC_FIELDS.values())
+        + list(WEATHER_BOT_TUNING_NUMERIC_FIELDS.values())
+    ):
         fields[output_key] = record.get(output_key)
     return fields
 
@@ -1706,9 +1856,39 @@ def top_summary(strategies):
                 "sentiment_hard_safety_flag_counts": payload["summary"].get(
                     "sentiment_hard_safety_flag_counts"
                 ),
+                "sentiment_weather_report_present_count": payload["summary"].get(
+                    "sentiment_weather_report_present_count"
+                ),
+                "sentiment_weather_report_missing_count": payload["summary"].get(
+                    "sentiment_weather_report_missing_count"
+                ),
+                "sentiment_weather_report_coverage_pct": payload["summary"].get(
+                    "sentiment_weather_report_coverage_pct"
+                ),
+                "sentiment_weather_emergency_bell_count": payload["summary"].get(
+                    "sentiment_weather_emergency_bell_count"
+                ),
+                "sentiment_weather_condition_counts": payload["summary"].get(
+                    "sentiment_weather_condition_counts"
+                ),
+                "sentiment_weather_alert_level_counts": payload["summary"].get(
+                    "sentiment_weather_alert_level_counts"
+                ),
+                "sentiment_weather_trade_permission_counts": payload["summary"].get(
+                    "sentiment_weather_trade_permission_counts"
+                ),
+                "sentiment_weather_opportunity_tag_counts": payload["summary"].get(
+                    "sentiment_weather_opportunity_tag_counts"
+                ),
+                "sentiment_weather_risk_warning_counts": payload["summary"].get(
+                    "sentiment_weather_risk_warning_counts"
+                ),
                 **{
                     f"avg_{field}": payload["summary"].get(f"avg_{field}")
-                    for field in RISK_CONTEXT_NUMERIC_FIELDS.values()
+                    for field in (
+                        list(RISK_CONTEXT_NUMERIC_FIELDS.values())
+                        + list(WEATHER_BOT_TUNING_NUMERIC_FIELDS.values())
+                    )
                 },
                 "no_target": payload["summary"].get("no_target"),
                 "not_filled": payload["summary"].get("not_filled"),
@@ -1883,9 +2063,36 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
                 summary.get("sentiment_hard_safety_flag_counts") or {},
                 sort_keys=True
             ),
+            "sentiment_weather_report_present_count": summary.get("sentiment_weather_report_present_count"),
+            "sentiment_weather_report_missing_count": summary.get("sentiment_weather_report_missing_count"),
+            "sentiment_weather_report_coverage_pct": summary.get("sentiment_weather_report_coverage_pct"),
+            "sentiment_weather_emergency_bell_count": summary.get("sentiment_weather_emergency_bell_count"),
+            "sentiment_weather_condition_counts": json.dumps(
+                summary.get("sentiment_weather_condition_counts") or {},
+                sort_keys=True
+            ),
+            "sentiment_weather_alert_level_counts": json.dumps(
+                summary.get("sentiment_weather_alert_level_counts") or {},
+                sort_keys=True
+            ),
+            "sentiment_weather_trade_permission_counts": json.dumps(
+                summary.get("sentiment_weather_trade_permission_counts") or {},
+                sort_keys=True
+            ),
+            "sentiment_weather_opportunity_tag_counts": json.dumps(
+                summary.get("sentiment_weather_opportunity_tag_counts") or {},
+                sort_keys=True
+            ),
+            "sentiment_weather_risk_warning_counts": json.dumps(
+                summary.get("sentiment_weather_risk_warning_counts") or {},
+                sort_keys=True
+            ),
             **{
                 f"avg_{field}": summary.get(f"avg_{field}")
-                for field in RISK_CONTEXT_NUMERIC_FIELDS.values()
+                for field in (
+                    list(RISK_CONTEXT_NUMERIC_FIELDS.values())
+                    + list(WEATHER_BOT_TUNING_NUMERIC_FIELDS.values())
+                )
             },
             "no_target": summary.get("no_target"),
             "not_filled": summary.get("not_filled"),
@@ -1982,7 +2189,22 @@ def write_strategy_comparison_csv(comparison, output_path, ranked=False):
         "sentiment_risk_posture_missing_count",
         "sentiment_risk_posture_counts",
         "sentiment_hard_safety_flag_counts",
-        *[f"avg_{field}" for field in RISK_CONTEXT_NUMERIC_FIELDS.values()],
+        "sentiment_weather_report_present_count",
+        "sentiment_weather_report_missing_count",
+        "sentiment_weather_report_coverage_pct",
+        "sentiment_weather_emergency_bell_count",
+        "sentiment_weather_condition_counts",
+        "sentiment_weather_alert_level_counts",
+        "sentiment_weather_trade_permission_counts",
+        "sentiment_weather_opportunity_tag_counts",
+        "sentiment_weather_risk_warning_counts",
+        *[
+            f"avg_{field}"
+            for field in (
+                list(RISK_CONTEXT_NUMERIC_FIELDS.values())
+                + list(WEATHER_BOT_TUNING_NUMERIC_FIELDS.values())
+            )
+        ],
         "no_target",
         "not_filled",
         "target_profit_pct",

@@ -117,8 +117,16 @@ class LlmTargetBacktestTests(unittest.TestCase):
     def test_with_target_quality_uses_quality_profit_target(self):
         snapshots = [
             make_snapshot("2026-05-30T12:00:00+00:00", 101.0),
-            make_snapshot("2026-05-30T12:30:00+00:00", 100.0),
-            make_snapshot("2026-05-30T13:00:00+00:00", 101.1),
+            make_snapshot(
+                "2026-05-30T12:30:00+00:00",
+                100.0,
+                action_recommendation="blocked",
+            ),
+            make_snapshot(
+                "2026-05-30T13:00:00+00:00",
+                101.1,
+                action_recommendation="blocked",
+            ),
         ]
 
         result = backtest.simulate_strategy("with_target_quality", snapshots)
@@ -137,8 +145,16 @@ class LlmTargetBacktestTests(unittest.TestCase):
     def test_backtest_accepts_multi_asset_signal_payload(self):
         snapshots = [
             make_snapshot("2026-05-30T12:00:00+00:00", 101.0),
-            make_snapshot("2026-05-30T12:30:00+00:00", 100.0),
-            make_snapshot("2026-05-30T13:00:00+00:00", 101.1),
+            make_snapshot(
+                "2026-05-30T12:30:00+00:00",
+                100.0,
+                action_recommendation="blocked",
+            ),
+            make_snapshot(
+                "2026-05-30T13:00:00+00:00",
+                101.1,
+                action_recommendation="blocked",
+            ),
         ]
         snapshots[0]["signal"]["payload"] = {
             "schema_version": "multi-asset-sentiment-v1",
@@ -311,6 +327,22 @@ class LlmTargetBacktestTests(unittest.TestCase):
             "target_profit_multiplier": 0.9447,
             "entry_discount_multiplier": 1.0312,
             "hard_safety_flags": ["test_flag"],
+            "weather_report": {
+                "mode": "weather_report",
+                "bot_decision_authority": "bot",
+                "trade_permission": "bot_decides",
+                "condition": "breakout_tailwind",
+                "alert_level": "watch",
+                "emergency_bell": False,
+                "opportunity_tags": ["breakout_tailwind"],
+                "risk_warnings": ["source_health_degraded"],
+                "bot_tuning": {
+                    "position_size_multiplier": 0.32,
+                    "grid_aggression_multiplier": 0.68,
+                    "target_profit_multiplier": 1.08,
+                    "entry_discount_multiplier": 0.96,
+                },
+            },
         }
         snapshots = [
             make_snapshot(
@@ -349,8 +381,74 @@ class LlmTargetBacktestTests(unittest.TestCase):
         )
         self.assertEqual(decision["sentiment_risk_posture"], "entry_allowed")
         self.assertEqual(decision["sentiment_hard_safety_flags"], ["test_flag"])
+        self.assertEqual(decision["sentiment_weather_condition"], "breakout_tailwind")
+        self.assertEqual(decision["sentiment_weather_alert_level"], "watch")
+        self.assertEqual(decision["sentiment_weather_trade_permission"], "bot_decides")
+        self.assertEqual(
+            decision["sentiment_weather_risk_warnings"],
+            ["source_health_degraded"],
+        )
         self.assertAlmostEqual(decision["sentiment_buy_aggression_score"], 0.4872)
         self.assertAlmostEqual(trade["sentiment_target_profit_multiplier"], 0.9447)
+        self.assertEqual(summary["sentiment_weather_report_present_count"], 1)
+        self.assertEqual(summary["sentiment_weather_report_missing_count"], 0)
+        self.assertEqual(summary["sentiment_weather_report_coverage_pct"], 1.0)
+        self.assertEqual(
+            summary["sentiment_weather_condition_counts"],
+            {"breakout_tailwind": 1},
+        )
+        self.assertEqual(
+            summary["sentiment_weather_alert_level_counts"],
+            {"watch": 1},
+        )
+        self.assertEqual(
+            summary["sentiment_weather_trade_permission_counts"],
+            {"bot_decides": 1},
+        )
+        self.assertEqual(
+            summary["sentiment_weather_opportunity_tag_counts"],
+            {"breakout_tailwind": 1},
+        )
+        self.assertEqual(
+            summary["sentiment_weather_risk_warning_counts"],
+            {"source_health_degraded": 1},
+        )
+        self.assertAlmostEqual(
+            summary["avg_sentiment_weather_position_size_multiplier"],
+            0.32,
+        )
+        self.assertAlmostEqual(
+            summary["avg_sentiment_weather_target_profit_multiplier"],
+            1.08,
+        )
+
+    def test_weather_target_quality_ignores_legacy_action_gate(self):
+        snapshots = [
+            make_snapshot(
+                "2026-05-30T12:00:00+00:00",
+                101.0,
+                action_recommendation="blocked",
+            ),
+            make_snapshot(
+                "2026-05-30T12:30:00+00:00",
+                100.0,
+                action_recommendation="blocked",
+            ),
+            make_snapshot(
+                "2026-05-30T13:00:00+00:00",
+                101.1,
+                action_recommendation="blocked",
+            ),
+        ]
+
+        legacy_result = backtest.simulate_strategy("with_target_quality", snapshots)
+        weather_result = backtest.simulate_strategy("weather_target_quality", snapshots)
+
+        self.assertEqual(legacy_result["summary"]["approved_candidates"], 0)
+        self.assertEqual(legacy_result["summary"]["blocked_by_sentiment"], 3)
+        self.assertEqual(weather_result["summary"]["approved_candidates"], 1)
+        self.assertEqual(weather_result["summary"]["blocked_by_sentiment"], 0)
+        self.assertEqual(weather_result["summary"]["trades"], 1)
 
     def test_target_quality_only_ignores_sentiment_but_uses_quality(self):
         snapshots = [
@@ -609,6 +707,9 @@ class LlmTargetBacktestTests(unittest.TestCase):
             self.assertIn("sentiment_risk_context_coverage_pct", header)
             self.assertIn("sentiment_risk_numeric_sample_count", header)
             self.assertIn("sentiment_risk_posture_missing_count", header)
+            self.assertIn("sentiment_weather_report_coverage_pct", header)
+            self.assertIn("sentiment_weather_condition_counts", header)
+            self.assertIn("avg_sentiment_weather_position_size_multiplier", header)
             self.assertIn("avg_sentiment_market_risk_score", header)
 
     def test_best_result_mentions_negative_open_exposure(self):
