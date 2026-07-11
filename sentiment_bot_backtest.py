@@ -411,7 +411,12 @@ def signal_gate_failure(signal, config, at_time):
     signal_status = signal.get("signal_status")
     freshness_state = signal_freshness_state(signal, at_time)
     contract = freshness_contract(signal)
-    if signal_status and signal_status != "fresh" and not contract:
+    if (
+        signal_status
+        and signal_status != "fresh"
+        and not contract
+        and not weather_report_bot_decides(signal)
+    ):
         return "signal_not_fresh"
     if freshness_state == "stale":
         return "signal_too_old"

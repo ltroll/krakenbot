@@ -2787,6 +2787,7 @@ def signal_gate_failure(sentiment, now):
         signal_status
         and signal_status != "fresh"
         and not contract
+        and not weather_report_bot_decides(sentiment)
     ):
         return {
             "reason": "signal_not_fresh",
