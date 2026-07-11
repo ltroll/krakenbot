@@ -96,6 +96,8 @@ class LlmTargetBotWeatherPolicyTests(unittest.TestCase):
         for path in (
             "llm_target_strategy_weather_dryrun.json",
             "llm_target_strategy_weather_tiny_live.json",
+            "llm_target_strategy_weather_tiny_selective_live.json",
+            "llm_target_strategy_weather_small_live.json",
         ):
             with open(path, encoding="utf-8") as f:
                 payload = json.load(f)
@@ -104,6 +106,45 @@ class LlmTargetBotWeatherPolicyTests(unittest.TestCase):
             self.assertTrue(payload["weather_emergency_bell_block"])
             self.assertEqual(payload["max_open_buy_orders"], 1)
             self.assertEqual(payload["max_open_sell_orders"], 1)
+            if path != "llm_target_strategy_weather_dryrun.json":
+                self.assertEqual(
+                    payload["backtest_strategy_variant"],
+                    "weather_target_quality_tp_0_8",
+                )
+
+    def test_weather_live_profiles_step_up_in_size(self):
+        with open("llm_target_strategy_weather_tiny_live.json", encoding="utf-8") as f:
+            tiny = json.load(f)
+        with open("llm_target_strategy_weather_small_live.json", encoding="utf-8") as f:
+            small = json.load(f)
+
+        self.assertLess(tiny["max_trade_usd"], small["max_trade_usd"])
+        self.assertLess(tiny["max_inventory_usd"], small["max_inventory_usd"])
+        self.assertFalse(tiny["dry_run"])
+        self.assertFalse(small["dry_run"])
+
+    def test_weather_tiny_selective_profile_is_stricter_than_tiny_live(self):
+        with open("llm_target_strategy_weather_tiny_live.json", encoding="utf-8") as f:
+            tiny = json.load(f)
+        with open(
+            "llm_target_strategy_weather_tiny_selective_live.json",
+            encoding="utf-8"
+        ) as f:
+            selective = json.load(f)
+
+        self.assertEqual(tiny["max_trade_usd"], selective["max_trade_usd"])
+        self.assertGreater(
+            selective["target_quality_min_samples"],
+            tiny["target_quality_min_samples"],
+        )
+        self.assertGreater(
+            selective["target_quality_min_ev_pct"],
+            tiny["target_quality_min_ev_pct"],
+        )
+        self.assertGreater(
+            selective["target_quality_min_4h_fill_probability"],
+            tiny["target_quality_min_4h_fill_probability"],
+        )
 
 
 if __name__ == "__main__":

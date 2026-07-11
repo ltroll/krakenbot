@@ -35,5 +35,6 @@
   "weather_min_position_size_multiplier": 0.25,
   "weather_max_position_size_multiplier": 0.75,
   "max_daily_realized_loss_usd": 10,
-  "max_consecutive_losing_sells": 2
+  "max_consecutive_losing_sells": 2,
+  "backtest_strategy_variant": "weather_target_quality_tp_0_8"
 }
