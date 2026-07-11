@@ -367,6 +367,15 @@ def weather_bot_tuning(weather_report):
     return tuning if isinstance(tuning, dict) else {}
 
 
+def weather_market_stability(weather_report):
+    stability = (
+        weather_report.get("market_stability")
+        if isinstance(weather_report, dict)
+        else {}
+    )
+    return stability if isinstance(stability, dict) else {}
+
+
 def weather_list(value):
     if isinstance(value, list):
         return [str(item) for item in value]
@@ -419,6 +428,7 @@ def sentiment_risk_event_fields(signal):
         flags = []
     weather = weather_report_payload(risk_context)
     bot_tuning = weather_bot_tuning(weather)
+    market_stability = weather_market_stability(weather)
     fields = {
         "sentiment_risk_posture": risk_context.get("recommended_posture"),
         "sentiment_hard_safety_flags": flags,
@@ -441,6 +451,10 @@ def sentiment_risk_event_fields(signal):
         "weather_entry_discount_multiplier": bot_tuning.get(
             "entry_discount_multiplier"
         ),
+        "weather_leveling_state": market_stability.get("leveling_state"),
+        "weather_leveling_score": safe_float(
+            market_stability.get("leveling_score")
+        ),
     }
     for source_key, output_key in RISK_CONTEXT_NUMERIC_FIELDS.items():
         fields[output_key] = safe_float(risk_context.get(source_key))
@@ -451,6 +465,7 @@ def summarize_sentiment_risk_events(events):
     numeric_totals = Counter()
     numeric_counts = Counter()
     posture_counts = Counter()
+    leveling_state_counts = Counter()
     hard_safety_flag_counts = Counter()
     samples = 0
 
@@ -463,17 +478,32 @@ def summarize_sentiment_risk_events(events):
             safe_float(event.get(key)) is not None
             for key in RISK_CONTEXT_NUMERIC_FIELDS.values()
         )
-        has_risk_value = bool(posture) or bool(flags) or has_numeric_value
+        has_weather_stability = bool(event.get("weather_leveling_state")) or (
+            safe_float(event.get("weather_leveling_score")) is not None
+        )
+        has_risk_value = (
+            bool(posture)
+            or bool(flags)
+            or has_numeric_value
+            or has_weather_stability
+        )
         if not has_risk_value:
             continue
         samples += 1
         posture_counts[posture or "unknown"] += 1
+        leveling_state = event.get("weather_leveling_state")
+        if leveling_state:
+            leveling_state_counts[str(leveling_state)] += 1
         for output_key in RISK_CONTEXT_NUMERIC_FIELDS.values():
             value = safe_float(event.get(output_key))
             if value is None:
                 continue
             numeric_totals[output_key] += value
             numeric_counts[output_key] += 1
+        leveling_score = safe_float(event.get("weather_leveling_score"))
+        if leveling_score is not None:
+            numeric_totals["weather_leveling_score"] += leveling_score
+            numeric_counts["weather_leveling_score"] += 1
         risk_size_multiplier = safe_float(
             event.get("risk_context_position_size_effective_multiplier")
         )
@@ -490,6 +520,9 @@ def summarize_sentiment_risk_events(events):
     summary = {
         "sentiment_risk_sample_count": samples,
         "sentiment_risk_posture_counts": dict(posture_counts.most_common()),
+        "weather_leveling_state_counts": dict(
+            leveling_state_counts.most_common()
+        ),
         "sentiment_hard_safety_flag_counts": dict(
             hard_safety_flag_counts.most_common()
         ),
@@ -510,6 +543,14 @@ def summarize_sentiment_risk_events(events):
         else:
             summary[avg_key] = None
     output_key = "risk_context_position_size_effective_multiplier"
+    if numeric_counts[output_key]:
+        summary[f"avg_{output_key}"] = round(
+            numeric_totals[output_key] / numeric_counts[output_key],
+            6,
+        )
+    else:
+        summary[f"avg_{output_key}"] = None
+    output_key = "weather_leveling_score"
     if numeric_counts[output_key]:
         summary[f"avg_{output_key}"] = round(
             numeric_totals[output_key] / numeric_counts[output_key],
@@ -1487,6 +1528,13 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
                 risk_summary.get("sentiment_risk_posture_counts") or {},
                 sort_keys=True,
             ),
+            "approved_weather_leveling_states": json.dumps(
+                risk_summary.get("weather_leveling_state_counts") or {},
+                sort_keys=True,
+            ),
+            "approved_avg_weather_leveling_score": risk_summary.get(
+                "avg_weather_leveling_score"
+            ),
             "approved_sentiment_hard_safety_flag_events": risk_summary.get(
                 "sentiment_hard_safety_flag_event_count"
             ),
@@ -1792,6 +1840,8 @@ def write_strategy_comparison_csv(comparison, output_path):
         "potential_risk_sized_avg_max_drawdown_pct",
         "approved_sentiment_risk_samples",
         "approved_sentiment_risk_postures",
+        "approved_weather_leveling_states",
+        "approved_avg_weather_leveling_score",
         "approved_sentiment_hard_safety_flag_events",
         "approved_sentiment_hard_safety_flags",
         "approved_avg_sentiment_market_risk_score",
@@ -1842,6 +1892,8 @@ def write_ranked_strategy_csv(comparison, output_path):
         "potential_risk_sized_avg_max_drawdown_pct",
         "approved_sentiment_risk_samples",
         "approved_sentiment_risk_postures",
+        "approved_weather_leveling_states",
+        "approved_avg_weather_leveling_score",
         "approved_sentiment_hard_safety_flag_events",
         "approved_sentiment_hard_safety_flags",
         "approved_avg_sentiment_market_risk_score",

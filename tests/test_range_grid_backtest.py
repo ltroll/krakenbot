@@ -239,6 +239,16 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "target_profit_multiplier": 0.9,
                     "entry_discount_multiplier": 1.1,
                     "hard_safety_flags": [],
+                    "weather_report": {
+                        "mode": "weather_report",
+                        "bot_decision_authority": "bot",
+                        "trade_permission": "bot_decides",
+                        "market_stability": {
+                            "schema_version": "market-stability-v1",
+                            "leveling_state": "leveling",
+                            "leveling_score": 0.82,
+                        },
+                    },
                 },
             ),
             make_snapshot(
@@ -257,6 +267,16 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "buy_aggression_score": 0.8,
                     "position_size_multiplier": 0.35,
                     "hard_safety_flags": ["spread_wide"],
+                    "weather_report": {
+                        "mode": "weather_report",
+                        "bot_decision_authority": "bot",
+                        "trade_permission": "bot_decides",
+                        "market_stability": {
+                            "schema_version": "market-stability-v1",
+                            "leveling_state": "trending_up",
+                            "leveling_score": 0.2,
+                        },
+                    },
                 },
             ),
         ]
@@ -283,8 +303,21 @@ class RangeGridBacktestTests(unittest.TestCase):
             0.675,
         )
         self.assertEqual(
+            risk_summary["weather_leveling_state_counts"],
+            {"leveling": 1, "trending_up": 1},
+        )
+        self.assertEqual(risk_summary["avg_weather_leveling_score"], 0.51)
+        self.assertEqual(
             result["recent_approved_events"][0]["sentiment_risk_posture"],
             "entry_allowed",
+        )
+        self.assertEqual(
+            result["recent_approved_events"][0]["weather_leveling_state"],
+            "leveling",
+        )
+        self.assertEqual(
+            result["recent_approved_events"][0]["weather_leveling_score"],
+            0.82,
         )
         self.assertEqual(
             result["recent_approved_events"][0][
@@ -1640,6 +1673,8 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "potential_risk_sized_avg_max_drawdown_pct": -0.135,
                     "approved_sentiment_risk_samples": 2,
                     "approved_sentiment_risk_postures": '{"entry_allowed": 2}',
+                    "approved_weather_leveling_states": '{"leveling": 2}',
+                    "approved_avg_weather_leveling_score": 0.82,
                     "approved_sentiment_hard_safety_flag_events": 0,
                     "approved_sentiment_hard_safety_flags": "{}",
                     "approved_avg_sentiment_market_risk_score": 0.3,
@@ -1664,6 +1699,8 @@ class RangeGridBacktestTests(unittest.TestCase):
                 text = f.read()
             self.assertIn("approved_avg_sentiment_market_risk_score", text)
             self.assertIn("approved_sentiment_risk_postures", text)
+            self.assertIn("approved_weather_leveling_states", text)
+            self.assertIn("approved_avg_weather_leveling_score", text)
             self.assertIn("potential_risk_sized_avg_end_return_pct", text)
             self.assertIn("0.3", text)
             self.assertIn("0.081", text)
@@ -1789,6 +1826,8 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "potential_risk_sized_avg_max_drawdown_pct": -0.135,
                     "approved_sentiment_risk_samples": 2,
                     "approved_sentiment_risk_postures": '{"entry_allowed": 2}',
+                    "approved_weather_leveling_states": '{"leveling": 2}',
+                    "approved_avg_weather_leveling_score": 0.82,
                     "approved_sentiment_hard_safety_flag_events": 0,
                     "approved_sentiment_hard_safety_flags": "{}",
                     "approved_avg_sentiment_market_risk_score": 0.3,
@@ -1815,6 +1854,8 @@ class RangeGridBacktestTests(unittest.TestCase):
             self.assertIn("candidate_efficiency", text)
             self.assertIn("approved_avg_sentiment_market_risk_score", text)
             self.assertIn("approved_sentiment_risk_postures", text)
+            self.assertIn("approved_weather_leveling_states", text)
+            self.assertIn("approved_avg_weather_leveling_score", text)
             self.assertIn("potential_risk_sized_avg_end_return_pct", text)
             self.assertIn("0.081", text)
             self.assertIn("baseline", text)

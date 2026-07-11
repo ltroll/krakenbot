@@ -2050,6 +2050,7 @@ def sentiment_risk_log_fields(risk_context):
         flags = []
     weather = weather_report_payload(risk_context)
     bot_tuning = weather_bot_tuning(weather)
+    market_stability = weather_market_stability(weather)
 
     return {
         "sentiment_risk_posture": risk_context.get("recommended_posture"),
@@ -2073,6 +2074,10 @@ def sentiment_risk_log_fields(risk_context):
         ),
         "weather_entry_discount_multiplier": (
             bot_tuning.get("entry_discount_multiplier")
+        ),
+        "weather_leveling_state": market_stability.get("leveling_state"),
+        "weather_leveling_score": safe_float(
+            market_stability.get("leveling_score")
         ),
         "sentiment_market_risk_score": risk_context.get("market_risk_score"),
         "sentiment_buy_aggression_score": risk_context.get("buy_aggression_score"),
@@ -2106,6 +2111,15 @@ def weather_report_payload(risk_context):
 def weather_bot_tuning(weather_report):
     tuning = weather_report.get("bot_tuning") if isinstance(weather_report, dict) else {}
     return tuning if isinstance(tuning, dict) else {}
+
+
+def weather_market_stability(weather_report):
+    stability = (
+        weather_report.get("market_stability")
+        if isinstance(weather_report, dict)
+        else {}
+    )
+    return stability if isinstance(stability, dict) else {}
 
 
 def weather_list(value):
