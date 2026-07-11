@@ -449,10 +449,14 @@ if not isinstance(bucket_inventory_caps_config, dict):
     bucket_inventory_caps_config = {}
 
 order_tracker_url = (
-    os.getenv("ORDER_TRACKER_URL")
+    os.getenv("RANGE_GRID_ORDER_TRACKER_URL")
+    or os.getenv("ORDER_TRACKER_URL")
     or os.getenv("EXTERNAL_ORDER_TRACKER_URL")
 )
-order_tracker_user_agent = os.getenv("ORDER_TRACKER_USER_AGENT")
+order_tracker_user_agent = (
+    os.getenv("RANGE_GRID_ORDER_TRACKER_USER_AGENT")
+    or os.getenv("ORDER_TRACKER_USER_AGENT")
+)
 order_owner_tag_source = (
     os.getenv("ORDER_OWNER_TAG_SOURCE")
     or order_tracker_user_agent
@@ -467,6 +471,8 @@ order_tracker_checkin_timeout_seconds = profile_float(
     "order_tracker_checkin_timeout_seconds",
     min(order_tracker_timeout_seconds, 5)
 )
+order_tracker_skip_logged = False
+order_tracker_checkin_skip_logged = False
 
 range_window_hours = profile_int("range_window_hours", 24)
 max_grid_size = profile_int("max_grid_size", 4)
@@ -1436,7 +1442,21 @@ def notify_order_tracker(
     notes=None,
     status=None
 ):
+    global order_tracker_skip_logged
+
     if not order_tracker_url or not order_tracker_user_agent:
+        if not order_tracker_skip_logged:
+            order_tracker_skip_logged = True
+            log_event(
+                "ORDER_TRACKER_SKIPPED",
+                reason="missing_tracker_config",
+                order_tracker_url_configured=bool(order_tracker_url),
+                order_tracker_user_agent_configured=(
+                    bool(order_tracker_user_agent)
+                ),
+                side=side,
+                order_id=order_id
+            )
         return
 
     price = positive_float(price)
@@ -1515,7 +1535,20 @@ def short_error_summary(error):
 
 
 def send_checkin(status="ok", loop_count=None, message="loop_complete"):
+    global order_tracker_checkin_skip_logged
+
     if not order_tracker_url or not order_tracker_user_agent:
+        if not order_tracker_checkin_skip_logged:
+            order_tracker_checkin_skip_logged = True
+            log_event(
+                "ORDER_TRACKER_CHECKIN_SKIPPED",
+                reason="missing_tracker_config",
+                order_tracker_url_configured=bool(order_tracker_url),
+                order_tracker_user_agent_configured=(
+                    bool(order_tracker_user_agent)
+                ),
+                status=status
+            )
         return
 
     payload = {
@@ -3432,6 +3465,16 @@ def main():
         alert_log_file=os.path.abspath(ALERT_LOG_FILE),
         activity_log_file=os.path.abspath(ACTIVITY_LOG_FILE),
         activity_log_rotate_daily=ACTIVITY_LOG_ROTATE_DAILY,
+        order_tracker_configured=bool(
+            order_tracker_url and order_tracker_user_agent
+        ),
+        order_tracker_url_configured=bool(order_tracker_url),
+        order_tracker_user_agent_configured=bool(order_tracker_user_agent),
+        order_tracker_symbol=order_tracker_symbol,
+        order_tracker_timeout_seconds=order_tracker_timeout_seconds,
+        order_tracker_checkin_timeout_seconds=(
+            order_tracker_checkin_timeout_seconds
+        ),
         max_daily_loss_usd=max_daily_loss_usd,
         disable_new_buys_on_sell_backlog_count=(
             disable_new_buys_on_sell_backlog_count
