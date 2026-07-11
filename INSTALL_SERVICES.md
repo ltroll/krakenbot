@@ -350,6 +350,19 @@ Then restart:
 sudo systemctl restart kraken-llm-target.service
 ```
 
+Use these weather profiles as a cautious live ladder:
+
+```text
+llm_target_strategy_weather_dryrun.json              # service/shadow check
+llm_target_strategy_weather_tiny_live.json           # first tiny live orders
+llm_target_strategy_weather_tiny_selective_live.json # same size, stricter quality
+llm_target_strategy_weather_small_live.json          # small step-up after clean fills
+```
+
+`weather_tiny_selective_live` keeps the `$25` max trade cap but raises target
+quality requirements. `weather_small_live` raises the cap to `$50` and max
+inventory to `$200`, while still allowing only one open buy and one open sell.
+
 ## 6. Install The OLED Status Display
 
 Create `/etc/systemd/system/kraken-status-display.service`:
