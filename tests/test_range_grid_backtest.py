@@ -867,6 +867,89 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertTrue(approved)
         self.assertIsNone(reason)
 
+    def test_high_band_leveling_can_block_above_last_sell_bypass(self):
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            104.5,
+            action_recommendation="blocked",
+            strategy_modes=["high"],
+            strategy_overrides={
+                "allow_high_band_breakout_above_last_sell": True,
+                "weather_leveling_high_band_bypass_block_threshold": 0.85,
+            },
+            state_summary_overrides={"last_sell_price": 100.0},
+            risk_context={
+                "recommended_posture": "breakout_watch",
+                "weather_report": {
+                    "mode": "weather_report",
+                    "bot_decision_authority": "bot",
+                    "trade_permission": "bot_decides",
+                    "condition": "breakout_tailwind",
+                    "alert_level": "normal",
+                    "emergency_bell": False,
+                    "opportunity_tags": ["breakout_tailwind"],
+                    "market_stability": {
+                        "schema_version": "market-stability-v1",
+                        "leveling_state": "leveling",
+                        "leveling_score": 0.9,
+                    },
+                },
+            },
+        )
+        candidate = {
+            "buy_source": "range_high_band",
+            "level": 104.5,
+        }
+
+        approved, reason = backtest.evaluate_candidate(snapshot, candidate, 104.5)
+
+        self.assertFalse(approved)
+        self.assertEqual(reason, "above_last_sell_discount")
+
+    def test_high_band_leveling_reduces_risk_sized_exposure(self):
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            104.5,
+            action_recommendation="blocked",
+            strategy_modes=["high"],
+            strategy_overrides={
+                "allow_high_band_breakout_above_last_sell": True,
+                "weather_leveling_high_band_size_threshold": 0.75,
+                "weather_leveling_high_band_size_multiplier": 0.5,
+                "weather_leveling_high_band_bypass_block_threshold": 0.85,
+            },
+            state_summary_overrides={"last_sell_price": 100.0},
+            risk_context={
+                "recommended_posture": "breakout_watch",
+                "weather_report": {
+                    "mode": "weather_report",
+                    "bot_decision_authority": "bot",
+                    "trade_permission": "bot_decides",
+                    "condition": "breakout_tailwind",
+                    "alert_level": "normal",
+                    "emergency_bell": False,
+                    "opportunity_tags": ["breakout_tailwind"],
+                    "market_stability": {
+                        "schema_version": "market-stability-v1",
+                        "leveling_state": "leveling",
+                        "leveling_score": 0.8,
+                    },
+                },
+            },
+        )
+
+        result = backtest.replay_from_snapshots([snapshot])
+        approved_event = result["recent_approved_events"][0]
+
+        self.assertEqual(
+            approved_event["weather_leveling_high_band_size_multiplier"],
+            0.5,
+        )
+        self.assertEqual(
+            approved_event["risk_context_position_size_effective_multiplier"],
+            0.5,
+        )
+
     def test_high_band_fresh_backlog_blocks_at_effective_cap(self):
         open_sell_orders = [
             {

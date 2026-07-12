@@ -2170,6 +2170,49 @@ def weather_high_anchor_tailwind(weather_report):
     return condition in constructive or bool(tags & constructive)
 
 
+def weather_leveling_score(weather_report):
+    stability = weather_market_stability(weather_report)
+    state = str(stability.get("leveling_state") or "").strip().lower()
+    score = optional_float(stability.get("leveling_score"))
+    return state, score
+
+
+def high_band_leveling_size_multiplier(config, buy_source, weather_report):
+    if buy_source != "range_high_band":
+        return 1.0
+    state, score = weather_leveling_score(weather_report)
+    if state != "leveling" or score is None:
+        return 1.0
+    threshold = strategy_float(
+        config,
+        "weather_leveling_high_band_size_threshold",
+        1.01,
+    )
+    if score < threshold:
+        return 1.0
+    return clamp(
+        strategy_float(
+            config,
+            "weather_leveling_high_band_size_multiplier",
+            1.0,
+        ),
+        0.0,
+        1.0,
+    )
+
+
+def weather_leveling_blocks_high_band_bypass(config, weather_report):
+    state, score = weather_leveling_score(weather_report)
+    if state != "leveling" or score is None:
+        return False
+    threshold = strategy_float(
+        config,
+        "weather_leveling_high_band_bypass_block_threshold",
+        1.01,
+    )
+    return score >= threshold
+
+
 def allow_above_last_sell_for_candidate(config, buy_source, weather_report):
     if buy_source != "range_high_band":
         return False
@@ -2178,6 +2221,8 @@ def allow_above_last_sell_for_candidate(config, buy_source, weather_report):
         "allow_high_band_breakout_above_last_sell",
         allow_high_band_breakout_above_last_sell
     ):
+        return False
+    if weather_leveling_blocks_high_band_bypass(config, weather_report):
         return False
     return weather_high_anchor_tailwind(weather_report)
 
@@ -4944,6 +4989,23 @@ def main():
                         route_limits["position_size_pct"]
                         * route_inventory_pressure["size_multiplier"]
                     )
+                    leveling_size_multiplier = (
+                        high_band_leveling_size_multiplier(
+                            route_config,
+                            buy_source,
+                            weather_report,
+                        )
+                    )
+                    candidate_effective_position_size_pct *= (
+                        leveling_size_multiplier
+                    )
+                    leveling_bypass_blocked = (
+                        buy_source == "range_high_band"
+                        and weather_leveling_blocks_high_band_bypass(
+                            route_config,
+                            weather_report,
+                        )
+                    )
                     candidate_effective_max_inventory_usd = (
                         route_limits["max_inventory_usd"]
                     )
@@ -5187,6 +5249,12 @@ def main():
                             ),
                             risk_context_high_band_guard_reason=(
                                 high_band_guard.get("reason")
+                            ),
+                            weather_leveling_high_band_size_multiplier=(
+                                leveling_size_multiplier
+                            ),
+                            weather_leveling_bypass_blocked=(
+                                leveling_bypass_blocked
                             ),
                             risk_context_high_band_max_market_risk_score=(
                                 high_band_guard.get(
@@ -5505,6 +5573,12 @@ def main():
                         high_anchor_aged_sell_count=(
                             high_anchor_exposure["aged_sell_count"]
                         ),
+                        weather_leveling_high_band_size_multiplier=(
+                            leveling_size_multiplier
+                        ),
+                        weather_leveling_bypass_blocked=(
+                            leveling_bypass_blocked
+                        ),
                         last_sell_price=last_sell_price,
                         above_last_sell_breakout_bypass=(
                             above_last_sell_breakout_bypass
@@ -5578,6 +5652,12 @@ def main():
                             "above_last_sell_breakout_bypass": (
                                 above_last_sell_breakout_bypass
                             ),
+                            "weather_leveling_high_band_size_multiplier": (
+                                leveling_size_multiplier
+                            ),
+                            "weather_leveling_bypass_blocked": (
+                                leveling_bypass_blocked
+                            ),
                             "shadow_reason": "approved_risk_scored_candidate",
                         }
                         shadow_payload.update(sentiment_risk_fields)
@@ -5610,6 +5690,12 @@ def main():
                             sell_pct_override=active_sell_pct_override,
                             above_last_sell_breakout_bypass=(
                                 above_last_sell_breakout_bypass
+                            ),
+                            weather_leveling_high_band_size_multiplier=(
+                                leveling_size_multiplier
+                            ),
+                            weather_leveling_bypass_blocked=(
+                                leveling_bypass_blocked
                             ),
                             effective_position_size_pct=(
                                 candidate_effective_position_size_pct
@@ -5647,6 +5733,12 @@ def main():
                             sell_pct_override=active_sell_pct_override,
                             above_last_sell_breakout_bypass=(
                                 above_last_sell_breakout_bypass
+                            ),
+                            weather_leveling_high_band_size_multiplier=(
+                                leveling_size_multiplier
+                            ),
+                            weather_leveling_bypass_blocked=(
+                                leveling_bypass_blocked
                             ),
                             effective_position_size_pct=(
                                 candidate_effective_position_size_pct
@@ -5811,6 +5903,12 @@ def main():
                         above_last_sell_breakout_bypass=(
                             above_last_sell_breakout_bypass
                         ),
+                        weather_leveling_high_band_size_multiplier=(
+                            leveling_size_multiplier
+                        ),
+                        weather_leveling_bypass_blocked=(
+                            leveling_bypass_blocked
+                        ),
                         effective_position_size_pct=(
                             candidate_effective_position_size_pct
                         ),
@@ -5844,6 +5942,12 @@ def main():
                         sell_pct_override=active_sell_pct_override,
                         above_last_sell_breakout_bypass=(
                             above_last_sell_breakout_bypass
+                        ),
+                        weather_leveling_high_band_size_multiplier=(
+                            leveling_size_multiplier
+                        ),
+                        weather_leveling_bypass_blocked=(
+                            leveling_bypass_blocked
                         ),
                         effective_position_size_pct=(
                             candidate_effective_position_size_pct

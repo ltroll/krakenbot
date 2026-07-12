@@ -139,6 +139,9 @@ def validate_strategy_config(strategy_config):
         "risk_context_position_size_max_multiplier",
         "risk_context_position_size_blend",
         "high_anchor_backlog_old_order_weight",
+        "weather_leveling_high_band_size_threshold",
+        "weather_leveling_high_band_size_multiplier",
+        "weather_leveling_high_band_bypass_block_threshold",
     )
     for field in bounded_score_fields:
         value = strategy_config.get(field)

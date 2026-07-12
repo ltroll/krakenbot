@@ -409,6 +409,51 @@ def weather_high_anchor_tailwind(weather_report):
     return condition in constructive or bool(tags & constructive)
 
 
+def weather_leveling_score(weather_report):
+    stability = weather_market_stability(weather_report)
+    state = str(stability.get("leveling_state") or "").strip().lower()
+    score = safe_float(stability.get("leveling_score"))
+    return state, score
+
+
+def high_band_leveling_size_multiplier(config, buy_source, weather_report):
+    if buy_source != "range_high_band":
+        return 1.0
+    state, score = weather_leveling_score(weather_report)
+    if state != "leveling" or score is None:
+        return 1.0
+    threshold = strategy_float(
+        config,
+        "weather_leveling_high_band_size_threshold",
+        1.01,
+    )
+    if score < threshold:
+        return 1.0
+    return max(
+        0.0,
+        min(
+            1.0,
+            strategy_float(
+                config,
+                "weather_leveling_high_band_size_multiplier",
+                1.0,
+            ),
+        ),
+    )
+
+
+def weather_leveling_blocks_high_band_bypass(config, weather_report):
+    state, score = weather_leveling_score(weather_report)
+    if state != "leveling" or score is None:
+        return False
+    threshold = strategy_float(
+        config,
+        "weather_leveling_high_band_bypass_block_threshold",
+        1.01,
+    )
+    return score >= threshold
+
+
 def allow_above_last_sell_for_candidate(config, buy_source, weather_report):
     if buy_source != "range_high_band":
         return False
@@ -417,6 +462,8 @@ def allow_above_last_sell_for_candidate(config, buy_source, weather_report):
         "allow_high_band_breakout_above_last_sell",
         False,
     ):
+        return False
+    if weather_leveling_blocks_high_band_bypass(config, weather_report):
         return False
     return weather_high_anchor_tailwind(weather_report)
 
@@ -2707,6 +2754,30 @@ def replay_from_snapshots(snapshots):
             summary["raw_candidates"] += 1
             candidate_counts_by_source[candidate["buy_source"]] += 1
             candidate_counts_by_strategy_mode[candidate["strategy_mode"]] += 1
+            leveling_size_multiplier = high_band_leveling_size_multiplier(
+                strategy_payload(snapshot),
+                candidate["buy_source"],
+                weather_report_payload(
+                    risk_context_payload(signal_payload(snapshot))
+                ),
+            )
+            base_size_multiplier = built.get(
+                "risk_context_position_size_effective_multiplier"
+            )
+            effective_size_multiplier = (
+                base_size_multiplier * leveling_size_multiplier
+                if base_size_multiplier is not None
+                else leveling_size_multiplier
+            )
+            leveling_bypass_blocked = (
+                candidate["buy_source"] == "range_high_band"
+                and weather_leveling_blocks_high_band_bypass(
+                    strategy_payload(snapshot),
+                    weather_report_payload(
+                        risk_context_payload(signal_payload(snapshot))
+                    ),
+                )
+            )
             approved, reason = evaluate_candidate(snapshot, candidate, price)
             if approved:
                 summary["approved_candidates"] += 1
@@ -2726,9 +2797,13 @@ def replay_from_snapshots(snapshots):
                     "risk_context_position_sizing_enabled": built.get(
                         "risk_context_position_sizing_enabled"
                     ),
-                    "risk_context_position_size_effective_multiplier": built.get(
-                        "risk_context_position_size_effective_multiplier"
+                    "risk_context_position_size_effective_multiplier": (
+                        effective_size_multiplier
                     ),
+                    "weather_leveling_high_band_size_multiplier": (
+                        leveling_size_multiplier
+                    ),
+                    "weather_leveling_bypass_blocked": leveling_bypass_blocked,
                     "buy_source": candidate["buy_source"],
                     "strategy_mode": candidate["strategy_mode"],
                     "level": round(candidate["level"], 2),
@@ -2756,9 +2831,13 @@ def replay_from_snapshots(snapshots):
                     "risk_context_position_sizing_enabled": built.get(
                         "risk_context_position_sizing_enabled"
                     ),
-                    "risk_context_position_size_effective_multiplier": built.get(
-                        "risk_context_position_size_effective_multiplier"
+                    "risk_context_position_size_effective_multiplier": (
+                        effective_size_multiplier
                     ),
+                    "weather_leveling_high_band_size_multiplier": (
+                        leveling_size_multiplier
+                    ),
+                    "weather_leveling_bypass_blocked": leveling_bypass_blocked,
                     "buy_source": candidate["buy_source"],
                     "strategy_mode": candidate["strategy_mode"],
                     "level": round(candidate["level"], 2),
