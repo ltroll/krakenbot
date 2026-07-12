@@ -74,6 +74,8 @@
   },
   "high_anchor_buy_cooldown_minutes": 15,
   "max_open_high_anchor_orders": 3,
+  "high_anchor_backlog_soft_release_minutes": 720,
+  "high_anchor_backlog_old_order_weight": 0.35,
   "high_anchor_profit_target_pct": 0.006,
   "prevent_buy_above_last_sell": true,
   "buy_after_sell_discount_pct": 0.001,

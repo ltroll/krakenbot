@@ -867,6 +867,70 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertTrue(approved)
         self.assertIsNone(reason)
 
+    def test_high_band_fresh_backlog_blocks_at_effective_cap(self):
+        open_sell_orders = [
+            {
+                "level": str(90.0 - index),
+                "buy_source": "range_high_band",
+                "placed_at": "2026-06-13T11:30:00+00:00",
+            }
+            for index in range(3)
+        ]
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            104.5,
+            action_recommendation="bullish_allowed",
+            strategy_modes=["high"],
+            strategy_overrides={
+                "prevent_buy_above_last_sell": False,
+                "max_open_high_anchor_orders": 3,
+                "high_anchor_backlog_soft_release_minutes": 720,
+                "high_anchor_backlog_old_order_weight": 0.35,
+            },
+            open_sell_orders=open_sell_orders,
+        )
+        candidate = {
+            "buy_source": "range_high_band",
+            "level": 104.5,
+        }
+
+        approved, reason = backtest.evaluate_candidate(snapshot, candidate, 104.5)
+
+        self.assertFalse(approved)
+        self.assertEqual(reason, "max_open_high_anchor_orders")
+
+    def test_high_band_aged_backlog_counts_less_than_cap(self):
+        open_sell_orders = [
+            {
+                "level": str(90.0 - index),
+                "buy_source": "range_high_band",
+                "placed_at": "2026-06-12T23:00:00+00:00",
+            }
+            for index in range(8)
+        ]
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            104.5,
+            action_recommendation="bullish_allowed",
+            strategy_modes=["high"],
+            strategy_overrides={
+                "prevent_buy_above_last_sell": False,
+                "max_open_high_anchor_orders": 3,
+                "high_anchor_backlog_soft_release_minutes": 720,
+                "high_anchor_backlog_old_order_weight": 0.35,
+            },
+            open_sell_orders=open_sell_orders,
+        )
+        candidate = {
+            "buy_source": "range_high_band",
+            "level": 104.5,
+        }
+
+        approved, reason = backtest.evaluate_candidate(snapshot, candidate, 104.5)
+
+        self.assertTrue(approved)
+        self.assertIsNone(reason)
+
     def test_momentum_entry_tolerance_can_fall_back_to_base_config(self):
         route_config = {}
         base_config = {"momentum_entry_tolerance_pct": 0.002}

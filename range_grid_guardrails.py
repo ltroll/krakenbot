@@ -105,6 +105,7 @@ def validate_strategy_config(strategy_config):
         "min_profit_target_pct",
         "buy_after_sell_discount_pct",
         "llm_buy_cooldown_minutes_after_sell",
+        "high_anchor_backlog_soft_release_minutes",
         "mean_reversion_min_opportunity",
     )
     for field in non_negative_numeric_fields:
@@ -137,6 +138,7 @@ def validate_strategy_config(strategy_config):
         "risk_context_position_size_min_multiplier",
         "risk_context_position_size_max_multiplier",
         "risk_context_position_size_blend",
+        "high_anchor_backlog_old_order_weight",
     )
     for field in bounded_score_fields:
         value = strategy_config.get(field)

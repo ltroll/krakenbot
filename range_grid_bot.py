@@ -545,6 +545,14 @@ high_anchor_buy_cooldown_minutes = profile_int(
     15
 )
 max_open_high_anchor_orders = profile_int("max_open_high_anchor_orders", 3)
+high_anchor_backlog_soft_release_minutes = profile_int(
+    "high_anchor_backlog_soft_release_minutes",
+    0
+)
+high_anchor_backlog_old_order_weight = profile_float(
+    "high_anchor_backlog_old_order_weight",
+    1.0
+)
 high_anchor_profit_target_pct = profile_float(
     "high_anchor_profit_target_pct",
     profit_target_pct
@@ -2255,18 +2263,61 @@ def compute_high_anchor_grid(high, price, step_pct):
     return []
 
 
-def high_anchor_open_order_count():
+def high_anchor_backlog_exposure(now, soft_release_minutes=None, old_order_weight=None):
+    soft_release_minutes = (
+        high_anchor_backlog_soft_release_minutes
+        if soft_release_minutes is None
+        else soft_release_minutes
+    )
+    old_order_weight = (
+        high_anchor_backlog_old_order_weight
+        if old_order_weight is None
+        else old_order_weight
+    )
+    soft_release_minutes = max(0.0, float(soft_release_minutes or 0.0))
+    old_order_weight = max(0.0, min(float(old_order_weight or 0.0), 1.0))
+
     open_buy_count = sum(
         1
         for order in state["open_buy_orders"].values()
         if order.get("buy_source") == "range_high_band"
     )
-    open_sell_count = sum(
-        1
-        for order in state["open_sell_orders"].values()
-        if order.get("buy_source") == "range_high_band"
+    fresh_sell_count = 0
+    aged_sell_count = 0
+
+    for order in state["open_sell_orders"].values():
+        if order.get("buy_source") != "range_high_band":
+            continue
+        placed_at = parse_iso8601(order.get("placed_at"))
+        age_minutes = (
+            ((now - placed_at).total_seconds() / 60)
+            if placed_at is not None
+            else 0.0
+        )
+        if soft_release_minutes > 0 and age_minutes >= soft_release_minutes:
+            aged_sell_count += 1
+        else:
+            fresh_sell_count += 1
+
+    raw_count = open_buy_count + fresh_sell_count + aged_sell_count
+    effective_count = (
+        open_buy_count
+        + fresh_sell_count
+        + (aged_sell_count * old_order_weight)
     )
-    return open_buy_count + open_sell_count
+    return {
+        "raw_count": raw_count,
+        "effective_count": effective_count,
+        "open_buy_count": open_buy_count,
+        "fresh_sell_count": fresh_sell_count,
+        "aged_sell_count": aged_sell_count,
+        "soft_release_minutes": soft_release_minutes,
+        "old_order_weight": old_order_weight,
+    }
+
+
+def high_anchor_open_order_count():
+    return high_anchor_backlog_exposure(datetime.now(timezone.utc))["raw_count"]
 
 
 def high_anchor_cooldown_remaining_minutes(now):
@@ -3524,6 +3575,12 @@ def main():
         min_profit_target_pct=min_profit_target_pct,
         high_anchor_buy_cooldown_minutes=high_anchor_buy_cooldown_minutes,
         max_open_high_anchor_orders=max_open_high_anchor_orders,
+        high_anchor_backlog_soft_release_minutes=(
+            high_anchor_backlog_soft_release_minutes
+        ),
+        high_anchor_backlog_old_order_weight=(
+            high_anchor_backlog_old_order_weight
+        ),
         high_anchor_profit_target_pct=high_anchor_profit_target_pct,
         prevent_buy_above_last_sell=prevent_buy_above_last_sell,
         buy_after_sell_discount_pct=buy_after_sell_discount_pct,
@@ -4847,7 +4904,11 @@ def main():
                 )
                 deployed_inventory_usd = current_inventory_usd(price)
                 bucket_inventory_usd_map = inventory_usd_by_bucket(price)
-                high_anchor_order_count = high_anchor_open_order_count()
+                high_anchor_exposure = high_anchor_backlog_exposure(now)
+                high_anchor_order_count = high_anchor_exposure["raw_count"]
+                high_anchor_effective_order_count = (
+                    high_anchor_exposure["effective_count"]
+                )
                 high_anchor_cooldown_remaining = (
                     high_anchor_cooldown_remaining_minutes(now)
                 )
@@ -4897,6 +4958,28 @@ def main():
                         "max_open_high_anchor_orders",
                         max_open_high_anchor_orders,
                     ))
+                    candidate_high_anchor_soft_release_minutes = strategy_float(
+                        route_config,
+                        "high_anchor_backlog_soft_release_minutes",
+                        high_anchor_backlog_soft_release_minutes,
+                    )
+                    candidate_high_anchor_old_order_weight = strategy_float(
+                        route_config,
+                        "high_anchor_backlog_old_order_weight",
+                        high_anchor_backlog_old_order_weight,
+                    )
+                    if buy_source == "range_high_band":
+                        high_anchor_exposure = high_anchor_backlog_exposure(
+                            now,
+                            candidate_high_anchor_soft_release_minutes,
+                            candidate_high_anchor_old_order_weight,
+                        )
+                        high_anchor_order_count = high_anchor_exposure[
+                            "raw_count"
+                        ]
+                        high_anchor_effective_order_count = (
+                            high_anchor_exposure["effective_count"]
+                        )
                     bucket_name = buy_source_bucket(buy_source)
                     momentum_entry_tolerance_pct = (
                         range_momentum_entry_tolerance_pct(
@@ -5027,7 +5110,7 @@ def main():
                         skip_reason = "high_anchor_cooldown"
                     elif (
                         buy_source == "range_high_band"
-                        and high_anchor_order_count >= (
+                        and high_anchor_effective_order_count >= (
                             candidate_max_open_high_anchor_orders
                         )
                     ):
@@ -5134,6 +5217,25 @@ def main():
                             buy_source=buy_source,
                             bucket_name=bucket_name,
                             high_anchor_order_count=high_anchor_order_count,
+                            high_anchor_effective_order_count=round(
+                                high_anchor_effective_order_count,
+                                4
+                            ),
+                            high_anchor_open_buy_count=(
+                                high_anchor_exposure["open_buy_count"]
+                            ),
+                            high_anchor_fresh_sell_count=(
+                                high_anchor_exposure["fresh_sell_count"]
+                            ),
+                            high_anchor_aged_sell_count=(
+                                high_anchor_exposure["aged_sell_count"]
+                            ),
+                            high_anchor_backlog_soft_release_minutes=(
+                                high_anchor_exposure["soft_release_minutes"]
+                            ),
+                            high_anchor_backlog_old_order_weight=(
+                                high_anchor_exposure["old_order_weight"]
+                            ),
                             high_anchor_cooldown_remaining_minutes=round(
                                 high_anchor_cooldown_remaining,
                                 2
@@ -5229,6 +5331,19 @@ def main():
                             bucket_inventory_usd=round(bucket_inventory_usd, 8),
                             bucket_inventory_cap_usd=round(bucket_cap_usd, 8),
                             high_anchor_order_count=high_anchor_order_count,
+                            high_anchor_effective_order_count=round(
+                                high_anchor_effective_order_count,
+                                4
+                            ),
+                            high_anchor_open_buy_count=(
+                                high_anchor_exposure["open_buy_count"]
+                            ),
+                            high_anchor_fresh_sell_count=(
+                                high_anchor_exposure["fresh_sell_count"]
+                            ),
+                            high_anchor_aged_sell_count=(
+                                high_anchor_exposure["aged_sell_count"]
+                            ),
                             high_anchor_cooldown_remaining_minutes=round(
                                 high_anchor_cooldown_remaining,
                                 2
@@ -5370,6 +5485,19 @@ def main():
                         bucket_inventory_usd=round(bucket_inventory_usd, 8),
                         bucket_inventory_cap_usd=round(bucket_cap_usd, 8),
                         high_anchor_order_count=high_anchor_order_count,
+                        high_anchor_effective_order_count=round(
+                            high_anchor_effective_order_count,
+                            4
+                        ),
+                        high_anchor_open_buy_count=(
+                            high_anchor_exposure["open_buy_count"]
+                        ),
+                        high_anchor_fresh_sell_count=(
+                            high_anchor_exposure["fresh_sell_count"]
+                        ),
+                        high_anchor_aged_sell_count=(
+                            high_anchor_exposure["aged_sell_count"]
+                        ),
                         last_sell_price=last_sell_price,
                         above_last_sell_breakout_bypass=(
                             above_last_sell_breakout_bypass
@@ -5638,6 +5766,14 @@ def main():
                     if buy_source == "range_high_band":
                         state["last_high_anchor_buy_at"] = cycle_id
                         high_anchor_order_count += 1
+                        high_anchor_effective_order_count += 1
+                        high_anchor_exposure["raw_count"] = (
+                            high_anchor_order_count
+                        )
+                        high_anchor_exposure["effective_count"] = (
+                            high_anchor_effective_order_count
+                        )
+                        high_anchor_exposure["open_buy_count"] += 1
                         high_anchor_cooldown_remaining = (
                             high_anchor_buy_cooldown_minutes
                         )
@@ -5837,6 +5973,7 @@ def main():
                 )
                 actions.append("hold")
 
+            cycle_high_anchor_exposure = high_anchor_backlog_exposure(now)
             log_event(
                 "CYCLE_SUMMARY",
                 cycle_id=cycle_id,
@@ -5955,7 +6092,26 @@ def main():
                     )
                     else []
                 ),
-                high_anchor_order_count=high_anchor_open_order_count(),
+                high_anchor_order_count=cycle_high_anchor_exposure["raw_count"],
+                high_anchor_effective_order_count=round(
+                    cycle_high_anchor_exposure["effective_count"],
+                    4
+                ),
+                high_anchor_open_buy_count=(
+                    cycle_high_anchor_exposure["open_buy_count"]
+                ),
+                high_anchor_fresh_sell_count=(
+                    cycle_high_anchor_exposure["fresh_sell_count"]
+                ),
+                high_anchor_aged_sell_count=(
+                    cycle_high_anchor_exposure["aged_sell_count"]
+                ),
+                high_anchor_backlog_soft_release_minutes=(
+                    cycle_high_anchor_exposure["soft_release_minutes"]
+                ),
+                high_anchor_backlog_old_order_weight=(
+                    cycle_high_anchor_exposure["old_order_weight"]
+                ),
                 high_anchor_cooldown_remaining_minutes=round(
                     high_anchor_cooldown_remaining_minutes(now),
                     2

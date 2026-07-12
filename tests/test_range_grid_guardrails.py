@@ -49,9 +49,17 @@ class RangeGridGuardrailsTests(unittest.TestCase):
             "grid_anchor": "low,high",
             "operating_mode": "range_only",
             "risk_context_high_band_min_breakout_score": 1.5,
+            "risk_context_position_size_blend": -0.1,
+            "high_anchor_backlog_old_order_weight": 1.5,
         })
         self.assertTrue(
             any("risk_context_high_band_min_breakout_score" in error for error in errors)
+        )
+        self.assertTrue(
+            any("risk_context_position_size_blend" in error for error in errors)
+        )
+        self.assertTrue(
+            any("high_anchor_backlog_old_order_weight" in error for error in errors)
         )
 
     def test_summarize_sell_backlog_counts_and_ages(self):

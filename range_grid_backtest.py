@@ -1936,6 +1936,54 @@ def compute_high_anchor_grid(high, price, entry_step_pct):
     return []
 
 
+def high_anchor_backlog_exposure(
+    open_buy_orders,
+    open_sell_orders,
+    now,
+    soft_release_minutes=0,
+    old_order_weight=1.0,
+):
+    soft_release_minutes = max(0.0, float(soft_release_minutes or 0.0))
+    old_order_weight = max(0.0, min(float(old_order_weight or 0.0), 1.0))
+    open_buy_count = sum(
+        1
+        for order in open_buy_orders or []
+        if order.get("buy_source") == "range_high_band"
+    )
+    fresh_sell_count = 0
+    aged_sell_count = 0
+
+    for order in open_sell_orders or []:
+        if order.get("buy_source") != "range_high_band":
+            continue
+        placed_at = parse_iso8601(order.get("placed_at"))
+        age_minutes = (
+            ((now - placed_at).total_seconds() / 60)
+            if now is not None and placed_at is not None
+            else 0.0
+        )
+        if soft_release_minutes > 0 and age_minutes >= soft_release_minutes:
+            aged_sell_count += 1
+        else:
+            fresh_sell_count += 1
+
+    raw_count = open_buy_count + fresh_sell_count + aged_sell_count
+    effective_count = (
+        open_buy_count
+        + fresh_sell_count
+        + (aged_sell_count * old_order_weight)
+    )
+    return {
+        "raw_count": raw_count,
+        "effective_count": effective_count,
+        "open_buy_count": open_buy_count,
+        "fresh_sell_count": fresh_sell_count,
+        "aged_sell_count": aged_sell_count,
+        "soft_release_minutes": soft_release_minutes,
+        "old_order_weight": old_order_weight,
+    }
+
+
 def flow_adjustment(config, flow_pressure, buy_source):
     if flow_pressure is None:
         return {"size_multiplier": 1.0, "block_buy": False, "reason": None}
@@ -2460,6 +2508,14 @@ def evaluate_candidate(snapshot, candidate, price):
     llm_buy_cooldown_minutes_after_sell = int(config.get("llm_buy_cooldown_minutes_after_sell", 30))
     high_anchor_buy_cooldown_minutes = int(config.get("high_anchor_buy_cooldown_minutes", 15))
     max_open_high_anchor_orders = int(config.get("max_open_high_anchor_orders", 3))
+    high_anchor_backlog_soft_release_minutes = safe_float(
+        config.get("high_anchor_backlog_soft_release_minutes")
+    ) or 0.0
+    high_anchor_backlog_old_order_weight = safe_float(
+        config.get("high_anchor_backlog_old_order_weight")
+    )
+    if high_anchor_backlog_old_order_weight is None:
+        high_anchor_backlog_old_order_weight = 1.0
     max_open_sell_orders = int(config.get("max_open_sell_orders", 999999))
     max_inventory_usd = safe_float(config.get("max_inventory_usd")) or float("inf")
     deployed_inventory_usd = safe_float(state_info.get("deployed_inventory_usd")) or 0.0
@@ -2528,14 +2584,16 @@ def evaluate_candidate(snapshot, candidate, price):
     ):
         return False, "high_anchor_cooldown"
 
-    high_anchor_order_count = sum(
-        1
-        for order in open_buy_orders + open_sell_orders
-        if order.get("buy_source") == "range_high_band"
+    high_anchor_exposure = high_anchor_backlog_exposure(
+        open_buy_orders,
+        open_sell_orders,
+        now,
+        high_anchor_backlog_soft_release_minutes,
+        high_anchor_backlog_old_order_weight,
     )
     if (
         buy_source == "range_high_band"
-        and high_anchor_order_count >= max_open_high_anchor_orders
+        and high_anchor_exposure["effective_count"] >= max_open_high_anchor_orders
     ):
         return False, "max_open_high_anchor_orders"
 
