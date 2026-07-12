@@ -423,6 +423,13 @@ def profile_float(name, default):
     return default if value is None else float(value)
 
 
+def optional_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def profile_str(name, default=""):
     value = strategy_config.get(name, default)
     return default if value is None else str(value)
@@ -2084,7 +2091,7 @@ def sentiment_risk_log_fields(risk_context):
             bot_tuning.get("entry_discount_multiplier")
         ),
         "weather_leveling_state": market_stability.get("leveling_state"),
-        "weather_leveling_score": safe_float(
+        "weather_leveling_score": optional_float(
             market_stability.get("leveling_score")
         ),
         "sentiment_market_risk_score": risk_context.get("market_risk_score"),
