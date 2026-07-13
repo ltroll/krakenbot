@@ -2116,6 +2116,50 @@ def sentiment_risk_log_fields(risk_context):
     }
 
 
+def weather_market_location(weather_report):
+    location = (
+        weather_report.get("market_location")
+        if isinstance(weather_report, dict)
+        else {}
+    )
+    return location if isinstance(location, dict) else {}
+
+
+def weather_status_fields(risk_context):
+    fields = sentiment_risk_log_fields(risk_context)
+    weather = weather_report_payload(risk_context)
+    location = weather_market_location(weather)
+    fields.update({
+        "weather_report_available": bool(weather),
+        "weather_market_current_price": optional_float(
+            location.get("current_price")
+        ),
+        "weather_market_range_high": optional_float(
+            location.get("range_high")
+        ),
+        "weather_market_range_low": optional_float(
+            location.get("range_low")
+        ),
+        "weather_market_range_position": optional_float(
+            location.get("range_position")
+        ),
+        "weather_market_range_zone": location.get("range_zone"),
+        "weather_market_distance_to_recent_high_pct": optional_float(
+            location.get("distance_to_recent_high_pct")
+        ),
+        "weather_market_distance_from_recent_low_pct": optional_float(
+            location.get("distance_from_recent_low_pct")
+        ),
+        "weather_market_price_return_24h_pct": optional_float(
+            location.get("price_return_24h_pct")
+        ),
+        "weather_market_price_return_4h_pct": optional_float(
+            location.get("price_return_4h_pct")
+        ),
+    })
+    return fields
+
+
 def weather_report_payload(risk_context):
     if not isinstance(risk_context, dict):
         return {}
@@ -6312,6 +6356,7 @@ def main():
                     bucket: round(value, 8)
                     for bucket, value in inventory_usd_by_bucket(price).items()
                 },
+                **weather_status_fields(risk_context),
                 "stats": {
                     "approved_buy_candidates": state["stats"][
                         "approved_buy_candidates"

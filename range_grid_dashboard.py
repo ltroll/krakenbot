@@ -98,6 +98,22 @@ def fmt_pct(value, digits=2, fallback="--"):
         return fallback
 
 
+def fmt_bool(value):
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    return "--"
+
+
+def fmt_list(value):
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value) or "--"
+    if value:
+        return str(value)
+    return "--"
+
+
 def age_minutes(value, now=None):
     now = now or utc_now()
     ts = parse_iso8601(value) if isinstance(value, str) else value
@@ -325,6 +341,50 @@ def key_value_rows(mapping):
     return "\n".join(rows)
 
 
+def weather_metric_rows(status):
+    status = status or {}
+    return key_value_rows([
+        ("Report Available", fmt_bool(status.get("weather_report_available"))),
+        ("Condition", status.get("weather_condition") or "--"),
+        ("Alert Level", status.get("weather_alert_level") or "--"),
+        ("Emergency Bell", fmt_bool(status.get("weather_emergency_bell"))),
+        ("Trade Permission", status.get("weather_trade_permission") or "--"),
+        ("Decision Authority", status.get("weather_bot_decision_authority") or "--"),
+        ("Opportunity Tags", fmt_list(status.get("weather_opportunity_tags"))),
+        ("Risk Warnings", fmt_list(status.get("weather_risk_warnings"))),
+        ("Position Size Multiplier", fmt_number(
+            status.get("weather_position_size_multiplier"), 4
+        )),
+        ("Grid Aggression Multiplier", fmt_number(
+            status.get("weather_grid_aggression_multiplier"), 4
+        )),
+        ("Target Profit Multiplier", fmt_number(
+            status.get("weather_target_profit_multiplier"), 4
+        )),
+        ("Entry Discount Multiplier", fmt_number(
+            status.get("weather_entry_discount_multiplier"), 4
+        )),
+        ("Leveling State", status.get("weather_leveling_state") or "--"),
+        ("Leveling Score", fmt_number(status.get("weather_leveling_score"), 4)),
+        ("Market Zone", status.get("weather_market_range_zone") or "--"),
+        ("Market Range Position", fmt_number(
+            status.get("weather_market_range_position"), 4
+        )),
+        ("Distance To High", fmt_pct(
+            status.get("weather_market_distance_to_recent_high_pct"), 4
+        )),
+        ("Distance From Low", fmt_pct(
+            status.get("weather_market_distance_from_recent_low_pct"), 4
+        )),
+        ("24h Return", fmt_pct(
+            status.get("weather_market_price_return_24h_pct"), 4
+        )),
+        ("4h Return", fmt_pct(
+            status.get("weather_market_price_return_4h_pct"), 4
+        )),
+    ])
+
+
 def render_grid_levels_table(levels):
     if not isinstance(levels, list) or not levels:
         return '<tr><td colspan="2">No current grid levels</td></tr>'
@@ -356,6 +416,16 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
         stat_card("Health", health_state.upper(), tone=health_state, subtext=health_message),
         stat_card("Mode", (status or {}).get("operating_mode", "--")),
         stat_card("Price", f"${fmt_number((status or {}).get('price'), 2)}"),
+        stat_card(
+            "Weather",
+            (status or {}).get("weather_condition") or "--",
+            subtext=(status or {}).get("weather_alert_level") or None,
+        ),
+        stat_card(
+            "Leveling",
+            (status or {}).get("weather_leveling_state") or "--",
+            subtext=fmt_number((status or {}).get("weather_leveling_score"), 4),
+        ),
         stat_card("Signal", fmt_number((status or {}).get("execution_signal"), 4)),
         stat_card("Action", (status or {}).get("action_recommendation", "--")),
         stat_card("Runtime Block", (status or {}).get("runtime_block_reason", "none")),
@@ -374,6 +444,7 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
         stat_card("Snapshot Age", human_age(status_timestamp, now)),
     ])
 
+    weather_rows = weather_metric_rows(status)
     runtime_rows = key_value_rows([
         ("Timestamp", status_timestamp or "--"),
         ("Strategy File", (status or {}).get("strategy_profile", "--")),
@@ -501,6 +572,9 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
     .card.stale {{ border-top: 4px solid var(--stale); }}
     .card.positive {{ border-top: 4px solid var(--positive); }}
     .card.negative {{ border-top: 4px solid var(--negative); }}
+    .card.danger {{ border-top: 4px solid var(--negative); }}
+    .card.watch {{ border-top: 4px solid var(--guarded); }}
+    .card.caution {{ border-top: 4px solid var(--guarded); }}
     .label {{
       font-size: 0.8rem;
       text-transform: uppercase;
@@ -597,6 +671,10 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
     </section>
 
     <section class="two">
+      <div class="panel">
+        <h2>Market Weather</h2>
+        <table>{weather_rows}</table>
+      </div>
       <div class="panel">
         <h2>Current Grid Levels</h2>
         <table>{grid_level_rows}</table>

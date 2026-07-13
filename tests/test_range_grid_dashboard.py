@@ -49,6 +49,26 @@ class RangeGridDashboardTests(unittest.TestCase):
                         "realized_pnl_today": 1.25,
                         "sell_backlog_count": 3,
                         "sell_backlog_oldest_minutes": 42.0,
+                        "weather_report_available": True,
+                        "weather_condition": "breakout_tailwind",
+                        "weather_alert_level": "watch",
+                        "weather_trade_permission": "bot_decides",
+                        "weather_bot_decision_authority": "bot",
+                        "weather_emergency_bell": False,
+                        "weather_opportunity_tags": ["breakout_tailwind"],
+                        "weather_risk_warnings": ["source_health_degraded"],
+                        "weather_position_size_multiplier": 0.32,
+                        "weather_grid_aggression_multiplier": 0.68,
+                        "weather_target_profit_multiplier": 1.08,
+                        "weather_entry_discount_multiplier": 0.96,
+                        "weather_leveling_state": "leveling",
+                        "weather_leveling_score": 0.82,
+                        "weather_market_range_zone": "middle_range",
+                        "weather_market_range_position": 0.7402,
+                        "weather_market_distance_to_recent_high_pct": 0.7853,
+                        "weather_market_distance_from_recent_low_pct": 2.2885,
+                        "weather_market_price_return_24h_pct": 1.5441,
+                        "weather_market_price_return_4h_pct": -0.4585,
                     },
                     f,
                 )
@@ -137,6 +157,11 @@ class RangeGridDashboardTests(unittest.TestCase):
             self.assertIn("Order tracker update failed", html_text)
             self.assertIn("250.55", html_text)
             self.assertIn("Current Grid Levels", html_text)
+            self.assertIn("Market Weather", html_text)
+            self.assertIn("breakout_tailwind", html_text)
+            self.assertIn("source_health_degraded", html_text)
+            self.assertIn("middle_range", html_text)
+            self.assertIn("0.8200", html_text)
             self.assertIn("Execution Quality", html_text)
             self.assertIn("Recent Approved Candidates", html_text)
             self.assertIn("Lifetime Approved Candidates", html_text)
