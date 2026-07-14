@@ -241,6 +241,15 @@ def snapshot_timestamp(snapshot):
     return parse_iso8601(snapshot.get("captured_at"))
 
 
+def buy_above_last_sell_guard_active(last_sell_at, now, guard_minutes):
+    if guard_minutes <= 0:
+        return True
+    if last_sell_at is None or now is None:
+        return True
+    elapsed_minutes = (now - last_sell_at).total_seconds() / 60
+    return elapsed_minutes <= guard_minutes
+
+
 def repo_root():
     return os.path.dirname(os.path.abspath(__file__))
 
@@ -2566,8 +2575,12 @@ def evaluate_candidate(snapshot, candidate, price):
     key = str(candidate["level"])
 
     last_sell_price = positive_or_default(state_info.get("last_sell_price"))
+    last_sell_at = parse_iso8601(state_info.get("last_sell_at"))
     prevent_buy_above_last_sell = bool(config.get("prevent_buy_above_last_sell", True))
     buy_after_sell_discount_pct = safe_float(config.get("buy_after_sell_discount_pct")) or 0.001
+    buy_above_last_sell_guard_minutes = (
+        safe_float(config.get("buy_above_last_sell_guard_minutes")) or 0.0
+    )
     mean_reversion_opportunity = safe_float(signal.get("mean_reversion_opportunity")) or 0.0
     mean_reversion_min_opportunity = safe_float(config.get("mean_reversion_min_opportunity")) or 0.0
     flow_pressure = safe_float(signal.get("flow_pressure"))
@@ -2598,6 +2611,11 @@ def evaluate_candidate(snapshot, candidate, price):
             weather_report,
         )
         and last_sell_price is not None
+        and buy_above_last_sell_guard_active(
+            last_sell_at,
+            snapshot_timestamp(snapshot),
+            buy_above_last_sell_guard_minutes,
+        )
         and level > (last_sell_price * (1 - buy_after_sell_discount_pct))
     ):
         return False, "above_last_sell_discount"

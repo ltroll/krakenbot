@@ -575,6 +575,10 @@ buy_after_sell_discount_pct = profile_float(
     "buy_after_sell_discount_pct",
     0.001
 )
+buy_above_last_sell_guard_minutes = profile_float(
+    "buy_above_last_sell_guard_minutes",
+    float(os.getenv("RANGE_GRID_BUY_ABOVE_LAST_SELL_GUARD_MINUTES", "0"))
+)
 llm_buy_cooldown_minutes_after_sell = profile_int(
     "llm_buy_cooldown_minutes_after_sell",
     30
@@ -2448,6 +2452,15 @@ def llm_sell_cooldown_remaining_minutes(now):
     return max(0, llm_buy_cooldown_minutes_after_sell - elapsed_minutes)
 
 
+def buy_above_last_sell_guard_active(last_sell_at, now, guard_minutes):
+    if guard_minutes <= 0:
+        return True
+    if last_sell_at is None:
+        return True
+    elapsed_minutes = (now - last_sell_at).total_seconds() / 60
+    return elapsed_minutes <= guard_minutes
+
+
 # ----------------------
 # ORDER HELPERS
 # ----------------------
@@ -3692,6 +3705,7 @@ def main():
         high_anchor_profit_target_pct=high_anchor_profit_target_pct,
         prevent_buy_above_last_sell=prevent_buy_above_last_sell,
         buy_after_sell_discount_pct=buy_after_sell_discount_pct,
+        buy_above_last_sell_guard_minutes=buy_above_last_sell_guard_minutes,
         allow_high_band_breakout_above_last_sell=(
             allow_high_band_breakout_above_last_sell
         ),
@@ -5017,6 +5031,7 @@ def main():
                     for sell_order in state["open_sell_orders"].values()
                 }
                 last_sell_price = positive_float(state.get("last_sell_price"))
+                last_sell_at = parse_iso8601(state.get("last_sell_at"))
                 llm_sell_cooldown_remaining = (
                     llm_sell_cooldown_remaining_minutes(now)
                 )
@@ -5156,6 +5171,11 @@ def main():
                         prevent_buy_above_last_sell
                         and not above_last_sell_breakout_bypass
                         and last_sell_price is not None
+                        and buy_above_last_sell_guard_active(
+                            last_sell_at,
+                            now,
+                            buy_above_last_sell_guard_minutes,
+                        )
                         and level > (
                             last_sell_price * (1 - buy_after_sell_discount_pct)
                         )
