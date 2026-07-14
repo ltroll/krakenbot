@@ -2350,10 +2350,22 @@ def compute_grid(anchor, step_pct, grid_size):
     )
 
 
-def compute_high_anchor_grid(high, price, step_pct):
+def compute_high_anchor_grid(
+    high,
+    price,
+    step_pct,
+    breakout_extension_pct=0.0,
+    allow_breakout_extension=False,
+):
     lower_bound = high * (1 - step_pct)
 
     if lower_bound <= price <= high:
+        return [price]
+    if (
+        allow_breakout_extension
+        and breakout_extension_pct > 0
+        and high < price <= high * (1 + breakout_extension_pct)
+    ):
         return [price]
 
     return []
@@ -4908,6 +4920,16 @@ def main():
                                 high,
                                 price,
                                 route_entry_step_pct,
+                                strategy_float(
+                                    route_config,
+                                    "high_anchor_breakout_extension_pct",
+                                    strategy_float(
+                                        strategy_config,
+                                        "high_anchor_breakout_extension_pct",
+                                        0.0,
+                                    ),
+                                ),
+                                weather_high_anchor_allowed,
                             )
                             sell_pct_override = strategy_float(
                                 route_config,

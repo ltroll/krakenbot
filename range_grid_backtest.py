@@ -1976,9 +1976,21 @@ def write_ranked_strategy_csv(comparison, output_path):
     return resolved
 
 
-def compute_high_anchor_grid(high, price, entry_step_pct):
+def compute_high_anchor_grid(
+    high,
+    price,
+    entry_step_pct,
+    breakout_extension_pct=0.0,
+    allow_breakout_extension=False,
+):
     lower_bound = high * (1 - entry_step_pct)
     if lower_bound <= price <= high:
+        return [price]
+    if (
+        allow_breakout_extension
+        and breakout_extension_pct > 0
+        and high < price <= high * (1 + breakout_extension_pct)
+    ):
         return [price]
     return []
 
@@ -2459,7 +2471,14 @@ def build_candidates(snapshot, price):
             elif strategy_mode == "high":
                 if not allow_high_anchor:
                     continue
-                grid = compute_high_anchor_grid(high, price, effective_step_pct)
+                grid = compute_high_anchor_grid(
+                    high,
+                    price,
+                    effective_step_pct,
+                    safe_float(config.get("high_anchor_breakout_extension_pct"))
+                    or 0.0,
+                    weather_high_anchor_tailwind(weather_report),
+                )
                 sell_pct_override = safe_float(config.get("high_anchor_profit_target_pct"))
                 buy_source = "range_high_band"
             else:

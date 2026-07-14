@@ -2174,6 +2174,38 @@ class RangeGridBacktestTests(unittest.TestCase):
             ),
         )
 
+    def test_high_anchor_grid_can_extend_slightly_above_recent_high(self):
+        self.assertEqual(
+            backtest.compute_high_anchor_grid(
+                high=100.0,
+                price=100.3,
+                entry_step_pct=0.002,
+                breakout_extension_pct=0.004,
+                allow_breakout_extension=True,
+            ),
+            [100.3],
+        )
+        self.assertEqual(
+            backtest.compute_high_anchor_grid(
+                high=100.0,
+                price=100.3,
+                entry_step_pct=0.002,
+                breakout_extension_pct=0.004,
+                allow_breakout_extension=False,
+            ),
+            [],
+        )
+        self.assertEqual(
+            backtest.compute_high_anchor_grid(
+                high=100.0,
+                price=100.5,
+                entry_step_pct=0.002,
+                breakout_extension_pct=0.004,
+                allow_breakout_extension=True,
+            ),
+            [],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
