@@ -2956,6 +2956,9 @@ def summarize_actual_trades(events):
             return str(event["txid"])
         return None
 
+    def event_time(event):
+        return parse_iso8601(event.get("ts")) or parse_iso8601(event.get("cycle_id"))
+
     def close_enough(left, right, tolerance=0.00000001):
         left_value = safe_float(left)
         right_value = safe_float(right)
@@ -3027,8 +3030,14 @@ def summarize_actual_trades(events):
     hold_minutes = []
     buy_cohorts = {}
     anonymous_cohort_count = 0
+    reference_time = None
 
     for event in events:
+        ts_value = event_time(event)
+        if ts_value is not None and (
+            reference_time is None or ts_value > reference_time
+        ):
+            reference_time = ts_value
         name = event.get("event")
         if name == "BUY_ORDER_PLACED":
             summary["buy_orders_placed"] += 1
@@ -3341,6 +3350,7 @@ def summarize_actual_trades(events):
         "match_methods": Counter(),
     })
     completed_round_trips = []
+    open_filled_cohorts = []
     matched_sell_count = 0
     matched_buy_notional = 0.0
     matched_sell_notional = 0.0
@@ -3360,6 +3370,24 @@ def summarize_actual_trades(events):
             and cohort.get("sell_event") is None
         ):
             source_stats["open_filled_cohorts"] += 1
+            fill_event = cohort.get("buy_filled_event")
+            fill_time = event_time(fill_event)
+            age_minutes = None
+            if fill_time is not None and reference_time is not None:
+                age_minutes = max(
+                    0.0,
+                    (reference_time - fill_time).total_seconds() / 60,
+                )
+            open_filled_cohorts.append({
+                "trade_id": cohort.get("trade_id"),
+                "buy_source": source,
+                "buy_ts": fill_event.get("ts"),
+                "buy_price": fill_event.get("price") or cohort.get("buy_price"),
+                "volume": fill_event.get("volume") or cohort.get("volume"),
+                "age_minutes": round(age_minutes, 2)
+                if age_minutes is not None
+                else None,
+            })
         sell_event = cohort.get("sell_event")
         if sell_event is None:
             continue
@@ -3511,8 +3539,146 @@ def summarize_actual_trades(events):
         "match_methods": dict(match_methods.most_common()),
         "by_source": cohort_source_output,
         "recent_completed_round_trips": completed_round_trips[-BACKTEST_RECENT_LIMIT:],
+        "oldest_open_filled_cohort_age_minutes": (
+            max(
+                (
+                    item["age_minutes"]
+                    for item in open_filled_cohorts
+                    if item.get("age_minutes") is not None
+                ),
+                default=None,
+            )
+        ),
+        "recent_open_filled_cohorts": open_filled_cohorts[-BACKTEST_RECENT_LIMIT:],
     }
     return summary
+
+
+def build_backtest_watchlist(replay, actual, missed):
+    def add_item(items, severity, code, message, **fields):
+        item = {
+            "severity": severity,
+            "code": code,
+            "message": message,
+        }
+        item.update(fields)
+        items.append(item)
+
+    items = []
+    shadow = actual.get("shadow_to_real_summary") or {}
+    cohort = actual.get("round_trip_cohort_summary") or {}
+
+    shadow_planned = int(shadow.get("shadow_buys_planned") or 0)
+    real_placed = int(shadow.get("real_buys_placed") or 0)
+    real_filled = int(shadow.get("real_buys_filled") or 0)
+    placed_not_filled = int(shadow.get("placed_not_filled_count_estimate") or 0)
+    open_filled = int(cohort.get("open_filled_cohorts") or 0)
+    unmatched_sells = int(cohort.get("unmatched_sell_exits") or 0)
+    matched_exits = int(cohort.get("matched_sell_exits") or 0)
+    cohort_exit_rate = safe_float(cohort.get("cohort_exit_rate"))
+    oldest_open_age = safe_float(
+        cohort.get("oldest_open_filled_cohort_age_minutes")
+    )
+
+    if shadow_planned and real_placed == 0:
+        add_item(
+            items,
+            "warning",
+            "shadow_without_real_orders",
+            "Risk-context shadow buys were planned, but no live buys were placed.",
+            shadow_buys_planned=shadow_planned,
+            real_buys_placed=real_placed,
+        )
+
+    if placed_not_filled > 0:
+        add_item(
+            items,
+            "warning",
+            "placed_orders_not_filled",
+            "Some live buy orders were placed but have not filled in the report window.",
+            placed_not_filled_count=placed_not_filled,
+        )
+
+    if open_filled > 0:
+        severity = "warning" if oldest_open_age and oldest_open_age >= 720 else "info"
+        add_item(
+            items,
+            severity,
+            "open_filled_cohorts",
+            "Filled buy cohorts are still waiting for matched sell exits.",
+            open_filled_cohorts=open_filled,
+            oldest_open_filled_cohort_age_minutes=oldest_open_age,
+        )
+
+    if unmatched_sells > 0:
+        add_item(
+            items,
+            "info",
+            "unmatched_sell_exits",
+            "Some sell exits were from older inventory or logs without a cohort match.",
+            unmatched_sell_exits=unmatched_sells,
+            matched_sell_exits=matched_exits,
+            match_methods=cohort.get("match_methods") or {},
+        )
+
+    if real_filled >= 3 and cohort_exit_rate is not None and cohort_exit_rate < 0.5:
+        add_item(
+            items,
+            "info",
+            "low_same_window_exit_rate",
+            "Same-window matched cohort exit rate is below 50%.",
+            cohort_exit_rate=cohort_exit_rate,
+            buy_cohorts_filled=real_filled,
+            matched_sell_exits=matched_exits,
+        )
+
+    match_methods = cohort.get("match_methods") or {}
+    if matched_exits > 0 and not match_methods.get("trade_id"):
+        add_item(
+            items,
+            "info",
+            "cohort_matches_without_trade_id",
+            "Matched round trips are using fallback matching; future logs should move to trade_id matches.",
+            match_methods=match_methods,
+        )
+
+    approved_but_not_placed = int(missed.get("approved_but_not_placed") or 0)
+    approved_candidates = int(missed.get("approved_candidates") or 0)
+    if approved_candidates and approved_but_not_placed > real_placed * 10:
+        add_item(
+            items,
+            "info",
+            "large_replay_live_gap",
+            "Replay approved far more candidates than live execution placed.",
+            approved_candidates=approved_candidates,
+            approved_but_not_placed=approved_but_not_placed,
+            real_buys_placed=real_placed,
+            placement_rate_vs_approved=missed.get("placement_rate_vs_approved"),
+        )
+
+    return {
+        "status": "attention" if any(
+            item["severity"] == "warning" for item in items
+        ) else "ok",
+        "item_count": len(items),
+        "warning_count": sum(1 for item in items if item["severity"] == "warning"),
+        "info_count": sum(1 for item in items if item["severity"] == "info"),
+        "items": items,
+        "summary": {
+            "shadow_buys_planned": shadow_planned,
+            "real_buys_placed": real_placed,
+            "real_buys_filled": real_filled,
+            "matched_sell_exits": matched_exits,
+            "unmatched_sell_exits": unmatched_sells,
+            "open_filled_cohorts": open_filled,
+            "oldest_open_filled_cohort_age_minutes": oldest_open_age,
+            "cohort_exit_rate": cohort_exit_rate,
+        },
+        "notes": [
+            "Watchlist items are report-only diagnostics and do not affect live trading.",
+            "Cohort matching is strongest when activity events include trade_id.",
+        ],
+    }
 
 
 def summarize_missed_approved_opportunities(replay, actual, snapshots=None):
@@ -3712,6 +3878,7 @@ def build_report(window_hours=None):
     replay = replay_from_snapshots(snapshots)
     actual = summarize_actual_trades(events)
     missed = summarize_missed_approved_opportunities(replay, actual, snapshots)
+    watchlist = build_backtest_watchlist(replay, actual, missed)
     replay_output = dict(replay)
     replay_output.pop("approved_events", None)
     strategy_comparison = None
@@ -3734,6 +3901,7 @@ def build_report(window_hours=None):
         "replay": replay_output,
         "actual_live": actual,
         "missed_opportunities": missed,
+        "watchlist": watchlist,
         "top_summary": {
             "replay_scope": replay["replay_scope"],
             "approved_candidates": replay["summary"]["approved_candidates"],

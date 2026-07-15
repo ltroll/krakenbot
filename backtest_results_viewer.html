@@ -181,12 +181,23 @@
       margin-bottom: 14px;
     }
 
+    .report-panels {
+      display: none;
+      grid-template-columns: repeat(4, minmax(220px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
     .panel {
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--panel);
       box-shadow: var(--shadow);
       padding: 14px;
+    }
+
+    .report-card {
+      min-height: 116px;
     }
 
     .panel h2 {
@@ -205,6 +216,40 @@
     .readout strong {
       color: var(--text);
       font-weight: 700;
+    }
+
+    .kv {
+      display: grid;
+      grid-template-columns: minmax(110px, 1fr) auto;
+      gap: 6px 10px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+
+    .kv strong {
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .watch-items {
+      grid-column: 1 / -1;
+    }
+
+    .watch-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .watch-item {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fbfcfd;
+    }
+
+    .watch-item .code {
+      font-weight: 750;
+      margin-bottom: 4px;
     }
 
     .toolbar {
@@ -361,6 +406,7 @@
 
       .bar,
       .decision,
+      .report-panels,
       .toolbar,
       .paste.open {
         grid-template-columns: 1fr;
@@ -393,10 +439,11 @@
       </div>
       <div class="actions">
         <button type="button" id="rangeBtn">Range Ranked</button>
+        <button type="button" id="rangeJsonBtn">Range JSON</button>
         <button type="button" id="llmBtn">LLM Ranked</button>
         <label class="file-button">
-          Open CSV
-          <input type="file" id="fileInput" accept=".csv,text/csv">
+          Open File
+          <input type="file" id="fileInput" accept=".csv,.json,text/csv,application/json">
         </label>
         <button type="button" id="pasteBtn">Paste</button>
         <button type="button" id="copyBtn">Copy Visible CSV</button>
@@ -423,6 +470,8 @@
       </div>
     </section>
 
+    <section class="report-panels" id="reportPanel"></section>
+
     <section class="toolbar">
       <input type="search" id="searchInput" placeholder="Search strategy, mode, anchor, file">
       <select id="typeFilter">
@@ -447,6 +496,7 @@
 
   <script>
     const RANGE_DEFAULT = "range_grid_backtest_strategy_ranked.csv";
+    const RANGE_JSON_DEFAULT = "range_grid_backtest.json";
     const LLM_DEFAULT = "llm_target_strategy_ranked.csv";
 
     const state = {
@@ -457,6 +507,7 @@
       sortKey: "practical_score",
       sortDir: -1,
       selectedIndex: null,
+      report: null,
     };
 
     const preferredColumns = {
@@ -508,6 +559,7 @@
     const els = {
       sourceLabel: document.getElementById("sourceLabel"),
       rangeBtn: document.getElementById("rangeBtn"),
+      rangeJsonBtn: document.getElementById("rangeJsonBtn"),
       llmBtn: document.getElementById("llmBtn"),
       fileInput: document.getElementById("fileInput"),
       pasteBtn: document.getElementById("pasteBtn"),
@@ -518,6 +570,7 @@
       summary: document.getElementById("summary"),
       topReadout: document.getElementById("topReadout"),
       runReadout: document.getElementById("runReadout"),
+      reportPanel: document.getElementById("reportPanel"),
       searchInput: document.getElementById("searchInput"),
       typeFilter: document.getElementById("typeFilter"),
       minApproved: document.getElementById("minApproved"),
@@ -631,6 +684,18 @@
       return value.toFixed(digits);
     }
 
+    function formatUsd(value) {
+      if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
+      return `$${value.toFixed(2)}`;
+    }
+
+    function formatMinutes(value) {
+      if (typeof value !== "number" || !Number.isFinite(value)) return "n/a";
+      if (value >= 1440) return `${(value / 1440).toFixed(1)}d`;
+      if (value >= 60) return `${(value / 60).toFixed(1)}h`;
+      return `${value.toFixed(0)}m`;
+    }
+
     function classForValue(value, key) {
       if (typeof value !== "number") return "";
       if (key.includes("drawdown") || key.includes("stop_loss") || key.includes("blocked")) {
@@ -653,6 +718,7 @@
       state.rows = parsed.data;
       state.columns = parsed.headers;
       state.source = source;
+      state.report = null;
       state.sortKey = state.columns.includes("practical_score") ? "practical_score" : state.columns[0];
       state.sortDir = -1;
       state.selectedIndex = null;
@@ -660,11 +726,40 @@
       render();
     }
 
+    function loadJsonReport(text, source) {
+      const report = typeof text === "string" ? JSON.parse(text) : text;
+      const rows = report?.strategy_comparison?.rows || [];
+      const columns = [];
+      rows.forEach((row) => {
+        Object.keys(row).forEach((key) => {
+          if (!columns.includes(key)) columns.push(key);
+        });
+      });
+      state.rows = rows;
+      state.columns = columns;
+      state.source = source;
+      state.report = report;
+      state.sortKey = state.columns.includes("practical_score") ? "practical_score" : state.columns[0];
+      state.sortDir = -1;
+      state.selectedIndex = null;
+      els.sourceLabel.textContent = `${source} - ${state.rows.length} strategy rows`;
+      render();
+    }
+
+    function loadText(text, source) {
+      const trimmed = text.trim();
+      if (trimmed.startsWith("{")) {
+        loadJsonReport(trimmed, source);
+      } else {
+        loadCsv(text, source);
+      }
+    }
+
     async function loadUrl(path) {
       try {
         const response = await fetch(path, { cache: "no-store" });
         if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-        loadCsv(await response.text(), path);
+        loadText(await response.text(), path);
       } catch (error) {
         els.sourceLabel.textContent = `Could not load ${path}`;
         els.tableShell.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
@@ -713,6 +808,7 @@
         els.summary.innerHTML = "";
         els.topReadout.innerHTML = "";
         els.runReadout.innerHTML = "";
+        renderReportPanel();
         els.tableShell.innerHTML = '<div class="empty">Load a ranked backtest CSV to inspect the results.</div>';
         return;
       }
@@ -720,7 +816,84 @@
       state.filtered = filteredRows();
       renderSummary();
       renderReadouts();
+      renderReportPanel();
       renderTable();
+    }
+
+    function metricRows(items) {
+      return `<div class="kv">${items.map(([label, value]) => `
+        <span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong>
+      `).join("")}</div>`;
+    }
+
+    function renderReportPanel() {
+      const report = state.report;
+      if (!report) {
+        els.reportPanel.style.display = "none";
+        els.reportPanel.innerHTML = "";
+        return;
+      }
+
+      const actual = report.actual_live || {};
+      const shadow = actual.shadow_to_real_summary || {};
+      const cohort = actual.round_trip_cohort_summary || {};
+      const capital = actual.capital_recycling_summary || {};
+      const watchlist = report.watchlist || {};
+      const top = report.top_summary || {};
+      const watchItems = watchlist.items || [];
+
+      const watchHtml = watchItems.length
+        ? watchItems.map((item) => `
+          <div class="watch-item">
+            <div class="code">${severityPill(item.severity)} ${escapeHtml(item.code || "watch")}</div>
+            <div>${escapeHtml(item.message || "")}</div>
+          </div>
+        `).join("")
+        : '<div class="watch-item"><div class="code"><span class="pill good">ok</span> No report watchlist items.</div></div>';
+
+      els.reportPanel.style.display = "grid";
+      els.reportPanel.innerHTML = `
+        <article class="panel report-card">
+          <h2>Replay vs Live</h2>
+          ${metricRows([
+            ["Approved", top.approved_candidates ?? "n/a"],
+            ["Placed", top.actual_buy_orders_placed ?? "n/a"],
+            ["Placement rate", formatRate(top.placement_rate_vs_approved)],
+            ["Missed", top.approved_but_not_placed ?? "n/a"],
+          ])}
+        </article>
+        <article class="panel report-card">
+          <h2>Shadow Conversion</h2>
+          ${metricRows([
+            ["Shadow planned", shadow.shadow_buys_planned ?? "n/a"],
+            ["Real placed", shadow.real_buys_placed ?? "n/a"],
+            ["Real filled", shadow.real_buys_filled ?? "n/a"],
+            ["Fill to exit", formatRate(shadow.real_fill_to_exit_rate)],
+          ])}
+        </article>
+        <article class="panel report-card">
+          <h2>Round Trips</h2>
+          ${metricRows([
+            ["Matched exits", cohort.matched_sell_exits ?? "n/a"],
+            ["Open cohorts", cohort.open_filled_cohorts ?? "n/a"],
+            ["Unmatched exits", cohort.unmatched_sell_exits ?? "n/a"],
+            ["Cohort exit", formatRate(cohort.cohort_exit_rate)],
+          ])}
+        </article>
+        <article class="panel report-card">
+          <h2>Capital Recycling</h2>
+          ${metricRows([
+            ["Matched net", formatUsd(cohort.matched_realized_estimated_net_pnl)],
+            ["Matched return", displayValue(cohort.matched_net_pnl_per_buy_notional_pct, "pct")],
+            ["Matched hold", formatMinutes(cohort.average_matched_hold_minutes)],
+            ["Oldest open", formatMinutes(cohort.oldest_open_filled_cohort_age_minutes)],
+          ])}
+        </article>
+        <article class="panel watch-items">
+          <h2>Watchlist ${severityPill(watchlist.status === "attention" ? "warning" : "ok")}</h2>
+          <div class="watch-list">${watchHtml}</div>
+        </article>
+      `;
     }
 
     function renderSummary() {
@@ -868,6 +1041,12 @@
       return `<span class="pill ${cls}">${escapeHtml(displayValue(value, key))}</span>`;
     }
 
+    function severityPill(severity) {
+      if (severity === "warning") return '<span class="pill warn">watch</span>';
+      if (severity === "ok") return '<span class="pill good">ok</span>';
+      return '<span class="pill neutral">info</span>';
+    }
+
     function labelFor(key) {
       return key.replaceAll("_", " ");
     }
@@ -913,17 +1092,18 @@
     }
 
     els.rangeBtn.addEventListener("click", () => loadUrl(RANGE_DEFAULT));
+    els.rangeJsonBtn.addEventListener("click", () => loadUrl(RANGE_JSON_DEFAULT));
     els.llmBtn.addEventListener("click", () => loadUrl(LLM_DEFAULT));
     els.fileInput.addEventListener("change", async (event) => {
       const file = event.target.files?.[0];
       if (!file) return;
-      loadCsv(await file.text(), file.name);
+      loadText(await file.text(), file.name);
     });
     els.pasteBtn.addEventListener("click", () => {
       els.pastePanel.classList.toggle("open");
       if (els.pastePanel.classList.contains("open")) els.pasteText.focus();
     });
-    els.loadPasteBtn.addEventListener("click", () => loadCsv(els.pasteText.value, "pasted CSV"));
+    els.loadPasteBtn.addEventListener("click", () => loadText(els.pasteText.value, "pasted data"));
     els.copyBtn.addEventListener("click", copyVisibleCsv);
     els.searchInput.addEventListener("input", render);
     els.typeFilter.addEventListener("change", render);

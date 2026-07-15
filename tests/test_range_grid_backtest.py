@@ -1446,6 +1446,66 @@ class RangeGridBacktestTests(unittest.TestCase):
             {"trade_id": 1},
         )
 
+    def test_backtest_watchlist_reports_open_cohorts_and_unmatched_sells(self):
+        actual = {
+            "shadow_to_real_summary": {
+                "shadow_buys_planned": 2,
+                "real_buys_placed": 2,
+                "real_buys_filled": 2,
+                "placed_not_filled_count_estimate": 0,
+            },
+            "round_trip_cohort_summary": {
+                "buy_cohorts_filled": 2,
+                "matched_sell_exits": 1,
+                "unmatched_sell_exits": 1,
+                "open_filled_cohorts": 1,
+                "cohort_exit_rate": 0.5,
+                "oldest_open_filled_cohort_age_minutes": 800,
+                "match_methods": {"source_price_volume": 1},
+            },
+        }
+        missed = {
+            "approved_candidates": 2,
+            "approved_but_not_placed": 0,
+            "placement_rate_vs_approved": 1.0,
+        }
+
+        watchlist = backtest.build_backtest_watchlist({}, actual, missed)
+
+        self.assertEqual(watchlist["status"], "attention")
+        codes = {item["code"] for item in watchlist["items"]}
+        self.assertIn("open_filled_cohorts", codes)
+        self.assertIn("unmatched_sell_exits", codes)
+        self.assertIn("cohort_matches_without_trade_id", codes)
+        self.assertEqual(
+            watchlist["summary"]["oldest_open_filled_cohort_age_minutes"],
+            800,
+        )
+
+    def test_backtest_watchlist_flags_shadow_without_real_orders(self):
+        actual = {
+            "shadow_to_real_summary": {
+                "shadow_buys_planned": 3,
+                "real_buys_placed": 0,
+                "real_buys_filled": 0,
+                "placed_not_filled_count_estimate": 0,
+            },
+            "round_trip_cohort_summary": {},
+        }
+        missed = {
+            "approved_candidates": 3,
+            "approved_but_not_placed": 3,
+            "placement_rate_vs_approved": 0.0,
+        }
+
+        watchlist = backtest.build_backtest_watchlist({}, actual, missed)
+
+        self.assertEqual(watchlist["status"], "attention")
+        self.assertIn(
+            "shadow_without_real_orders",
+            {item["code"] for item in watchlist["items"]},
+        )
+
     def test_replay_risk_modulated_blocks_high_range_during_blocked_calibration(self):
         snapshots = [
             make_snapshot(
