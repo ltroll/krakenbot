@@ -1319,7 +1319,37 @@ class RangeGridBacktestTests(unittest.TestCase):
                 "trade_notional_usd": 10.45,
                 "risk_context_position_size_effective_multiplier": 0.675,
                 "sentiment_risk_posture": "neutral_watch",
-            }
+            },
+            {
+                "ts": "2026-06-13T12:01:00+00:00",
+                "event": "BUY_ORDER_PLACED",
+                "buy_source": "range_high_band",
+                "price": 104.5,
+                "volume": 0.1,
+                "trade_notional_usd": 10.45,
+            },
+            {
+                "ts": "2026-06-13T12:02:00+00:00",
+                "event": "BUY_ORDER_FILLED",
+                "buy_source": "range_high_band",
+            },
+            {
+                "ts": "2026-06-13T14:02:00+00:00",
+                "event": "SELL_ORDER_FILLED",
+                "buy_source": "range_high_band",
+                "buy_price": 104.5,
+                "sell_price": 107.0,
+                "volume": 0.1,
+                "gross_pnl": 0.25,
+                "estimated_net_pnl": 0.18,
+                "hold_minutes": 120,
+            },
+            {
+                "ts": "2026-06-13T12:03:00+00:00",
+                "event": "BUY_CANDIDATE_SKIPPED",
+                "buy_source": "range_high_band",
+                "reason": "max_open_sell_orders",
+            },
         ]
 
         summary = backtest.summarize_actual_trades(events)
@@ -1334,6 +1364,44 @@ class RangeGridBacktestTests(unittest.TestCase):
                 "risk_context_position_size_effective_multiplier"
             ],
             0.675,
+        )
+        self.assertEqual(
+            summary["shadow_to_real_summary"]["paper_to_real_placement_rate"],
+            1.0,
+        )
+        self.assertEqual(
+            summary["shadow_to_real_summary"]["real_fill_to_exit_rate"],
+            1.0,
+        )
+        self.assertEqual(
+            summary["shadow_vs_real_by_source"]["range_high_band"][
+                "paper_to_real_placement_delta"
+            ],
+            0,
+        )
+        self.assertEqual(
+            summary["candidate_skip_reason_counts"],
+            {"max_open_sell_orders": 1},
+        )
+        self.assertEqual(
+            summary["capital_recycling_summary"]["total_buy_notional_usd"],
+            10.45,
+        )
+        self.assertEqual(
+            summary["capital_recycling_summary"]["total_sell_notional_usd"],
+            10.7,
+        )
+        self.assertEqual(
+            summary["capital_recycling_summary"][
+                "realized_net_pnl_per_buy_notional_pct"
+            ],
+            1.7225,
+        )
+        self.assertEqual(
+            summary["capital_recycling_summary"]["by_source"]["range_high_band"][
+                "average_hold_minutes"
+            ],
+            120,
         )
 
     def test_replay_risk_modulated_blocks_high_range_during_blocked_calibration(self):

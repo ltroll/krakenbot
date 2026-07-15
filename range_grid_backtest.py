@@ -2919,6 +2919,31 @@ def replay_from_snapshots(snapshots):
 
 
 def summarize_actual_trades(events):
+    def event_source(event):
+        return (
+            event.get("buy_source")
+            or event.get("source")
+            or event.get("level_source")
+            or "unknown"
+        )
+
+    def event_notional(event):
+        direct = safe_float(event.get("trade_notional_usd"))
+        if direct is not None:
+            return direct
+        price = safe_float(event.get("price"))
+        if price is None:
+            price = safe_float(event.get("sell_price"))
+        if price is None:
+            price = safe_float(event.get("buy_price"))
+        volume = safe_float(event.get("volume"))
+        if price is None or volume is None:
+            return None
+        return price * volume
+
+    def rate(numerator, denominator):
+        return round(numerator / denominator, 4) if denominator else None
+
     summary = {
         "events": len(events),
         "buy_orders_placed": 0,
@@ -2930,6 +2955,8 @@ def summarize_actual_trades(events):
         "risk_context_paper_buys_planned": 0,
         "realized_gross_pnl": 0.0,
         "realized_estimated_net_pnl": 0.0,
+        "candidate_skip_reason_counts": {},
+        "candidate_skip_reasons_by_source": {},
         "buy_orders_placed_by_source": {},
         "risk_context_paper_buys_by_source": {},
         "buy_filled_by_source": {},
@@ -2944,24 +2971,47 @@ def summarize_actual_trades(events):
     buy_filled_by_source = Counter()
     sell_filled_by_source = Counter()
     rejected_by_side = Counter()
+    candidate_skip_reason_counts = Counter()
+    candidate_skip_reasons_by_source = defaultdict(Counter)
+    capital_by_source = defaultdict(lambda: {
+        "risk_context_paper_buys_planned": 0,
+        "buy_orders_placed": 0,
+        "buy_orders_filled": 0,
+        "sell_orders_filled": 0,
+        "paper_notional_usd": 0.0,
+        "buy_notional_usd": 0.0,
+        "sell_notional_usd": 0.0,
+        "realized_gross_pnl": 0.0,
+        "realized_estimated_net_pnl": 0.0,
+        "hold_minutes": [],
+    })
     hold_minutes = []
 
     for event in events:
         name = event.get("event")
         if name == "BUY_ORDER_PLACED":
             summary["buy_orders_placed"] += 1
-            buy_orders_placed_by_source[event.get("buy_source") or "unknown"] += 1
+            source = event_source(event)
+            buy_orders_placed_by_source[source] += 1
+            capital_by_source[source]["buy_orders_placed"] += 1
+            notional = event_notional(event)
+            if notional is not None:
+                capital_by_source[source]["buy_notional_usd"] += notional
             summary["recent_buy_orders"].append({
                 "ts": event.get("ts"),
                 "buy_source": event.get("buy_source"),
                 "price": event.get("price"),
                 "volume": event.get("volume"),
+                "trade_notional_usd": event.get("trade_notional_usd"),
             })
         elif name == "RISK_CONTEXT_PAPER_BUY_PLANNED":
             summary["risk_context_paper_buys_planned"] += 1
-            risk_context_paper_buys_by_source[
-                event.get("buy_source") or "unknown"
-            ] += 1
+            source = event_source(event)
+            risk_context_paper_buys_by_source[source] += 1
+            capital_by_source[source]["risk_context_paper_buys_planned"] += 1
+            notional = event_notional(event)
+            if notional is not None:
+                capital_by_source[source]["paper_notional_usd"] += notional
             summary["recent_risk_context_paper_buys"].append({
                 "ts": event.get("ts"),
                 "buy_source": event.get("buy_source"),
@@ -2977,16 +3027,30 @@ def summarize_actual_trades(events):
             })
         elif name == "BUY_ORDER_FILLED":
             summary["buy_orders_filled"] += 1
-            buy_filled_by_source[event.get("buy_source") or "unknown"] += 1
+            source = event_source(event)
+            buy_filled_by_source[source] += 1
+            capital_by_source[source]["buy_orders_filled"] += 1
         elif name == "SELL_ORDER_PLACED":
             summary["sell_orders_placed"] += 1
         elif name == "SELL_ORDER_FILLED":
             summary["sell_orders_filled"] += 1
-            sell_filled_by_source[event.get("buy_source") or "unknown"] += 1
-            summary["realized_gross_pnl"] += safe_float(event.get("gross_pnl")) or 0.0
-            summary["realized_estimated_net_pnl"] += safe_float(event.get("estimated_net_pnl")) or 0.0
-            if safe_float(event.get("hold_minutes")) is not None:
-                hold_minutes.append(float(event["hold_minutes"]))
+            source = event_source(event)
+            sell_filled_by_source[source] += 1
+            gross_pnl = safe_float(event.get("gross_pnl")) or 0.0
+            net_pnl = safe_float(event.get("estimated_net_pnl")) or 0.0
+            summary["realized_gross_pnl"] += gross_pnl
+            summary["realized_estimated_net_pnl"] += net_pnl
+            source_stats = capital_by_source[source]
+            source_stats["sell_orders_filled"] += 1
+            source_stats["realized_gross_pnl"] += gross_pnl
+            source_stats["realized_estimated_net_pnl"] += net_pnl
+            sell_notional = event_notional(event)
+            if sell_notional is not None:
+                source_stats["sell_notional_usd"] += sell_notional
+            hold_value = safe_float(event.get("hold_minutes"))
+            if hold_value is not None:
+                hold_minutes.append(hold_value)
+                source_stats["hold_minutes"].append(hold_value)
             summary["recent_fills"].append({
                 "ts": event.get("ts"),
                 "side": "sell",
@@ -3001,6 +3065,16 @@ def summarize_actual_trades(events):
             rejected_by_side[event.get("side") or "unknown"] += 1
         elif name == "SELL_ORDER_REPRICED":
             summary["sell_order_repriced"] += 1
+        elif name == "BUY_CANDIDATE_SKIPPED":
+            source = event_source(event)
+            reason = (
+                event.get("reason")
+                or event.get("skip_reason")
+                or event.get("blocked_reason")
+                or "unknown"
+            )
+            candidate_skip_reason_counts[reason] += 1
+            candidate_skip_reasons_by_source[source][reason] += 1
 
     summary["buy_orders_placed_by_source"] = dict(
         buy_orders_placed_by_source.most_common()
@@ -3013,12 +3087,156 @@ def summarize_actual_trades(events):
     summary["rejected_by_side"] = dict(rejected_by_side.most_common())
     summary["realized_gross_pnl"] = round(summary["realized_gross_pnl"], 8)
     summary["realized_estimated_net_pnl"] = round(summary["realized_estimated_net_pnl"], 8)
-    summary["average_hold_minutes"] = round(statistics.mean(hold_minutes), 2) if hold_minutes else None
+    summary["candidate_skip_reason_counts"] = dict(
+        candidate_skip_reason_counts.most_common()
+    )
+    summary["candidate_skip_reasons_by_source"] = {
+        source: dict(counter.most_common())
+        for source, counter in sorted(candidate_skip_reasons_by_source.items())
+    }
+    summary["average_hold_minutes"] = (
+        round(statistics.mean(hold_minutes), 2) if hold_minutes else None
+    )
+    summary["max_hold_minutes"] = round(max(hold_minutes), 2) if hold_minutes else None
     summary["recent_fills"] = summary["recent_fills"][-BACKTEST_RECENT_LIMIT:]
     summary["recent_buy_orders"] = summary["recent_buy_orders"][-BACKTEST_RECENT_LIMIT:]
     summary["recent_risk_context_paper_buys"] = (
         summary["recent_risk_context_paper_buys"][-BACKTEST_RECENT_LIMIT:]
     )
+    summary["shadow_to_real_summary"] = {
+        "shadow_buys_planned": summary["risk_context_paper_buys_planned"],
+        "real_buys_placed": summary["buy_orders_placed"],
+        "real_buys_filled": summary["buy_orders_filled"],
+        "sell_exits": summary["sell_orders_filled"],
+        "paper_to_real_placement_rate": rate(
+            summary["buy_orders_placed"],
+            summary["risk_context_paper_buys_planned"],
+        ),
+        "real_placement_to_fill_rate": rate(
+            summary["buy_orders_filled"],
+            summary["buy_orders_placed"],
+        ),
+        "real_fill_to_exit_rate": rate(
+            summary["sell_orders_filled"],
+            summary["buy_orders_filled"],
+        ),
+        "placed_not_filled_count_estimate": max(
+            0,
+            summary["buy_orders_placed"] - summary["buy_orders_filled"],
+        ),
+        "unexited_buy_count_estimate": max(
+            0,
+            summary["buy_orders_filled"] - summary["sell_orders_filled"],
+        ),
+    }
+
+    capital_sources = {}
+    total_buy_notional = 0.0
+    total_paper_notional = 0.0
+    total_sell_notional = 0.0
+    for source, source_stats in sorted(capital_by_source.items()):
+        buy_notional = source_stats["buy_notional_usd"]
+        paper_notional = source_stats["paper_notional_usd"]
+        sell_notional = source_stats["sell_notional_usd"]
+        source_hold_minutes = source_stats["hold_minutes"]
+        total_buy_notional += buy_notional
+        total_paper_notional += paper_notional
+        total_sell_notional += sell_notional
+        capital_sources[source] = {
+            "risk_context_paper_buys_planned": source_stats[
+                "risk_context_paper_buys_planned"
+            ],
+            "buy_orders_placed": source_stats["buy_orders_placed"],
+            "buy_orders_filled": source_stats["buy_orders_filled"],
+            "sell_orders_filled": source_stats["sell_orders_filled"],
+            "paper_notional_usd": round(paper_notional, 8),
+            "buy_notional_usd": round(buy_notional, 8),
+            "sell_notional_usd": round(sell_notional, 8),
+            "realized_gross_pnl": round(source_stats["realized_gross_pnl"], 8),
+            "realized_estimated_net_pnl": round(
+                source_stats["realized_estimated_net_pnl"],
+                8,
+            ),
+            "realized_net_pnl_per_buy_notional_pct": (
+                round(
+                    source_stats["realized_estimated_net_pnl"] / buy_notional * 100,
+                    4,
+                )
+                if buy_notional
+                else None
+            ),
+            "average_hold_minutes": (
+                round(statistics.mean(source_hold_minutes), 2)
+                if source_hold_minutes
+                else None
+            ),
+            "max_hold_minutes": (
+                round(max(source_hold_minutes), 2)
+                if source_hold_minutes
+                else None
+            ),
+            "paper_to_real_placement_rate": rate(
+                source_stats["buy_orders_placed"],
+                source_stats["risk_context_paper_buys_planned"],
+            ),
+            "real_placement_to_fill_rate": rate(
+                source_stats["buy_orders_filled"],
+                source_stats["buy_orders_placed"],
+            ),
+            "real_fill_to_exit_rate": rate(
+                source_stats["sell_orders_filled"],
+                source_stats["buy_orders_filled"],
+            ),
+        }
+
+    summary["shadow_vs_real_by_source"] = {
+        source: {
+            "shadow_planned": values["risk_context_paper_buys_planned"],
+            "real_buys_placed": values["buy_orders_placed"],
+            "real_buys_filled": values["buy_orders_filled"],
+            "sell_exits": values["sell_orders_filled"],
+            "paper_to_real_placement_rate": values[
+                "paper_to_real_placement_rate"
+            ],
+            "paper_to_real_placement_delta": (
+                values["buy_orders_placed"]
+                - values["risk_context_paper_buys_planned"]
+            ),
+            "real_placement_to_fill_rate": values[
+                "real_placement_to_fill_rate"
+            ],
+            "real_fill_to_exit_rate": values["real_fill_to_exit_rate"],
+        }
+        for source, values in capital_sources.items()
+    }
+    summary["capital_recycling_summary"] = {
+        "total_paper_notional_usd": round(total_paper_notional, 8),
+        "total_buy_notional_usd": round(total_buy_notional, 8),
+        "total_sell_notional_usd": round(total_sell_notional, 8),
+        "avg_buy_notional_usd": (
+            round(total_buy_notional / summary["buy_orders_placed"], 8)
+            if summary["buy_orders_placed"]
+            else None
+        ),
+        "realized_estimated_net_pnl": summary["realized_estimated_net_pnl"],
+        "realized_net_pnl_per_buy_notional_pct": (
+            round(
+                summary["realized_estimated_net_pnl"] / total_buy_notional * 100,
+                4,
+            )
+            if total_buy_notional
+            else None
+        ),
+        "average_hold_minutes": summary["average_hold_minutes"],
+        "max_hold_minutes": summary["max_hold_minutes"],
+        "placed_not_filled_count_estimate": summary[
+            "shadow_to_real_summary"
+        ]["placed_not_filled_count_estimate"],
+        "unexited_buy_count_estimate": summary[
+            "shadow_to_real_summary"
+        ]["unexited_buy_count_estimate"],
+        "by_source": capital_sources,
+    }
     return summary
 
 
