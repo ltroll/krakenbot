@@ -2944,6 +2944,45 @@ def summarize_actual_trades(events):
     def rate(numerator, denominator):
         return round(numerator / denominator, 4) if denominator else None
 
+    def capped_rate(numerator, denominator):
+        value = rate(numerator, denominator)
+        return min(value, 1.0) if value is not None else None
+
+    def event_trade_id(event, *, side=None):
+        trade_id = event.get("trade_id") or event.get("buy_txid")
+        if trade_id:
+            return str(trade_id)
+        if side == "buy" and event.get("txid"):
+            return str(event["txid"])
+        return None
+
+    def close_enough(left, right, tolerance=0.00000001):
+        left_value = safe_float(left)
+        right_value = safe_float(right)
+        if left_value is None or right_value is None:
+            return False
+        return abs(left_value - right_value) <= tolerance
+
+    def find_fallback_cohort(sell_event, cohorts):
+        sell_source = event_source(sell_event)
+        sell_buy_price = safe_float(sell_event.get("buy_price"))
+        sell_volume = safe_float(sell_event.get("volume"))
+        if sell_buy_price is None or sell_volume is None:
+            return None
+        for cohort in cohorts.values():
+            if cohort.get("sell_event") is not None:
+                continue
+            if cohort.get("buy_filled_event") is None:
+                continue
+            if cohort.get("buy_source") != sell_source:
+                continue
+            if not close_enough(cohort.get("buy_price"), sell_buy_price):
+                continue
+            if not close_enough(cohort.get("volume"), sell_volume):
+                continue
+            return cohort
+        return None
+
     summary = {
         "events": len(events),
         "buy_orders_placed": 0,
@@ -2986,20 +3025,41 @@ def summarize_actual_trades(events):
         "hold_minutes": [],
     })
     hold_minutes = []
+    buy_cohorts = {}
+    anonymous_cohort_count = 0
 
     for event in events:
         name = event.get("event")
         if name == "BUY_ORDER_PLACED":
             summary["buy_orders_placed"] += 1
             source = event_source(event)
+            trade_id = event_trade_id(event, side="buy")
             buy_orders_placed_by_source[source] += 1
             capital_by_source[source]["buy_orders_placed"] += 1
             notional = event_notional(event)
             if notional is not None:
                 capital_by_source[source]["buy_notional_usd"] += notional
+            if not trade_id:
+                anonymous_cohort_count += 1
+                trade_id = f"anonymous_buy_{anonymous_cohort_count}"
+            buy_cohorts.setdefault(trade_id, {
+                "trade_id": trade_id,
+                "buy_source": source,
+                "buy_placed_event": None,
+                "buy_filled_event": None,
+                "sell_event": None,
+                "match_method": None,
+                "buy_price": None,
+                "volume": None,
+            })
+            buy_cohorts[trade_id]["buy_placed_event"] = event
+            buy_cohorts[trade_id]["buy_source"] = source
+            buy_cohorts[trade_id]["buy_price"] = safe_float(event.get("price"))
+            buy_cohorts[trade_id]["volume"] = safe_float(event.get("volume"))
             summary["recent_buy_orders"].append({
                 "ts": event.get("ts"),
                 "buy_source": event.get("buy_source"),
+                "trade_id": trade_id,
                 "price": event.get("price"),
                 "volume": event.get("volume"),
                 "trade_notional_usd": event.get("trade_notional_usd"),
@@ -3028,8 +3088,28 @@ def summarize_actual_trades(events):
         elif name == "BUY_ORDER_FILLED":
             summary["buy_orders_filled"] += 1
             source = event_source(event)
+            trade_id = event_trade_id(event, side="buy")
             buy_filled_by_source[source] += 1
             capital_by_source[source]["buy_orders_filled"] += 1
+            if not trade_id:
+                anonymous_cohort_count += 1
+                trade_id = f"anonymous_fill_{anonymous_cohort_count}"
+            buy_cohorts.setdefault(trade_id, {
+                "trade_id": trade_id,
+                "buy_source": source,
+                "buy_placed_event": None,
+                "buy_filled_event": None,
+                "sell_event": None,
+                "match_method": None,
+                "buy_price": None,
+                "volume": None,
+            })
+            buy_cohorts[trade_id]["buy_filled_event"] = event
+            buy_cohorts[trade_id]["buy_source"] = source
+            if buy_cohorts[trade_id]["buy_price"] is None:
+                buy_cohorts[trade_id]["buy_price"] = safe_float(event.get("price"))
+            if buy_cohorts[trade_id]["volume"] is None:
+                buy_cohorts[trade_id]["volume"] = safe_float(event.get("volume"))
         elif name == "SELL_ORDER_PLACED":
             summary["sell_orders_placed"] += 1
         elif name == "SELL_ORDER_FILLED":
@@ -3051,10 +3131,20 @@ def summarize_actual_trades(events):
             if hold_value is not None:
                 hold_minutes.append(hold_value)
                 source_stats["hold_minutes"].append(hold_value)
+            trade_id = event_trade_id(event, side="sell")
+            matched_cohort = buy_cohorts.get(trade_id) if trade_id else None
+            match_method = "trade_id" if matched_cohort is not None else None
+            if matched_cohort is None:
+                matched_cohort = find_fallback_cohort(event, buy_cohorts)
+                match_method = "source_price_volume" if matched_cohort else None
+            if matched_cohort is not None:
+                matched_cohort["sell_event"] = event
+                matched_cohort["match_method"] = match_method
             summary["recent_fills"].append({
                 "ts": event.get("ts"),
                 "side": "sell",
                 "buy_source": event.get("buy_source"),
+                "trade_id": trade_id,
                 "level": event.get("level"),
                 "gross_pnl": event.get("gross_pnl"),
                 "estimated_net_pnl": event.get("estimated_net_pnl"),
@@ -3116,7 +3206,7 @@ def summarize_actual_trades(events):
             summary["buy_orders_filled"],
             summary["buy_orders_placed"],
         ),
-        "real_fill_to_exit_rate": rate(
+        "real_fill_to_exit_rate": capped_rate(
             summary["sell_orders_filled"],
             summary["buy_orders_filled"],
         ),
@@ -3183,7 +3273,7 @@ def summarize_actual_trades(events):
                 source_stats["buy_orders_filled"],
                 source_stats["buy_orders_placed"],
             ),
-            "real_fill_to_exit_rate": rate(
+            "real_fill_to_exit_rate": capped_rate(
                 source_stats["sell_orders_filled"],
                 source_stats["buy_orders_filled"],
             ),
@@ -3236,6 +3326,191 @@ def summarize_actual_trades(events):
             "shadow_to_real_summary"
         ]["unexited_buy_count_estimate"],
         "by_source": capital_sources,
+    }
+
+    cohort_by_source = defaultdict(lambda: {
+        "buy_cohorts_started": 0,
+        "buy_cohorts_filled": 0,
+        "matched_sell_exits": 0,
+        "open_filled_cohorts": 0,
+        "matched_buy_notional_usd": 0.0,
+        "matched_sell_notional_usd": 0.0,
+        "matched_realized_gross_pnl": 0.0,
+        "matched_realized_estimated_net_pnl": 0.0,
+        "matched_hold_minutes": [],
+        "match_methods": Counter(),
+    })
+    completed_round_trips = []
+    matched_sell_count = 0
+    matched_buy_notional = 0.0
+    matched_sell_notional = 0.0
+    matched_gross_pnl = 0.0
+    matched_net_pnl = 0.0
+    matched_hold_minutes = []
+    match_methods = Counter()
+    for cohort in buy_cohorts.values():
+        source = cohort.get("buy_source") or "unknown"
+        source_stats = cohort_by_source[source]
+        if cohort.get("buy_placed_event") is not None:
+            source_stats["buy_cohorts_started"] += 1
+        if cohort.get("buy_filled_event") is not None:
+            source_stats["buy_cohorts_filled"] += 1
+        if (
+            cohort.get("buy_filled_event") is not None
+            and cohort.get("sell_event") is None
+        ):
+            source_stats["open_filled_cohorts"] += 1
+        sell_event = cohort.get("sell_event")
+        if sell_event is None:
+            continue
+        buy_event = cohort.get("buy_placed_event") or cohort.get("buy_filled_event")
+        buy_notional = event_notional(buy_event or {}) or 0.0
+        sell_notional = event_notional(sell_event) or 0.0
+        gross_pnl = safe_float(sell_event.get("gross_pnl")) or 0.0
+        net_pnl = safe_float(sell_event.get("estimated_net_pnl")) or 0.0
+        hold_value = safe_float(sell_event.get("hold_minutes"))
+        matched_sell_count += 1
+        matched_buy_notional += buy_notional
+        matched_sell_notional += sell_notional
+        matched_gross_pnl += gross_pnl
+        matched_net_pnl += net_pnl
+        source_stats["matched_sell_exits"] += 1
+        source_stats["matched_buy_notional_usd"] += buy_notional
+        source_stats["matched_sell_notional_usd"] += sell_notional
+        source_stats["matched_realized_gross_pnl"] += gross_pnl
+        source_stats["matched_realized_estimated_net_pnl"] += net_pnl
+        if hold_value is not None:
+            matched_hold_minutes.append(hold_value)
+            source_stats["matched_hold_minutes"].append(hold_value)
+        method = cohort.get("match_method") or "unknown"
+        match_methods[method] += 1
+        source_stats["match_methods"][method] += 1
+        completed_round_trips.append({
+            "trade_id": cohort.get("trade_id"),
+            "buy_source": source,
+            "buy_ts": (buy_event or {}).get("ts"),
+            "sell_ts": sell_event.get("ts"),
+            "buy_price": (buy_event or {}).get("price") or sell_event.get("buy_price"),
+            "sell_price": sell_event.get("sell_price") or sell_event.get("price"),
+            "volume": sell_event.get("volume") or (buy_event or {}).get("volume"),
+            "buy_notional_usd": round(buy_notional, 8),
+            "sell_notional_usd": round(sell_notional, 8),
+            "gross_pnl": gross_pnl,
+            "estimated_net_pnl": net_pnl,
+            "hold_minutes": hold_value,
+            "match_method": method,
+        })
+
+    cohort_source_output = {}
+    for source, source_stats in sorted(cohort_by_source.items()):
+        source_buy_notional = source_stats["matched_buy_notional_usd"]
+        source_hold_minutes = source_stats["matched_hold_minutes"]
+        cohort_source_output[source] = {
+            "buy_cohorts_started": source_stats["buy_cohorts_started"],
+            "buy_cohorts_filled": source_stats["buy_cohorts_filled"],
+            "matched_sell_exits": source_stats["matched_sell_exits"],
+            "open_filled_cohorts": source_stats["open_filled_cohorts"],
+            "cohort_fill_rate": rate(
+                source_stats["buy_cohorts_filled"],
+                source_stats["buy_cohorts_started"],
+            ),
+            "cohort_exit_rate": rate(
+                source_stats["matched_sell_exits"],
+                source_stats["buy_cohorts_filled"],
+            ),
+            "matched_buy_notional_usd": round(source_buy_notional, 8),
+            "matched_sell_notional_usd": round(
+                source_stats["matched_sell_notional_usd"],
+                8,
+            ),
+            "matched_realized_gross_pnl": round(
+                source_stats["matched_realized_gross_pnl"],
+                8,
+            ),
+            "matched_realized_estimated_net_pnl": round(
+                source_stats["matched_realized_estimated_net_pnl"],
+                8,
+            ),
+            "matched_net_pnl_per_buy_notional_pct": (
+                round(
+                    (
+                        source_stats["matched_realized_estimated_net_pnl"]
+                        / source_buy_notional
+                        * 100
+                    ),
+                    4,
+                )
+                if source_buy_notional
+                else None
+            ),
+            "average_matched_hold_minutes": (
+                round(statistics.mean(source_hold_minutes), 2)
+                if source_hold_minutes
+                else None
+            ),
+            "max_matched_hold_minutes": (
+                round(max(source_hold_minutes), 2)
+                if source_hold_minutes
+                else None
+            ),
+            "match_methods": dict(source_stats["match_methods"].most_common()),
+        }
+
+    summary["round_trip_cohort_summary"] = {
+        "buy_cohorts_started": sum(
+            1 for cohort in buy_cohorts.values()
+            if cohort.get("buy_placed_event") is not None
+        ),
+        "buy_cohorts_filled": sum(
+            1 for cohort in buy_cohorts.values()
+            if cohort.get("buy_filled_event") is not None
+        ),
+        "matched_sell_exits": matched_sell_count,
+        "unmatched_sell_exits": max(0, summary["sell_orders_filled"] - matched_sell_count),
+        "open_filled_cohorts": sum(
+            1 for cohort in buy_cohorts.values()
+            if (
+                cohort.get("buy_filled_event") is not None
+                and cohort.get("sell_event") is None
+            )
+        ),
+        "cohort_fill_rate": rate(
+            sum(
+                1 for cohort in buy_cohorts.values()
+                if cohort.get("buy_filled_event") is not None
+            ),
+            sum(
+                1 for cohort in buy_cohorts.values()
+                if cohort.get("buy_placed_event") is not None
+            ),
+        ),
+        "cohort_exit_rate": rate(
+            matched_sell_count,
+            sum(
+                1 for cohort in buy_cohorts.values()
+                if cohort.get("buy_filled_event") is not None
+            ),
+        ),
+        "matched_buy_notional_usd": round(matched_buy_notional, 8),
+        "matched_sell_notional_usd": round(matched_sell_notional, 8),
+        "matched_realized_gross_pnl": round(matched_gross_pnl, 8),
+        "matched_realized_estimated_net_pnl": round(matched_net_pnl, 8),
+        "matched_net_pnl_per_buy_notional_pct": (
+            round(matched_net_pnl / matched_buy_notional * 100, 4)
+            if matched_buy_notional
+            else None
+        ),
+        "average_matched_hold_minutes": (
+            round(statistics.mean(matched_hold_minutes), 2)
+            if matched_hold_minutes
+            else None
+        ),
+        "max_matched_hold_minutes": (
+            round(max(matched_hold_minutes), 2) if matched_hold_minutes else None
+        ),
+        "match_methods": dict(match_methods.most_common()),
+        "by_source": cohort_source_output,
+        "recent_completed_round_trips": completed_round_trips[-BACKTEST_RECENT_LIMIT:],
     }
     return summary
 

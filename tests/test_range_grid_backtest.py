@@ -1323,6 +1323,8 @@ class RangeGridBacktestTests(unittest.TestCase):
             {
                 "ts": "2026-06-13T12:01:00+00:00",
                 "event": "BUY_ORDER_PLACED",
+                "txid": "BUY-1",
+                "trade_id": "BUY-1",
                 "buy_source": "range_high_band",
                 "price": 104.5,
                 "volume": 0.1,
@@ -1331,11 +1333,17 @@ class RangeGridBacktestTests(unittest.TestCase):
             {
                 "ts": "2026-06-13T12:02:00+00:00",
                 "event": "BUY_ORDER_FILLED",
+                "txid": "BUY-1",
+                "trade_id": "BUY-1",
                 "buy_source": "range_high_band",
+                "price": 104.5,
+                "volume": 0.1,
             },
             {
                 "ts": "2026-06-13T14:02:00+00:00",
                 "event": "SELL_ORDER_FILLED",
+                "txid": "SELL-1",
+                "trade_id": "BUY-1",
                 "buy_source": "range_high_band",
                 "buy_price": 104.5,
                 "sell_price": 107.0,
@@ -1343,6 +1351,18 @@ class RangeGridBacktestTests(unittest.TestCase):
                 "gross_pnl": 0.25,
                 "estimated_net_pnl": 0.18,
                 "hold_minutes": 120,
+            },
+            {
+                "ts": "2026-06-13T14:03:00+00:00",
+                "event": "SELL_ORDER_FILLED",
+                "txid": "SELL-OLD",
+                "buy_source": "range_high_band",
+                "buy_price": 95.0,
+                "sell_price": 96.0,
+                "volume": 0.1,
+                "gross_pnl": 0.1,
+                "estimated_net_pnl": 0.06,
+                "hold_minutes": 1440,
             },
             {
                 "ts": "2026-06-13T12:03:00+00:00",
@@ -1389,19 +1409,41 @@ class RangeGridBacktestTests(unittest.TestCase):
         )
         self.assertEqual(
             summary["capital_recycling_summary"]["total_sell_notional_usd"],
-            10.7,
+            20.3,
         )
         self.assertEqual(
             summary["capital_recycling_summary"][
                 "realized_net_pnl_per_buy_notional_pct"
             ],
-            1.7225,
+            2.2967,
         )
         self.assertEqual(
             summary["capital_recycling_summary"]["by_source"]["range_high_band"][
-                "average_hold_minutes"
+                "max_hold_minutes"
             ],
-            120,
+            1440,
+        )
+        self.assertEqual(
+            summary["round_trip_cohort_summary"]["matched_sell_exits"],
+            1,
+        )
+        self.assertEqual(
+            summary["round_trip_cohort_summary"]["unmatched_sell_exits"],
+            1,
+        )
+        self.assertEqual(
+            summary["round_trip_cohort_summary"]["cohort_exit_rate"],
+            1.0,
+        )
+        self.assertEqual(
+            summary["round_trip_cohort_summary"][
+                "matched_net_pnl_per_buy_notional_pct"
+            ],
+            1.7225,
+        )
+        self.assertEqual(
+            summary["round_trip_cohort_summary"]["match_methods"],
+            {"trade_id": 1},
         )
 
     def test_replay_risk_modulated_blocks_high_range_during_blocked_calibration(self):
