@@ -572,13 +572,13 @@ def market_entry_quality_check(risk_view, config, fallback_range_position):
     if phase in dip_phases:
         entry_ok = (
             entry_score is not None
-            and entry_score >= config_float(config, "market_entry_min_opportunity_score", 0.60)
+            and entry_score >= config_float(config, "market_entry_min_opportunity_score", 0.67)
         )
         rebound_ok = (
             rebound_confirmation is not None
-            and rebound_confirmation >= config_float(config, "market_entry_min_rebound_confirmation_score", 0.50)
+            and rebound_confirmation >= config_float(config, "market_entry_min_rebound_confirmation_score", 0.55)
         )
-        if entry_ok or rebound_ok:
+        if entry_ok and rebound_ok:
             return {
                 "allowed": True,
                 "reason": f"market_entry_{phase}",

@@ -621,12 +621,12 @@ MARKET_ENTRY_AVOID_PHASES = {
 MARKET_ENTRY_MIN_OPPORTUNITY_SCORE = env_profile_float(
     "MARKET_ENTRY_MIN_OPPORTUNITY_SCORE",
     "market_entry_min_opportunity_score",
-    0.60
+    0.67
 )
 MARKET_ENTRY_MIN_REBOUND_CONFIRMATION_SCORE = env_profile_float(
     "MARKET_ENTRY_MIN_REBOUND_CONFIRMATION_SCORE",
     "market_entry_min_rebound_confirmation_score",
-    0.50
+    0.55
 )
 MARKET_ENTRY_DIP_SIZE_MULTIPLIER = env_profile_float(
     "MARKET_ENTRY_DIP_SIZE_MULTIPLIER",
@@ -2989,7 +2989,7 @@ def market_entry_quality_check(risk_view, range_position):
             rebound_confirmation is not None
             and rebound_confirmation >= MARKET_ENTRY_MIN_REBOUND_CONFIRMATION_SCORE
         )
-        if entry_ok or rebound_ok:
+        if entry_ok and rebound_ok:
             return {
                 "allowed": True,
                 "reason": f"market_entry_{opportunity_phase}",
