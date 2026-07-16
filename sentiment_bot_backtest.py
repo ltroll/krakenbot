@@ -663,6 +663,23 @@ def market_entry_quality_check(risk_view, config, fallback_range_position):
                 "reason": f"market_entry_{phase}",
                 "size_multiplier": clamp(config_float(config, "market_entry_dip_size_multiplier", 0.50), 0.0, 1.0),
             }
+        if config_bool(config, "market_entry_strict_phase_match", True):
+            return {
+                "allowed": False,
+                "reason": f"market_entry_{phase}_confirmation_low",
+                "size_multiplier": 0.0,
+            }
+
+    if (
+        config_bool(config, "market_entry_strict_phase_match", True)
+        and phase
+        and phase not in ("neutral", "range_chop", "momentum_ride")
+    ):
+        return {
+            "allowed": False,
+            "reason": f"market_entry_{phase}_not_enabled",
+            "size_multiplier": 0.0,
+        }
 
     range_position = effective_market_location_range_position(
         risk_view,
@@ -1125,6 +1142,7 @@ def strategy_comparison_row(strategy_file, strategy_payload, replay):
         "market_entry_min_opportunity_score": strategy_payload.get("market_entry_min_opportunity_score"),
         "market_entry_min_rebound_confirmation_score": strategy_payload.get("market_entry_min_rebound_confirmation_score"),
         "market_entry_dip_size_multiplier": strategy_payload.get("market_entry_dip_size_multiplier"),
+        "market_entry_strict_phase_match": strategy_payload.get("market_entry_strict_phase_match"),
         "market_entry_min_buy_score": strategy_payload.get("market_entry_min_buy_score"),
         "market_entry_min_rebound_score": strategy_payload.get("market_entry_min_rebound_score"),
         "market_entry_min_bottoming_score": strategy_payload.get("market_entry_min_bottoming_score"),
@@ -1180,6 +1198,7 @@ def write_csv(path, rows, ranked=False):
         "market_entry_min_opportunity_score",
         "market_entry_min_rebound_confirmation_score",
         "market_entry_dip_size_multiplier",
+        "market_entry_strict_phase_match",
         "market_entry_min_buy_score",
         "market_entry_min_rebound_score",
         "market_entry_min_bottoming_score",
