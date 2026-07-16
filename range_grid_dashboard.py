@@ -114,6 +114,22 @@ def fmt_list(value):
     return "--"
 
 
+def alert_detail_text(alert):
+    parts = [str(alert.get("message", "--"))]
+    reason = alert.get("reason")
+    if reason:
+        parts.append(f"reason={reason}")
+    if alert.get("sell_backlog_count") is not None:
+        parts.append(f"sell_backlog={alert.get('sell_backlog_count')}")
+    if alert.get("sell_backlog_oldest_minutes") is not None:
+        parts.append(
+            f"oldest_sell={fmt_number(alert.get('sell_backlog_oldest_minutes'), 1)}m"
+        )
+    if alert.get("realized_pnl_today") is not None:
+        parts.append(f"pnl_today=${fmt_number(alert.get('realized_pnl_today'), 2)}")
+    return " | ".join(parts)
+
+
 def age_minutes(value, now=None):
     now = now or utc_now()
     ts = parse_iso8601(value) if isinstance(value, str) else value
@@ -484,7 +500,7 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
         f"<td>{html.escape(str(alert.get('ts', '--')))}</td>"
         f"<td>{html.escape(str(alert.get('severity', '--')))}</td>"
         f"<td>{html.escape(str(alert.get('alert_type', '--')))}</td>"
-        f"<td>{html.escape(str(alert.get('message', '--')))}</td>"
+        f"<td>{html.escape(alert_detail_text(alert))}</td>"
         "</tr>"
         for alert in reversed(alert_summary["recent"])
     ) or '<tr><td colspan="4">No recent alerts</td></tr>'
