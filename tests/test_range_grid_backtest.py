@@ -1776,6 +1776,55 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(summary["potential_summary"]["evaluated_count"], 1)
         self.assertEqual(summary["potential_summary"]["take_profit_reached_count"], 1)
 
+    def test_missed_opportunities_soft_release_aged_sell_backlog(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                104.5,
+                action_recommendation="watch_only",
+                strategy_modes=["high"],
+                strategy_overrides={
+                    "disable_new_buys_on_sell_backlog_count": 2,
+                    "sell_backlog_soft_release_minutes": 120,
+                    "sell_backlog_old_order_weight": 0.25,
+                    "operating_mode": "range_only",
+                },
+                open_sell_orders=[
+                    {
+                        "placed_at": "2026-06-13T00:00:00+00:00",
+                    },
+                    {
+                        "placed_at": "2026-06-13T01:00:00+00:00",
+                    },
+                ],
+            ),
+            make_snapshot(
+                "2026-06-13T12:10:00+00:00",
+                105.3,
+                action_recommendation="watch_only",
+                strategy_modes=["high"],
+            ),
+        ]
+
+        replay = backtest.replay_from_snapshots(snapshots)
+        actual = {
+            "buy_orders_placed": 0,
+            "buy_orders_placed_by_source": {},
+        }
+
+        summary = backtest.summarize_missed_approved_opportunities(
+            replay,
+            actual,
+            snapshots,
+        )
+
+        self.assertEqual(summary["approved_but_not_placed"], 1)
+        self.assertEqual(summary["likely_live_blockers"], {})
+        self.assertEqual(
+            summary["recent_approved_but_not_placed"][0]["likely_live_blockers"],
+            [],
+        )
+
     def test_potential_summary_reports_risk_sized_return_impact(self):
         snapshots = [
             make_snapshot(

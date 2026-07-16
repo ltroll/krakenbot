@@ -1314,6 +1314,38 @@ def sell_backlog_oldest_minutes(snapshot):
     return round(oldest, 2)
 
 
+def sell_backlog_effective_count(snapshot):
+    open_sell_orders = (state_payload(snapshot).get("open_sell_orders") or [])
+    captured_at = snapshot_timestamp(snapshot)
+    config = strategy_payload(snapshot)
+    soft_release_minutes = max(
+        0.0,
+        safe_float(config.get("sell_backlog_soft_release_minutes")) or 0.0,
+    )
+    old_order_weight = safe_float(config.get("sell_backlog_old_order_weight"))
+    if old_order_weight is None:
+        old_order_weight = 1.0
+    old_order_weight = max(0.0, min(float(old_order_weight or 0.0), 1.0))
+
+    effective_count = 0.0
+    for order in open_sell_orders:
+        if not isinstance(order, dict):
+            effective_count += 1.0
+            continue
+        placed_at = parse_iso8601(order.get("placed_at"))
+        age_minutes = (
+            max(0.0, (captured_at - placed_at).total_seconds() / 60.0)
+            if captured_at is not None and placed_at is not None
+            else 0.0
+        )
+        if soft_release_minutes > 0 and age_minutes >= soft_release_minutes:
+            effective_count += old_order_weight
+        else:
+            effective_count += 1.0
+
+    return effective_count
+
+
 def approved_event_profit_target_pct(snapshot, event):
     config = strategy_payload(snapshot)
     signal = signal_payload(snapshot)
@@ -1351,13 +1383,19 @@ def infer_live_only_blockers(snapshot, event):
         blockers.append(f"operating_mode_{operating_mode}")
 
     backlog_limit = int(config.get("disable_new_buys_on_sell_backlog_count", 0) or 0)
+    sell_backlog_count = safe_float(
+        runtime_status.get("sell_backlog_effective_count")
+    )
+    if sell_backlog_count is None:
+        sell_backlog_count = sell_backlog_effective_count(snapshot)
+    if backlog_limit > 0 and sell_backlog_count >= backlog_limit:
+        blockers.append("sell_backlog_count")
+
     open_sell_count = int(
         runtime_status.get("open_sell_count")
         or state_info.get("open_sell_count")
         or 0
     )
-    if backlog_limit > 0 and open_sell_count >= backlog_limit:
-        blockers.append("sell_backlog_count")
 
     backlog_minutes_limit = float(
         config.get("disable_new_buys_on_sell_backlog_minutes", 0) or 0

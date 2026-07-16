@@ -106,6 +106,7 @@ def validate_strategy_config(strategy_config):
         "buy_after_sell_discount_pct",
         "llm_buy_cooldown_minutes_after_sell",
         "high_anchor_backlog_soft_release_minutes",
+        "sell_backlog_soft_release_minutes",
         "mean_reversion_min_opportunity",
     )
     for field in non_negative_numeric_fields:
@@ -139,6 +140,7 @@ def validate_strategy_config(strategy_config):
         "risk_context_position_size_max_multiplier",
         "risk_context_position_size_blend",
         "high_anchor_backlog_old_order_weight",
+        "sell_backlog_old_order_weight",
         "weather_leveling_high_band_size_threshold",
         "weather_leveling_high_band_size_multiplier",
         "weather_leveling_high_band_bypass_block_threshold",
@@ -224,22 +226,46 @@ def validate_strategy_config(strategy_config):
     return errors
 
 
-def summarize_sell_backlog(open_sell_orders, now=None):
+def summarize_sell_backlog(
+    open_sell_orders,
+    now=None,
+    soft_release_minutes=0,
+    old_order_weight=1.0,
+):
     now = now or datetime.now(timezone.utc)
     backlog_count = 0
+    fresh_count = 0
+    aged_count = 0
+    effective_count = 0.0
     oldest_age_minutes = 0.0
+    soft_release_minutes = max(0.0, float(soft_release_minutes or 0.0))
+    old_order_weight = max(0.0, min(float(old_order_weight or 0.0), 1.0))
 
     for order in open_sell_orders.values():
         backlog_count += 1
         placed_at = parse_iso8601(order.get("placed_at")) if isinstance(order, dict) else None
+        age_minutes = 0.0
         if placed_at is None:
-            continue
-        age_minutes = max(0.0, (now - placed_at).total_seconds() / 60.0)
+            fresh_count += 1
+            effective_count += 1.0
+        else:
+            age_minutes = max(0.0, (now - placed_at).total_seconds() / 60.0)
+            if soft_release_minutes > 0 and age_minutes >= soft_release_minutes:
+                aged_count += 1
+                effective_count += old_order_weight
+            else:
+                fresh_count += 1
+                effective_count += 1.0
         oldest_age_minutes = max(oldest_age_minutes, age_minutes)
 
     return {
         "count": backlog_count,
+        "effective_count": effective_count,
+        "fresh_count": fresh_count,
+        "aged_count": aged_count,
         "oldest_age_minutes": oldest_age_minutes,
+        "soft_release_minutes": soft_release_minutes,
+        "old_order_weight": old_order_weight,
     }
 
 

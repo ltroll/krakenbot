@@ -51,6 +51,7 @@ class RangeGridGuardrailsTests(unittest.TestCase):
             "risk_context_high_band_min_breakout_score": 1.5,
             "risk_context_position_size_blend": -0.1,
             "high_anchor_backlog_old_order_weight": 1.5,
+            "sell_backlog_old_order_weight": 1.5,
         })
         self.assertTrue(
             any("risk_context_high_band_min_breakout_score" in error for error in errors)
@@ -60,6 +61,9 @@ class RangeGridGuardrailsTests(unittest.TestCase):
         )
         self.assertTrue(
             any("high_anchor_backlog_old_order_weight" in error for error in errors)
+        )
+        self.assertTrue(
+            any("sell_backlog_old_order_weight" in error for error in errors)
         )
 
     def test_summarize_sell_backlog_counts_and_ages(self):
@@ -72,7 +76,28 @@ class RangeGridGuardrailsTests(unittest.TestCase):
             now,
         )
         self.assertEqual(summary["count"], 2)
+        self.assertEqual(summary["effective_count"], 2.0)
+        self.assertEqual(summary["fresh_count"], 2)
+        self.assertEqual(summary["aged_count"], 0)
         self.assertAlmostEqual(summary["oldest_age_minutes"], 90.0, places=2)
+
+    def test_summarize_sell_backlog_soft_releases_aged_orders(self):
+        now = datetime(2026, 6, 13, 12, 0, tzinfo=timezone.utc)
+        summary = guardrails.summarize_sell_backlog(
+            {
+                "fresh": {"placed_at": (now - timedelta(minutes=30)).isoformat()},
+                "aged_a": {"placed_at": (now - timedelta(minutes=180)).isoformat()},
+                "aged_b": {"placed_at": (now - timedelta(minutes=240)).isoformat()},
+            },
+            now,
+            soft_release_minutes=120,
+            old_order_weight=0.25,
+        )
+        self.assertEqual(summary["count"], 3)
+        self.assertEqual(summary["fresh_count"], 1)
+        self.assertEqual(summary["aged_count"], 2)
+        self.assertAlmostEqual(summary["effective_count"], 1.5, places=4)
+        self.assertAlmostEqual(summary["oldest_age_minutes"], 240.0, places=2)
 
     def test_runtime_buy_block_reason_blocks_on_daily_loss(self):
         reason = guardrails.runtime_buy_block_reason(

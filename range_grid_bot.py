@@ -713,6 +713,14 @@ disable_new_buys_on_sell_backlog_minutes = profile_int(
     "disable_new_buys_on_sell_backlog_minutes",
     0
 )
+sell_backlog_soft_release_minutes = profile_int(
+    "sell_backlog_soft_release_minutes",
+    0
+)
+sell_backlog_old_order_weight = profile_float(
+    "sell_backlog_old_order_weight",
+    1.0
+)
 reconcile_state_interval_minutes = profile_int(
     "reconcile_state_interval_minutes",
     30
@@ -1329,6 +1337,12 @@ def emit_execution_quality_alerts(
             buy_orders_filled=buy_orders_filled,
             sell_orders_filled=sell_orders_filled,
             sell_backlog_count=sell_backlog.get("count"),
+            sell_backlog_effective_count=round(
+                float(sell_backlog.get("effective_count") or 0.0),
+                4
+            ),
+            sell_backlog_fresh_count=sell_backlog.get("fresh_count"),
+            sell_backlog_aged_count=sell_backlog.get("aged_count"),
             sell_backlog_oldest_minutes=round(
                 float(sell_backlog.get("oldest_age_minutes") or 0.0),
                 2
@@ -3695,6 +3709,8 @@ def main():
         disable_new_buys_on_sell_backlog_minutes=(
             disable_new_buys_on_sell_backlog_minutes
         ),
+        sell_backlog_soft_release_minutes=sell_backlog_soft_release_minutes,
+        sell_backlog_old_order_weight=sell_backlog_old_order_weight,
         reconcile_state_interval_minutes=reconcile_state_interval_minutes,
         max_consecutive_loop_errors=max_consecutive_loop_errors,
         max_consecutive_private_api_failures=(
@@ -3973,12 +3989,17 @@ def main():
                 hour=0, minute=0, second=0, microsecond=0
             )
             realized_pnl_today = realized_pnl_for_utc_day(daily_pnl_start)
-            sell_backlog = summarize_sell_backlog(state["open_sell_orders"], now)
+            sell_backlog = summarize_sell_backlog(
+                state["open_sell_orders"],
+                now,
+                sell_backlog_soft_release_minutes,
+                sell_backlog_old_order_weight,
+            )
             runtime_block_reason = runtime_buy_block_reason(
                 operating_mode=operating_mode,
                 realized_pnl_today=realized_pnl_today,
                 max_daily_loss_usd=max_daily_loss_usd,
-                sell_backlog_count=sell_backlog["count"],
+                sell_backlog_count=sell_backlog["effective_count"],
                 sell_backlog_limit=disable_new_buys_on_sell_backlog_count,
                 sell_backlog_oldest_minutes=sell_backlog["oldest_age_minutes"],
                 sell_backlog_minutes_limit=disable_new_buys_on_sell_backlog_minutes,
@@ -4000,6 +4021,12 @@ def main():
                     operating_mode=operating_mode,
                     reason=runtime_block_reason,
                     sell_backlog_count=sell_backlog["count"],
+                    sell_backlog_effective_count=round(
+                        sell_backlog["effective_count"],
+                        4
+                    ),
+                    sell_backlog_fresh_count=sell_backlog["fresh_count"],
+                    sell_backlog_aged_count=sell_backlog["aged_count"],
                     sell_backlog_oldest_minutes=round(
                         sell_backlog["oldest_age_minutes"],
                         2
@@ -6130,6 +6157,18 @@ def main():
                     runtime_block_reason=runtime_block_reason,
                     realized_pnl_today=round(realized_pnl_today, 8),
                     sell_backlog_count=sell_backlog["count"],
+                    sell_backlog_effective_count=round(
+                        sell_backlog["effective_count"],
+                        4
+                    ),
+                    sell_backlog_fresh_count=sell_backlog["fresh_count"],
+                    sell_backlog_aged_count=sell_backlog["aged_count"],
+                    sell_backlog_soft_release_minutes=(
+                        sell_backlog["soft_release_minutes"]
+                    ),
+                    sell_backlog_old_order_weight=(
+                        sell_backlog["old_order_weight"]
+                    ),
                     sell_backlog_oldest_minutes=round(
                         sell_backlog["oldest_age_minutes"],
                         2
@@ -6235,6 +6274,12 @@ def main():
                 runtime_block_reason=runtime_block_reason,
                 realized_pnl_today=round(realized_pnl_today, 8),
                 sell_backlog_count=sell_backlog["count"],
+                sell_backlog_effective_count=round(
+                    sell_backlog["effective_count"],
+                    4
+                ),
+                sell_backlog_fresh_count=sell_backlog["fresh_count"],
+                sell_backlog_aged_count=sell_backlog["aged_count"],
                 sell_backlog_oldest_minutes=round(
                     sell_backlog["oldest_age_minutes"],
                     2
@@ -6421,6 +6466,18 @@ def main():
                 "weather_high_anchor_allowed": weather_high_anchor_allowed,
                 "realized_pnl_today": round(realized_pnl_today, 8),
                 "sell_backlog_count": sell_backlog["count"],
+                "sell_backlog_effective_count": round(
+                    sell_backlog["effective_count"],
+                    4
+                ),
+                "sell_backlog_fresh_count": sell_backlog["fresh_count"],
+                "sell_backlog_aged_count": sell_backlog["aged_count"],
+                "sell_backlog_soft_release_minutes": (
+                    sell_backlog["soft_release_minutes"]
+                ),
+                "sell_backlog_old_order_weight": (
+                    sell_backlog["old_order_weight"]
+                ),
                 "sell_backlog_oldest_minutes": round(
                     sell_backlog["oldest_age_minutes"],
                     2
