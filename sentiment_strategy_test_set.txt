@@ -1,0 +1,9 @@
+# One sentiment strategy profile per line.
+# Relative paths resolve from the krakenbot repo root.
+# Blank lines and comment lines are ignored.
+
+sentiment_strategy_default.json
+sentiment_strategy_dip_probe_balanced.json
+sentiment_strategy_dip_probe_strict.json
+sentiment_strategy_rebound_confirmed_probe.json
+sentiment_strategy_conservative_wait.json

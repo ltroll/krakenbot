@@ -2,6 +2,7 @@
 """Offline replay for sentiment-bot snapshots."""
 
 import argparse
+import csv
 import json
 import os
 import statistics
@@ -31,7 +32,20 @@ DEFAULT_OUTPUT_FILE = os.getenv(
     "SENTIMENT_BOT_BACKTEST_OUTPUT_FILE",
     "/var/www/html/bot/sentiment_bot_local_backtest.json",
 )
+DEFAULT_STRATEGY_TEST_SET_FILE = os.getenv(
+    "SENTIMENT_STRATEGY_TEST_SET_FILE",
+    "sentiment_strategy_test_set.txt",
+)
+DEFAULT_COMPARISON_CSV_FILE = os.getenv(
+    "SENTIMENT_BOT_BACKTEST_COMPARISON_CSV_FILE",
+    "/var/www/html/bot/sentiment_bot_strategy_compare.csv",
+)
+DEFAULT_RANKED_CSV_FILE = os.getenv(
+    "SENTIMENT_BOT_BACKTEST_RANKED_CSV_FILE",
+    "/var/www/html/bot/sentiment_bot_strategy_ranked.csv",
+)
 HTTP_TIMEOUT_SECONDS = float(os.getenv("SENTIMENT_BOT_BACKTEST_HTTP_TIMEOUT_SECONDS", "10"))
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def parse_args(argv=None):
@@ -64,6 +78,32 @@ def parse_args(argv=None):
         help="High-price guard used by strict_high_guard variant.",
     )
     parser.add_argument("--stdout", action="store_true")
+    parser.add_argument(
+        "--strategy-file",
+        action="append",
+        default=[],
+        help="Strategy JSON file to compare. May be repeated.",
+    )
+    parser.add_argument(
+        "--strategy-test-set",
+        default=DEFAULT_STRATEGY_TEST_SET_FILE,
+        help="Text file containing one strategy JSON path per line.",
+    )
+    parser.add_argument(
+        "--comparison-csv",
+        default=DEFAULT_COMPARISON_CSV_FILE,
+        help="CSV path for per-strategy comparison rows.",
+    )
+    parser.add_argument(
+        "--ranked-csv",
+        default=DEFAULT_RANKED_CSV_FILE,
+        help="CSV path for ranked strategy rows.",
+    )
+    parser.add_argument(
+        "--no-strategy-comparison",
+        action="store_true",
+        help="Skip strategy test-set comparison CSV generation.",
+    )
     return parser.parse_args(argv)
 
 
@@ -167,6 +207,45 @@ def strategy_payload(snapshot):
         return {}
     payload = profile.get("payload")
     return payload if isinstance(payload, dict) else {}
+
+
+def strategy_payload_from_file(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    if not isinstance(payload, dict):
+        return {}
+    profiles = payload.get("strategy_profiles")
+    if isinstance(profiles, dict):
+        default_profile = profiles.get("default")
+        if isinstance(default_profile, dict):
+            return default_profile
+    return payload
+
+
+def strategy_label_from_path(path):
+    name = os.path.basename(path)
+    if name.endswith(".json"):
+        name = name[:-5]
+    if name.startswith("sentiment_strategy_"):
+        name = name[len("sentiment_strategy_"):]
+    return name
+
+
+def load_strategy_test_set(path):
+    if not path or not os.path.exists(path):
+        return []
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            text = line.strip()
+            if not text or text.startswith("#"):
+                continue
+            rows.append(text if os.path.isabs(text) else os.path.join(REPO_DIR, text))
+    return rows
 
 
 def state_payload(snapshot):
@@ -651,11 +730,12 @@ def market_entry_quality_check(risk_view, config, fallback_range_position):
     }
 
 
-def evaluate_snapshot(snapshot, variant, strict_high_guard_pct, account_usd):
+def evaluate_snapshot(snapshot, variant, strict_high_guard_pct, account_usd, strategy_override=None):
     at_time = snapshot_time(snapshot)
     price = snapshot_price(snapshot)
     signal = signal_payload(snapshot)
-    config = variant_config(strategy_payload(snapshot), variant, strict_high_guard_pct)
+    base_config = strategy_override if strategy_override is not None else strategy_payload(snapshot)
+    config = variant_config(base_config, variant, strict_high_guard_pct)
     if at_time is None:
         return hold("missing_timestamp", snapshot, price, signal, config)
     if price is None:
@@ -948,6 +1028,15 @@ def summarize_events(events):
         if event["status"] == "hold"
     )
     buy_reasons = Counter(event["reason"] for event in buys)
+    buy_phases = Counter(
+        event.get("weather_opportunity_phase") or "<none>"
+        for event in buys
+    )
+    hold_phases = Counter(
+        event.get("weather_opportunity_phase") or "<none>"
+        for event in events
+        if event["status"] == "hold"
+    )
     return {
         "snapshots": len(events),
         "buy_decisions": len(buys),
@@ -969,10 +1058,182 @@ def summarize_events(events):
         "timeout_count": int(exit_reasons.get("timeout", 0)),
         "hold_reason_counts": dict(hold_reasons.most_common()),
         "buy_reason_counts": dict(buy_reasons.most_common()),
+        "buy_phase_counts": dict(buy_phases.most_common()),
+        "hold_phase_counts": dict(hold_phases.most_common()),
     }
 
 
-def replay_variant(snapshots, variant, args):
+def json_compact(value):
+    if value in (None, ""):
+        return ""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def strategy_practical_score(summary):
+    buys = summary.get("buy_decisions") or 0
+    avg_return = summary.get("avg_net_return_pct")
+    win_rate = summary.get("win_rate")
+    pnl = summary.get("estimated_total_pnl_usd")
+    stop_count = summary.get("stop_loss_count") or 0
+    timeout_count = summary.get("timeout_count") or 0
+    take_profit_count = summary.get("take_profit_count") or 0
+
+    if buys <= 0:
+        return -1.0
+
+    avg_return = avg_return if avg_return is not None else -1.0
+    win_rate = win_rate if win_rate is not None else 0.0
+    pnl = pnl if pnl is not None else 0.0
+    activity = min(buys, 24) * (0.15 if avg_return > 0 else -0.08)
+
+    score = (
+        pnl
+        + (avg_return * 80.0)
+        + (win_rate * 25.0)
+        + (take_profit_count * 0.15)
+        - (stop_count * 0.08)
+        - (timeout_count * 0.03)
+        + activity
+    )
+    return round(score, 6)
+
+
+def strategy_comparison_row(strategy_file, strategy_payload, replay):
+    summary = replay.get("summary") or {}
+    return {
+        "strategy_label": strategy_label_from_path(strategy_file),
+        "strategy_file": strategy_file,
+        "snapshots": summary.get("snapshots"),
+        "buy_decisions": summary.get("buy_decisions"),
+        "filled_trades": summary.get("filled_trades"),
+        "not_filled": summary.get("not_filled"),
+        "win_rate": summary.get("win_rate"),
+        "avg_net_return_pct": summary.get("avg_net_return_pct"),
+        "total_net_return_pct": summary.get("total_net_return_pct"),
+        "estimated_total_pnl_usd": summary.get("estimated_total_pnl_usd"),
+        "take_profit_count": summary.get("take_profit_count"),
+        "stop_loss_count": summary.get("stop_loss_count"),
+        "timeout_count": summary.get("timeout_count"),
+        "hold_reason_counts": json_compact(summary.get("hold_reason_counts")),
+        "buy_reason_counts": json_compact(summary.get("buy_reason_counts")),
+        "buy_phase_counts": json_compact(summary.get("buy_phase_counts")),
+        "hold_phase_counts": json_compact(summary.get("hold_phase_counts")),
+        "sentiment_buy_threshold": strategy_payload.get("sentiment_buy_threshold"),
+        "market_entry_quality_enabled": strategy_payload.get("market_entry_quality_enabled"),
+        "market_entry_dip_phases": strategy_payload.get("market_entry_dip_phases"),
+        "market_entry_avoid_phases": strategy_payload.get("market_entry_avoid_phases"),
+        "market_entry_min_opportunity_score": strategy_payload.get("market_entry_min_opportunity_score"),
+        "market_entry_min_rebound_confirmation_score": strategy_payload.get("market_entry_min_rebound_confirmation_score"),
+        "market_entry_dip_size_multiplier": strategy_payload.get("market_entry_dip_size_multiplier"),
+        "market_entry_min_buy_score": strategy_payload.get("market_entry_min_buy_score"),
+        "market_entry_min_rebound_score": strategy_payload.get("market_entry_min_rebound_score"),
+        "market_entry_min_bottoming_score": strategy_payload.get("market_entry_min_bottoming_score"),
+        "max_open_sell_orders": strategy_payload.get("max_open_sell_orders"),
+        "max_open_buy_orders": strategy_payload.get("max_open_buy_orders"),
+        "max_inventory_usd": strategy_payload.get("max_inventory_usd"),
+        "max_trade_usd": strategy_payload.get("max_trade_usd"),
+        "position_size_pct": strategy_payload.get("position_size_pct"),
+        "practical_score": strategy_practical_score(summary),
+    }
+
+
+def write_csv(path, rows, ranked=False):
+    if not rows:
+        return None
+    resolved = os.path.abspath(path)
+    directory = os.path.dirname(resolved)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    if ranked:
+        rows = sorted(
+            rows,
+            key=lambda row: (
+                -(row.get("practical_score") or -999999),
+                -(row.get("estimated_total_pnl_usd") or -999999),
+                -(row.get("avg_net_return_pct") or -999999),
+                row.get("strategy_label") or "",
+            )
+        )
+    fieldnames = [
+        "strategy_label",
+        "practical_score",
+        "strategy_file",
+        "snapshots",
+        "buy_decisions",
+        "filled_trades",
+        "not_filled",
+        "win_rate",
+        "avg_net_return_pct",
+        "total_net_return_pct",
+        "estimated_total_pnl_usd",
+        "take_profit_count",
+        "stop_loss_count",
+        "timeout_count",
+        "buy_phase_counts",
+        "hold_phase_counts",
+        "buy_reason_counts",
+        "hold_reason_counts",
+        "sentiment_buy_threshold",
+        "market_entry_quality_enabled",
+        "market_entry_dip_phases",
+        "market_entry_avoid_phases",
+        "market_entry_min_opportunity_score",
+        "market_entry_min_rebound_confirmation_score",
+        "market_entry_dip_size_multiplier",
+        "market_entry_min_buy_score",
+        "market_entry_min_rebound_score",
+        "market_entry_min_bottoming_score",
+        "max_open_sell_orders",
+        "max_open_buy_orders",
+        "max_inventory_usd",
+        "max_trade_usd",
+        "position_size_pct",
+    ]
+    with open(resolved, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    return resolved
+
+
+def run_strategy_comparison(snapshots, args):
+    strategy_files = []
+    strategy_files.extend(load_strategy_test_set(args.strategy_test_set))
+    strategy_files.extend(args.strategy_file or [])
+    deduped = []
+    seen = set()
+    for path in strategy_files:
+        resolved = os.path.abspath(path)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        deduped.append(resolved)
+
+    rows = []
+    details = {}
+    for path in deduped:
+        payload = strategy_payload_from_file(path)
+        if not payload:
+            continue
+        replay = replay_variant(snapshots, "current", args, strategy_override=payload)
+        row = strategy_comparison_row(path, payload, replay)
+        rows.append(row)
+        details[row["strategy_label"]] = {
+            "strategy_file": path,
+            "summary": replay.get("summary"),
+            "recent_buys": replay.get("recent_buys"),
+        }
+
+    return {
+        "rows": rows,
+        "details": details,
+        "comparison_csv_file": write_csv(args.comparison_csv, rows, ranked=False),
+        "strategy_ranked_csv_file": write_csv(args.ranked_csv, rows, ranked=True),
+    }
+
+
+def replay_variant(snapshots, variant, args, strategy_override=None):
     events = []
     for snapshot in snapshots:
         event = evaluate_snapshot(
@@ -980,6 +1241,7 @@ def replay_variant(snapshots, variant, args):
             variant,
             args.strict_high_guard_pct,
             args.starting_usd,
+            strategy_override=strategy_override,
         )
         if event["status"] == "buy":
             event["simulation"] = simulate_trade(event, snapshots, args)
@@ -1087,6 +1349,8 @@ def main(argv=None):
             for variant in variants
         },
     }
+    if not args.no_strategy_comparison:
+        payload["strategy_comparison"] = run_strategy_comparison(snapshots, args)
     if args.stdout:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
