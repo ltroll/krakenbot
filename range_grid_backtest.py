@@ -434,6 +434,21 @@ def weather_leveling_score(weather_report):
     return state, score
 
 
+def config_token_set(config, key, default=""):
+    raw = config.get(key, default) if isinstance(config, dict) else default
+    if isinstance(raw, (list, tuple, set)):
+        return {
+            str(item).strip().lower()
+            for item in raw
+            if str(item).strip()
+        }
+    return {
+        token.strip().lower()
+        for token in str(raw or "").split(",")
+        if token.strip()
+    }
+
+
 def high_band_leveling_size_multiplier(config, buy_source, weather_report):
     if buy_source != "range_high_band":
         return 1.0
@@ -807,6 +822,98 @@ def price_is_above_allowed_entry(
         fallback_config,
     )
     return price > (level * (1 + tolerance_pct))
+
+
+def stale_level_reanchor_entry(price, level, config, buy_source, weather_report):
+    if buy_source not in ("range_low", "range_mean", "range_median"):
+        return {"allowed": False, "reason": "unsupported_source"}
+    if not strategy_bool(config, "stale_level_reanchor_enabled", False):
+        return {"allowed": False, "reason": "disabled"}
+    if price is None or level is None or price <= 0 or level <= 0 or price <= level:
+        return {"allowed": False, "reason": "not_above_level"}
+
+    above_pct = (price / level) - 1
+    min_above_pct = strategy_float(
+        config,
+        "stale_level_reanchor_min_above_level_pct",
+        0.0,
+    )
+    max_above_pct = strategy_float(
+        config,
+        "stale_level_reanchor_max_above_level_pct",
+        0.0,
+    )
+    if max_above_pct <= 0:
+        return {"allowed": False, "reason": "max_above_disabled"}
+    if above_pct < min_above_pct:
+        return {"allowed": False, "reason": "below_min_above_pct"}
+    if above_pct > max_above_pct:
+        return {"allowed": False, "reason": "above_max_above_pct"}
+
+    allowed_sources = config_token_set(
+        config,
+        "stale_level_reanchor_sources",
+        "range_low,range_mean,range_median",
+    )
+    if buy_source not in allowed_sources:
+        return {"allowed": False, "reason": "source_not_enabled"}
+
+    require_weather = strategy_bool(
+        config,
+        "stale_level_reanchor_require_weather",
+        True,
+    )
+    if require_weather and not weather_bot_decides(weather_report):
+        return {"allowed": False, "reason": "weather_unavailable"}
+    if weather_report.get("emergency_bell") or weather_report.get("alert_level") == "danger":
+        return {"allowed": False, "reason": "weather_danger"}
+
+    opportunity = weather_market_opportunity(weather_report)
+    phase = str(opportunity.get("cycle_phase") or "").strip().lower()
+    allowed_phases = config_token_set(
+        config,
+        "stale_level_reanchor_weather_phases",
+        "dip_leveling_entry,early_rebound,range_chop",
+    )
+    if require_weather and phase not in allowed_phases:
+        return {"allowed": False, "reason": "phase_not_enabled"}
+
+    entry_score = safe_float(opportunity.get("entry_opportunity_score"))
+    rebound_score = safe_float(opportunity.get("rebound_confirmation_score"))
+    exit_pressure_score = safe_float(opportunity.get("exit_pressure_score"))
+    min_entry_score = strategy_float(
+        config,
+        "stale_level_reanchor_min_entry_opportunity_score",
+        0.0,
+    )
+    min_rebound_score = strategy_float(
+        config,
+        "stale_level_reanchor_min_rebound_confirmation_score",
+        0.0,
+    )
+    max_exit_pressure_score = strategy_float(
+        config,
+        "stale_level_reanchor_max_exit_pressure_score",
+        1.0,
+    )
+    if entry_score is not None and entry_score < min_entry_score:
+        return {"allowed": False, "reason": "entry_score_low"}
+    if rebound_score is not None and rebound_score < min_rebound_score:
+        return {"allowed": False, "reason": "rebound_score_low"}
+    if exit_pressure_score is not None and exit_pressure_score > max_exit_pressure_score:
+        return {"allowed": False, "reason": "exit_pressure_high"}
+
+    return {
+        "allowed": True,
+        "reason": None,
+        "reanchor_price": price,
+        "original_level": level,
+        "above_level_pct": above_pct,
+        "weather_opportunity_phase": phase,
+        "weather_entry_opportunity_score": entry_score,
+        "weather_rebound_confirmation_score": rebound_score,
+        "weather_exit_pressure_score": exit_pressure_score,
+    }
 
 
 def source_sell_policy(config, buy_source):
@@ -2791,6 +2898,7 @@ def evaluate_candidate(snapshot, candidate, price):
     buy_source = candidate["buy_source"]
     level = safe_float(candidate["level"]) or 0.0
     key = str(candidate["level"])
+    stale_reanchor = {"allowed": False}
 
     last_sell_price = positive_or_default(state_info.get("last_sell_price"))
     last_sell_at = parse_iso8601(state_info.get("last_sell_at"))
@@ -2840,7 +2948,28 @@ def evaluate_candidate(snapshot, candidate, price):
     if mean_reversion_opportunity < mean_reversion_min_opportunity:
         return False, "mean_reversion_opportunity_below_min"
     if price_is_above_allowed_entry(price, level, config, buy_source):
-        return False, "price_above_level"
+        stale_reanchor = stale_level_reanchor_entry(
+            price,
+            level,
+            config,
+            buy_source,
+            weather_report,
+        )
+        if not stale_reanchor["allowed"]:
+            return False, "price_above_level"
+        candidate["original_level"] = level
+        candidate["level"] = stale_reanchor["reanchor_price"]
+        candidate["stale_level_reanchor_applied"] = True
+        candidate["stale_level_reanchor_above_level_pct"] = (
+            stale_reanchor["above_level_pct"]
+        )
+        candidate["stale_level_reanchor_reason"] = "market_accepted_higher_level"
+        level = safe_float(candidate["level"]) or level
+        key = str(candidate["level"])
+        if key in open_buy_levels:
+            return False, "open_buy_order"
+        if key in open_sell_levels:
+            return False, "open_sell_order"
     if int(state_info.get("open_sell_count") or 0) >= max_open_sell_orders:
         return False, "max_open_sell_orders"
     if deployed_inventory_usd >= max_inventory_usd:
@@ -3062,6 +3191,27 @@ def replay_from_snapshots(snapshots):
                     "buy_source": candidate["buy_source"],
                     "strategy_mode": candidate["strategy_mode"],
                     "level": round(candidate["level"], 2),
+                    "original_level": (
+                        round(candidate["original_level"], 2)
+                        if candidate.get("original_level") is not None
+                        else None
+                    ),
+                    "stale_level_reanchor_applied": bool(
+                        candidate.get("stale_level_reanchor_applied")
+                    ),
+                    "stale_level_reanchor_above_level_pct": (
+                        round(
+                            candidate["stale_level_reanchor_above_level_pct"],
+                            6,
+                        )
+                        if candidate.get(
+                            "stale_level_reanchor_above_level_pct"
+                        ) is not None
+                        else None
+                    ),
+                    "stale_level_reanchor_reason": candidate.get(
+                        "stale_level_reanchor_reason"
+                    ),
                     "sell_pct_override": candidate.get("sell_pct_override"),
                     "status": "approved_gate_only",
                     "reason": None,

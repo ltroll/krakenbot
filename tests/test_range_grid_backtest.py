@@ -851,6 +851,87 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertFalse(approved)
         self.assertEqual(reason, "price_above_level")
 
+    def test_evaluate_candidate_reanchors_stale_low_level_when_weather_supports(self):
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            103.0,
+            strategy_modes=["low", "median"],
+            strategy_overrides={
+                "stale_level_reanchor_enabled": True,
+                "stale_level_reanchor_sources": "range_low,range_median",
+                "stale_level_reanchor_min_above_level_pct": 0.006,
+                "stale_level_reanchor_max_above_level_pct": 0.035,
+                "stale_level_reanchor_weather_phases": "dip_leveling_entry",
+                "stale_level_reanchor_min_entry_opportunity_score": 0.45,
+                "stale_level_reanchor_max_exit_pressure_score": 0.45,
+            },
+            risk_context={
+                "weather_report": {
+                    "mode": "weather_report",
+                    "bot_decision_authority": "bot",
+                    "trade_permission": "bot_decides",
+                    "condition": "constructive",
+                    "alert_level": "normal",
+                    "emergency_bell": False,
+                    "market_opportunity": {
+                        "cycle_phase": "dip_leveling_entry",
+                        "entry_opportunity_score": 0.67,
+                        "rebound_confirmation_score": 0.58,
+                        "exit_pressure_score": 0.21,
+                    },
+                },
+            },
+        )
+        candidate = {
+            "level": 100.0,
+            "buy_source": "range_low",
+            "strategy_mode": "low",
+        }
+
+        approved, reason = backtest.evaluate_candidate(snapshot, candidate, 103.0)
+
+        self.assertTrue(approved)
+        self.assertIsNone(reason)
+        self.assertEqual(candidate["original_level"], 100.0)
+        self.assertEqual(candidate["level"], 103.0)
+        self.assertTrue(candidate["stale_level_reanchor_applied"])
+
+    def test_evaluate_candidate_reanchor_keeps_max_above_level_cap(self):
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            104.0,
+            strategy_modes=["low", "median"],
+            strategy_overrides={
+                "stale_level_reanchor_enabled": True,
+                "stale_level_reanchor_sources": "range_low,range_median",
+                "stale_level_reanchor_max_above_level_pct": 0.035,
+            },
+            risk_context={
+                "weather_report": {
+                    "mode": "weather_report",
+                    "bot_decision_authority": "bot",
+                    "trade_permission": "bot_decides",
+                    "condition": "constructive",
+                    "alert_level": "normal",
+                    "emergency_bell": False,
+                    "market_opportunity": {
+                        "cycle_phase": "dip_leveling_entry",
+                        "entry_opportunity_score": 0.67,
+                    },
+                },
+            },
+        )
+        candidate = {
+            "level": 100.0,
+            "buy_source": "range_low",
+            "strategy_mode": "low",
+        }
+
+        approved, reason = backtest.evaluate_candidate(snapshot, candidate, 104.0)
+
+        self.assertFalse(approved)
+        self.assertEqual(reason, "price_above_level")
+
     def test_high_band_above_last_sell_guard_stays_default_without_breakout_override(self):
         snapshot = make_snapshot(
             "2026-06-13T12:00:00+00:00",

@@ -2266,6 +2266,31 @@ def weather_leveling_score(weather_report):
     return state, score
 
 
+def config_token_set(config, key, default=""):
+    raw = config.get(key, default) if isinstance(config, dict) else default
+    if isinstance(raw, (list, tuple, set)):
+        return {
+            str(item).strip().lower()
+            for item in raw
+            if str(item).strip()
+        }
+    return {
+        token.strip().lower()
+        for token in str(raw or "").split(",")
+        if token.strip()
+    }
+
+
+def config_token_set_with_fallback(config, fallback_config, key, default=""):
+    tokens = config_token_set(config, key, None)
+    if tokens:
+        return tokens
+    tokens = config_token_set(fallback_config, key, None)
+    if tokens:
+        return tokens
+    return config_token_set({}, key, default)
+
+
 def high_band_leveling_size_multiplier(config, buy_source, weather_report):
     if buy_source != "range_high_band":
         return 1.0
@@ -2852,6 +2877,118 @@ def price_is_above_allowed_entry(
         fallback_config
     )
     return price > (level * (1 + tolerance_pct))
+
+
+def stale_level_reanchor_entry(
+    price,
+    level,
+    config,
+    buy_source,
+    weather_report,
+    fallback_config=None,
+):
+    if buy_source not in ("range_low", "range_mean", "range_median"):
+        return {"allowed": False, "reason": "unsupported_source"}
+    if not strategy_bool_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_enabled",
+        False,
+    ):
+        return {"allowed": False, "reason": "disabled"}
+    if price is None or level is None or price <= 0 or level <= 0 or price <= level:
+        return {"allowed": False, "reason": "not_above_level"}
+
+    above_pct = (price / level) - 1
+    min_above_pct = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_min_above_level_pct",
+        0.0,
+    )
+    max_above_pct = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_max_above_level_pct",
+        0.0,
+    )
+    if max_above_pct <= 0:
+        return {"allowed": False, "reason": "max_above_disabled"}
+    if above_pct < min_above_pct:
+        return {"allowed": False, "reason": "below_min_above_pct"}
+    if above_pct > max_above_pct:
+        return {"allowed": False, "reason": "above_max_above_pct"}
+
+    allowed_sources = config_token_set_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_sources",
+        "range_low,range_mean,range_median",
+    )
+    if buy_source not in allowed_sources:
+        return {"allowed": False, "reason": "source_not_enabled"}
+
+    require_weather = strategy_bool_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_require_weather",
+        True,
+    )
+    if require_weather and not weather_bot_decides(weather_report):
+        return {"allowed": False, "reason": "weather_unavailable"}
+    if weather_report.get("emergency_bell") or weather_report.get("alert_level") == "danger":
+        return {"allowed": False, "reason": "weather_danger"}
+
+    opportunity = weather_market_opportunity(weather_report)
+    phase = str(opportunity.get("cycle_phase") or "").strip().lower()
+    allowed_phases = config_token_set_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_weather_phases",
+        "dip_leveling_entry,early_rebound,range_chop",
+    )
+    if require_weather and phase not in allowed_phases:
+        return {"allowed": False, "reason": "phase_not_enabled"}
+
+    entry_score = optional_float(opportunity.get("entry_opportunity_score"))
+    rebound_score = optional_float(opportunity.get("rebound_confirmation_score"))
+    exit_pressure_score = optional_float(opportunity.get("exit_pressure_score"))
+    min_entry_score = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_min_entry_opportunity_score",
+        0.0,
+    )
+    min_rebound_score = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_min_rebound_confirmation_score",
+        0.0,
+    )
+    max_exit_pressure_score = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_max_exit_pressure_score",
+        1.0,
+    )
+    if entry_score is not None and entry_score < min_entry_score:
+        return {"allowed": False, "reason": "entry_score_low"}
+    if rebound_score is not None and rebound_score < min_rebound_score:
+        return {"allowed": False, "reason": "rebound_score_low"}
+    if exit_pressure_score is not None and exit_pressure_score > max_exit_pressure_score:
+        return {"allowed": False, "reason": "exit_pressure_high"}
+
+    return {
+        "allowed": True,
+        "reason": None,
+        "reanchor_price": price,
+        "original_level": level,
+        "above_level_pct": above_pct,
+        "weather_opportunity_phase": phase,
+        "weather_entry_opportunity_score": entry_score,
+        "weather_rebound_confirmation_score": rebound_score,
+        "weather_exit_pressure_score": exit_pressure_score,
+    }
 
 
 def strategy_bool_with_fallback(config, fallback_config, key, default=False):
@@ -4630,6 +4767,13 @@ def main():
                         txid=txid,
                         trade_id=order.get("trade_id") or txid,
                         level=level,
+                        original_level=order.get("original_level"),
+                        stale_level_reanchor_applied=bool(
+                            order.get("stale_level_reanchor_applied")
+                        ),
+                        stale_level_reanchor_above_level_pct=(
+                            order.get("stale_level_reanchor_above_level_pct")
+                        ),
                         volume=round(order["volume"], VOLUME_DECIMALS),
                         price=round(buy_price, PRICE_DECIMALS),
                         hold_minutes=hold_minutes,
@@ -4642,6 +4786,13 @@ def main():
                         txid=txid,
                         trade_id=order.get("trade_id") or txid,
                         level=level,
+                        original_level=order.get("original_level"),
+                        stale_level_reanchor_applied=bool(
+                            order.get("stale_level_reanchor_applied")
+                        ),
+                        stale_level_reanchor_above_level_pct=(
+                            order.get("stale_level_reanchor_above_level_pct")
+                        ),
                         volume=round(order["volume"], VOLUME_DECIMALS),
                         price=round(buy_price, PRICE_DECIMALS),
                         buy_source=buy_source,
@@ -4850,7 +5001,14 @@ def main():
                     "placed_at": cycle_id,
                     "sell_pct_override": target_profit_pct,
                     "buy_source": buy_source,
-                    "trade_id": order.get("trade_id") or order.get("txid")
+                    "trade_id": order.get("trade_id") or order.get("txid"),
+                    "original_level": order.get("original_level"),
+                    "stale_level_reanchor_applied": bool(
+                        order.get("stale_level_reanchor_applied")
+                    ),
+                    "stale_level_reanchor_above_level_pct": (
+                        order.get("stale_level_reanchor_above_level_pct")
+                    )
                 }
                 del state["open_buy_orders"][level]
                 state["stats"]["sell_orders_placed"] += 1
@@ -4871,6 +5029,13 @@ def main():
                     volume=round(order["volume"], VOLUME_DECIMALS),
                     price=round(sell_price, PRICE_DECIMALS),
                     buy_price=round(buy_price, PRICE_DECIMALS),
+                    original_level=order.get("original_level"),
+                    stale_level_reanchor_applied=bool(
+                        order.get("stale_level_reanchor_applied")
+                    ),
+                    stale_level_reanchor_above_level_pct=(
+                        order.get("stale_level_reanchor_above_level_pct")
+                    ),
                     sell_pct_override=sell_pct_override,
                     buy_source=buy_source
                 )
@@ -4883,6 +5048,13 @@ def main():
                     volume=round(order["volume"], VOLUME_DECIMALS),
                     price=round(sell_price, PRICE_DECIMALS),
                     buy_price=round(buy_price, PRICE_DECIMALS),
+                    original_level=order.get("original_level"),
+                    stale_level_reanchor_applied=bool(
+                        order.get("stale_level_reanchor_applied")
+                    ),
+                    stale_level_reanchor_above_level_pct=(
+                        order.get("stale_level_reanchor_above_level_pct")
+                    ),
                     sell_pct_override=sell_pct_override,
                     buy_source=buy_source
                 )
@@ -5210,6 +5382,8 @@ def main():
                         candidate_effective_max_inventory_usd
                     )
                     flow_control = flow_adjustment(flow_pressure, buy_source)
+                    original_level = level
+                    stale_reanchor = {"allowed": False}
                     key = str(level)
                     skip_reason = None
                     high_band_guard = {"allowed": True, "reason": None}
@@ -5252,7 +5426,25 @@ def main():
                         buy_source,
                         strategy_config
                     ):
-                        skip_reason = "price_above_level"
+                        stale_reanchor = stale_level_reanchor_entry(
+                            price,
+                            level,
+                            route_config,
+                            buy_source,
+                            weather_report,
+                            strategy_config,
+                        )
+                        if stale_reanchor["allowed"]:
+                            original_level = level
+                            level = stale_reanchor["reanchor_price"]
+                            key = str(level)
+                            momentum_entry_max_price = level
+                            if key in state["open_buy_orders"]:
+                                skip_reason = "open_buy_order"
+                            elif key in reserved_sell_levels:
+                                skip_reason = "open_sell_order"
+                        else:
+                            skip_reason = "price_above_level"
                     elif (
                         len(state["open_sell_orders"])
                         >= candidate_effective_max_open_sell_orders
@@ -5374,6 +5566,27 @@ def main():
                             "BUY_CANDIDATE_SKIPPED",
                             cycle_id=cycle_id,
                             level=round(level, PRICE_DECIMALS),
+                            original_level=(
+                                round(original_level, PRICE_DECIMALS)
+                                if original_level != level
+                                else None
+                            ),
+                            stale_level_reanchor_applied=bool(
+                                stale_reanchor.get("allowed")
+                            ),
+                            stale_level_reanchor_above_level_pct=(
+                                round(
+                                    stale_reanchor.get("above_level_pct"),
+                                    6,
+                                )
+                                if stale_reanchor.get("above_level_pct") is not None
+                                else None
+                            ),
+                            stale_level_reanchor_reason=(
+                                "market_accepted_higher_level"
+                                if stale_reanchor.get("allowed")
+                                else stale_reanchor.get("reason")
+                            ),
                             market_price=price,
                             execution_signal=execution_signal,
                             action_recommendation=action_recommendation,
@@ -5541,6 +5754,27 @@ def main():
                             "GRID_LEVEL_EVAL",
                             cycle_id=cycle_id,
                             level=round(level, PRICE_DECIMALS),
+                            original_level=(
+                                round(original_level, PRICE_DECIMALS)
+                                if original_level != level
+                                else None
+                            ),
+                            stale_level_reanchor_applied=bool(
+                                stale_reanchor.get("allowed")
+                            ),
+                            stale_level_reanchor_above_level_pct=(
+                                round(
+                                    stale_reanchor.get("above_level_pct"),
+                                    6,
+                                )
+                                if stale_reanchor.get("above_level_pct") is not None
+                                else None
+                            ),
+                            stale_level_reanchor_reason=(
+                                "market_accepted_higher_level"
+                                if stale_reanchor.get("allowed")
+                                else stale_reanchor.get("reason")
+                            ),
                             market_price=price,
                             execution_signal=execution_signal,
                             usd_balance=usd,
@@ -5650,6 +5884,24 @@ def main():
                         volume=round(volume, VOLUME_DECIMALS),
                         trade_notional_usd=round(trade_notional_usd, 8),
                         price=round(level, PRICE_DECIMALS),
+                        original_level=(
+                            round(original_level, PRICE_DECIMALS)
+                            if original_level != level
+                            else None
+                        ),
+                        stale_level_reanchor_applied=bool(
+                            stale_reanchor.get("allowed")
+                        ),
+                        stale_level_reanchor_above_level_pct=(
+                            round(stale_reanchor.get("above_level_pct"), 6)
+                            if stale_reanchor.get("above_level_pct") is not None
+                            else None
+                        ),
+                        stale_level_reanchor_reason=(
+                            "market_accepted_higher_level"
+                            if stale_reanchor.get("allowed")
+                            else stale_reanchor.get("reason")
+                        ),
                         execution_signal=execution_signal,
                         usd_balance=usd,
                         available_usd_balance=round(available_usd, 8),
@@ -5751,6 +6003,27 @@ def main():
                             "mode": "shadow",
                             "cycle_id": cycle_id,
                             "level": round(level, PRICE_DECIMALS),
+                            "original_level": (
+                                round(original_level, PRICE_DECIMALS)
+                                if original_level != level
+                                else None
+                            ),
+                            "stale_level_reanchor_applied": bool(
+                                stale_reanchor.get("allowed")
+                            ),
+                            "stale_level_reanchor_above_level_pct": (
+                                round(
+                                    stale_reanchor.get("above_level_pct"),
+                                    6,
+                                )
+                                if stale_reanchor.get("above_level_pct") is not None
+                                else None
+                            ),
+                            "stale_level_reanchor_reason": (
+                                "market_accepted_higher_level"
+                                if stale_reanchor.get("allowed")
+                                else stale_reanchor.get("reason")
+                            ),
                             "volume": round(volume, VOLUME_DECIMALS),
                             "trade_notional_usd": round(trade_notional_usd, 8),
                             "market_price": price,
@@ -5828,6 +6101,27 @@ def main():
                             "PAPER_BUY_ORDER_PLANNED",
                             cycle_id=cycle_id,
                             level=round(level, PRICE_DECIMALS),
+                            original_level=(
+                                round(original_level, PRICE_DECIMALS)
+                                if original_level != level
+                                else None
+                            ),
+                            stale_level_reanchor_applied=bool(
+                                stale_reanchor.get("allowed")
+                            ),
+                            stale_level_reanchor_above_level_pct=(
+                                round(
+                                    stale_reanchor.get("above_level_pct"),
+                                    6,
+                                )
+                                if stale_reanchor.get("above_level_pct") is not None
+                                else None
+                            ),
+                            stale_level_reanchor_reason=(
+                                "market_accepted_higher_level"
+                                if stale_reanchor.get("allowed")
+                                else stale_reanchor.get("reason")
+                            ),
                             volume=round(volume, VOLUME_DECIMALS),
                             trade_notional_usd=round(trade_notional_usd, 8),
                             market_price=price,
@@ -5871,6 +6165,27 @@ def main():
                             mode="paper",
                             cycle_id=cycle_id,
                             level=round(level, PRICE_DECIMALS),
+                            original_level=(
+                                round(original_level, PRICE_DECIMALS)
+                                if original_level != level
+                                else None
+                            ),
+                            stale_level_reanchor_applied=bool(
+                                stale_reanchor.get("allowed")
+                            ),
+                            stale_level_reanchor_above_level_pct=(
+                                round(
+                                    stale_reanchor.get("above_level_pct"),
+                                    6,
+                                )
+                                if stale_reanchor.get("above_level_pct") is not None
+                                else None
+                            ),
+                            stale_level_reanchor_reason=(
+                                "market_accepted_higher_level"
+                                if stale_reanchor.get("allowed")
+                                else stale_reanchor.get("reason")
+                            ),
                             volume=round(volume, VOLUME_DECIMALS),
                             trade_notional_usd=round(trade_notional_usd, 8),
                             market_price=price,
@@ -5996,6 +6311,15 @@ def main():
                         "txid": txid,
                         "volume": volume,
                         "price": level,
+                        "original_level": (
+                            original_level if original_level != level else None
+                        ),
+                        "stale_level_reanchor_applied": bool(
+                            stale_reanchor.get("allowed")
+                        ),
+                        "stale_level_reanchor_above_level_pct": (
+                            stale_reanchor.get("above_level_pct")
+                        ),
                         "placed_at": cycle_id,
                         "sell_pct_override": active_sell_pct_override,
                         "buy_source": buy_source,
@@ -6045,6 +6369,24 @@ def main():
                         trade_id=txid,
                         volume=round(volume, VOLUME_DECIMALS),
                         price=round(level, PRICE_DECIMALS),
+                        original_level=(
+                            round(original_level, PRICE_DECIMALS)
+                            if original_level != level
+                            else None
+                        ),
+                        stale_level_reanchor_applied=bool(
+                            stale_reanchor.get("allowed")
+                        ),
+                        stale_level_reanchor_above_level_pct=(
+                            round(stale_reanchor.get("above_level_pct"), 6)
+                            if stale_reanchor.get("above_level_pct") is not None
+                            else None
+                        ),
+                        stale_level_reanchor_reason=(
+                            "market_accepted_higher_level"
+                            if stale_reanchor.get("allowed")
+                            else stale_reanchor.get("reason")
+                        ),
                         buy_source=buy_source,
                         sell_pct_override=active_sell_pct_override,
                         above_last_sell_breakout_bypass=(
@@ -6085,6 +6427,24 @@ def main():
                         trade_id=txid,
                         volume=round(volume, VOLUME_DECIMALS),
                         price=round(level, PRICE_DECIMALS),
+                        original_level=(
+                            round(original_level, PRICE_DECIMALS)
+                            if original_level != level
+                            else None
+                        ),
+                        stale_level_reanchor_applied=bool(
+                            stale_reanchor.get("allowed")
+                        ),
+                        stale_level_reanchor_above_level_pct=(
+                            round(stale_reanchor.get("above_level_pct"), 6)
+                            if stale_reanchor.get("above_level_pct") is not None
+                            else None
+                        ),
+                        stale_level_reanchor_reason=(
+                            "market_accepted_higher_level"
+                            if stale_reanchor.get("allowed")
+                            else stale_reanchor.get("reason")
+                        ),
                         trade_notional_usd=round(level * volume, 8),
                         buy_source=buy_source,
                         sell_pct_override=active_sell_pct_override,

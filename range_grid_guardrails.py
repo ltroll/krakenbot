@@ -108,6 +108,8 @@ def validate_strategy_config(strategy_config):
         "high_anchor_backlog_soft_release_minutes",
         "sell_backlog_soft_release_minutes",
         "mean_reversion_min_opportunity",
+        "stale_level_reanchor_min_above_level_pct",
+        "stale_level_reanchor_max_above_level_pct",
     )
     for field in non_negative_numeric_fields:
         value = strategy_config.get(field)
@@ -144,6 +146,9 @@ def validate_strategy_config(strategy_config):
         "weather_leveling_high_band_size_threshold",
         "weather_leveling_high_band_size_multiplier",
         "weather_leveling_high_band_bypass_block_threshold",
+        "stale_level_reanchor_min_entry_opportunity_score",
+        "stale_level_reanchor_min_rebound_confirmation_score",
+        "stale_level_reanchor_max_exit_pressure_score",
     )
     for field in bounded_score_fields:
         value = strategy_config.get(field)
