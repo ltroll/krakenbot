@@ -1134,6 +1134,177 @@ def realized_pnl_for_utc_day(day_start):
     return total
 
 
+def recent_activity_log_paths(now, lookback_hours):
+    paths = []
+    if ACTIVITY_LOG_FILE:
+        if ACTIVITY_LOG_ROTATE_DAILY:
+            start = now - timedelta(hours=max(0.0, float(lookback_hours or 0.0)))
+            day = start.date()
+            while day <= now.date():
+                paths.append(
+                    rotated_log_path(
+                        ACTIVITY_LOG_FILE,
+                        datetime.combine(
+                            day,
+                            datetime.min.time(),
+                            tzinfo=timezone.utc,
+                        ),
+                    )
+                )
+                day += timedelta(days=1)
+        else:
+            paths.append(ACTIVITY_LOG_FILE)
+    return list(dict.fromkeys(paths))
+
+
+def sell_profit_summary_from_paths(paths, since_dt):
+    count = 0
+    total_net_pnl = 0.0
+    net_return_pcts = []
+
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except Exception:
+                        continue
+                    if record.get("event") != "SELL_ORDER_FILLED":
+                        continue
+                    ts = parse_iso8601(record.get("ts"))
+                    if ts is None or ts < since_dt:
+                        continue
+                    net_pnl = optional_float(record.get("estimated_net_pnl"))
+                    if net_pnl is None:
+                        continue
+                    volume = optional_float(record.get("volume"))
+                    buy_price = optional_float(record.get("buy_price"))
+                    buy_notional = (
+                        volume * buy_price
+                        if volume is not None
+                        and buy_price is not None
+                        and volume > 0
+                        and buy_price > 0
+                        else None
+                    )
+                    count += 1
+                    total_net_pnl += net_pnl
+                    if buy_notional:
+                        net_return_pcts.append((net_pnl / buy_notional) * 100.0)
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            log_event(
+                "RECENT_PROFIT_SCAN_ERROR",
+                message=str(e),
+                path=path,
+            )
+
+    avg_net_return_pct = (
+        statistics.mean(net_return_pcts)
+        if net_return_pcts
+        else None
+    )
+    return {
+        "count": count,
+        "return_pct_count": len(net_return_pcts),
+        "total_net_pnl": total_net_pnl,
+        "avg_net_pnl": (total_net_pnl / count if count else None),
+        "avg_net_return_pct": avg_net_return_pct,
+    }
+
+
+def recent_sell_profit_summary(now, lookback_hours):
+    since_dt = now - timedelta(hours=max(0.0, float(lookback_hours or 0.0)))
+    activity_summary = sell_profit_summary_from_paths(
+        recent_activity_log_paths(now, lookback_hours),
+        since_dt,
+    )
+    if activity_summary["count"] > 0:
+        return activity_summary
+    return sell_profit_summary_from_paths([LOG_FILE], since_dt)
+
+
+def stale_level_reanchor_profit_guard(config, now):
+    if not strategy_bool(config, "stale_level_reanchor_profit_guard_enabled", False):
+        return {"allowed": True, "enabled": False}
+
+    lookback_hours = strategy_float(
+        config,
+        "stale_level_reanchor_profit_lookback_hours",
+        24.0,
+    )
+    min_samples = int(
+        strategy_float(
+            config,
+            "stale_level_reanchor_profit_min_samples",
+            1,
+        )
+    )
+    min_projected_avg = strategy_float(
+        config,
+        "stale_level_reanchor_min_projected_avg_net_return_pct",
+        0.0,
+    )
+    assumed_return = strategy_float(
+        config,
+        "stale_level_reanchor_assumed_net_return_pct",
+        0.0,
+    )
+    fail_closed = strategy_bool(
+        config,
+        "stale_level_reanchor_profit_guard_fail_closed",
+        True,
+    )
+    cache_key = (
+        round(float(lookback_hours or 0.0), 4),
+        now.replace(second=0, microsecond=0).isoformat(),
+    )
+    cache = getattr(stale_level_reanchor_profit_guard, "_cache", {})
+    if cache_key not in cache:
+        cache[cache_key] = recent_sell_profit_summary(now, lookback_hours)
+        stale_level_reanchor_profit_guard._cache = cache
+    summary = cache[cache_key]
+    count = int(summary.get("return_pct_count") or 0)
+    avg_return = summary.get("avg_net_return_pct")
+
+    if count < min_samples or avg_return is None:
+        return {
+            "allowed": not fail_closed,
+            "enabled": True,
+            "reason": "insufficient_recent_profit_samples",
+            "lookback_hours": lookback_hours,
+            "min_samples": min_samples,
+            "sample_count": count,
+            "avg_net_return_pct": avg_return,
+            "assumed_net_return_pct": assumed_return,
+            "min_projected_avg_net_return_pct": min_projected_avg,
+            "projected_avg_net_return_pct": None,
+        }
+
+    projected_avg = ((avg_return * count) + assumed_return) / (count + 1)
+    return {
+        "allowed": projected_avg >= min_projected_avg,
+        "enabled": True,
+        "reason": (
+            None
+            if projected_avg >= min_projected_avg
+            else "projected_avg_net_return_below_target"
+        ),
+        "lookback_hours": lookback_hours,
+        "min_samples": min_samples,
+        "sample_count": count,
+        "avg_net_return_pct": avg_return,
+        "assumed_net_return_pct": assumed_return,
+        "min_projected_avg_net_return_pct": min_projected_avg,
+        "projected_avg_net_return_pct": projected_avg,
+    }
+
+
 def write_status_snapshot(payload):
     try:
         write_json_file(STATUS_FILE, payload)
@@ -2886,6 +3057,7 @@ def stale_level_reanchor_entry(
     buy_source,
     weather_report,
     fallback_config=None,
+    profit_guard=None,
 ):
     if buy_source not in ("range_low", "range_mean", "range_median"):
         return {"allowed": False, "reason": "unsupported_source"}
@@ -2978,6 +3150,15 @@ def stale_level_reanchor_entry(
     if exit_pressure_score is not None and exit_pressure_score > max_exit_pressure_score:
         return {"allowed": False, "reason": "exit_pressure_high"}
 
+    if profit_guard and not profit_guard.get("allowed", True):
+        return {
+            "allowed": False,
+            "reason": "profit_guard_" + str(
+                profit_guard.get("reason") or "blocked"
+            ),
+            "profit_guard": profit_guard,
+        }
+
     return {
         "allowed": True,
         "reason": None,
@@ -2988,6 +3169,50 @@ def stale_level_reanchor_entry(
         "weather_entry_opportunity_score": entry_score,
         "weather_rebound_confirmation_score": rebound_score,
         "weather_exit_pressure_score": exit_pressure_score,
+        "profit_guard": profit_guard or {"enabled": False},
+    }
+
+
+def stale_reanchor_profit_guard_log_fields(stale_reanchor):
+    profit_guard = (
+        stale_reanchor.get("profit_guard")
+        if isinstance(stale_reanchor, dict)
+        else None
+    )
+    if not isinstance(profit_guard, dict):
+        profit_guard = {"enabled": False}
+    return {
+        "stale_level_reanchor_profit_guard_enabled": bool(
+            profit_guard.get("enabled")
+        ),
+        "stale_level_reanchor_profit_guard_allowed": (
+            profit_guard.get("allowed")
+            if profit_guard.get("enabled")
+            else None
+        ),
+        "stale_level_reanchor_profit_guard_reason": profit_guard.get("reason"),
+        "stale_level_reanchor_profit_sample_count": (
+            profit_guard.get("sample_count")
+        ),
+        "stale_level_reanchor_profit_lookback_hours": (
+            profit_guard.get("lookback_hours")
+        ),
+        "stale_level_reanchor_recent_avg_net_return_pct": (
+            round(profit_guard.get("avg_net_return_pct"), 6)
+            if profit_guard.get("avg_net_return_pct") is not None
+            else None
+        ),
+        "stale_level_reanchor_assumed_net_return_pct": (
+            profit_guard.get("assumed_net_return_pct")
+        ),
+        "stale_level_reanchor_min_projected_avg_net_return_pct": (
+            profit_guard.get("min_projected_avg_net_return_pct")
+        ),
+        "stale_level_reanchor_projected_avg_net_return_pct": (
+            round(profit_guard.get("projected_avg_net_return_pct"), 6)
+            if profit_guard.get("projected_avg_net_return_pct") is not None
+            else None
+        ),
     }
 
 
@@ -5433,6 +5658,10 @@ def main():
                             buy_source,
                             weather_report,
                             strategy_config,
+                            stale_level_reanchor_profit_guard(
+                                route_config,
+                                now,
+                            ),
                         )
                         if stale_reanchor["allowed"]:
                             original_level = level
@@ -5444,7 +5673,13 @@ def main():
                             elif key in reserved_sell_levels:
                                 skip_reason = "open_sell_order"
                         else:
-                            skip_reason = "price_above_level"
+                            skip_reason = (
+                                stale_reanchor.get("reason")
+                                if str(stale_reanchor.get("reason") or "").startswith(
+                                    "profit_guard_"
+                                )
+                                else "price_above_level"
+                            )
                     elif (
                         len(state["open_sell_orders"])
                         >= candidate_effective_max_open_sell_orders
@@ -5586,6 +5821,9 @@ def main():
                                 "market_accepted_higher_level"
                                 if stale_reanchor.get("allowed")
                                 else stale_reanchor.get("reason")
+                            ),
+                            **stale_reanchor_profit_guard_log_fields(
+                                stale_reanchor
                             ),
                             market_price=price,
                             execution_signal=execution_signal,
@@ -5775,6 +6013,9 @@ def main():
                                 if stale_reanchor.get("allowed")
                                 else stale_reanchor.get("reason")
                             ),
+                            **stale_reanchor_profit_guard_log_fields(
+                                stale_reanchor
+                            ),
                             market_price=price,
                             execution_signal=execution_signal,
                             usd_balance=usd,
@@ -5902,6 +6143,7 @@ def main():
                             if stale_reanchor.get("allowed")
                             else stale_reanchor.get("reason")
                         ),
+                        **stale_reanchor_profit_guard_log_fields(stale_reanchor),
                         execution_signal=execution_signal,
                         usd_balance=usd,
                         available_usd_balance=round(available_usd, 8),
@@ -6024,6 +6266,9 @@ def main():
                                 if stale_reanchor.get("allowed")
                                 else stale_reanchor.get("reason")
                             ),
+                            **stale_reanchor_profit_guard_log_fields(
+                                stale_reanchor
+                            ),
                             "volume": round(volume, VOLUME_DECIMALS),
                             "trade_notional_usd": round(trade_notional_usd, 8),
                             "market_price": price,
@@ -6122,6 +6367,9 @@ def main():
                                 if stale_reanchor.get("allowed")
                                 else stale_reanchor.get("reason")
                             ),
+                            **stale_reanchor_profit_guard_log_fields(
+                                stale_reanchor
+                            ),
                             volume=round(volume, VOLUME_DECIMALS),
                             trade_notional_usd=round(trade_notional_usd, 8),
                             market_price=price,
@@ -6185,6 +6433,9 @@ def main():
                                 "market_accepted_higher_level"
                                 if stale_reanchor.get("allowed")
                                 else stale_reanchor.get("reason")
+                            ),
+                            **stale_reanchor_profit_guard_log_fields(
+                                stale_reanchor
                             ),
                             volume=round(volume, VOLUME_DECIMALS),
                             trade_notional_usd=round(trade_notional_usd, 8),
@@ -6387,6 +6638,7 @@ def main():
                             if stale_reanchor.get("allowed")
                             else stale_reanchor.get("reason")
                         ),
+                        **stale_reanchor_profit_guard_log_fields(stale_reanchor),
                         buy_source=buy_source,
                         sell_pct_override=active_sell_pct_override,
                         above_last_sell_breakout_bypass=(
@@ -6445,6 +6697,7 @@ def main():
                             if stale_reanchor.get("allowed")
                             else stale_reanchor.get("reason")
                         ),
+                        **stale_reanchor_profit_guard_log_fields(stale_reanchor),
                         trade_notional_usd=round(level * volume, 8),
                         buy_source=buy_source,
                         sell_pct_override=active_sell_pct_override,

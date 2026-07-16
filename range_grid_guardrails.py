@@ -110,6 +110,8 @@ def validate_strategy_config(strategy_config):
         "mean_reversion_min_opportunity",
         "stale_level_reanchor_min_above_level_pct",
         "stale_level_reanchor_max_above_level_pct",
+        "stale_level_reanchor_profit_lookback_hours",
+        "stale_level_reanchor_profit_min_samples",
     )
     for field in non_negative_numeric_fields:
         value = strategy_config.get(field)
