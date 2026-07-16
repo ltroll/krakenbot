@@ -413,6 +413,26 @@ SHADOW_TRADES_ENABLED = env_profile_bool(
 EXECUTION_BUFFER_PCT = profile_float("execution_buffer_pct", 0.0025)
 REBALANCE_COOLDOWN_MINUTES = profile_float("rebalance_cooldown_minutes", 15)
 COOLDOWN_OVERRIDE_SIGNAL_ABS = profile_float("cooldown_override_signal_abs", 0.20)
+ENTRY_PACING_ENABLED = env_profile_bool(
+    "ENTRY_PACING_ENABLED",
+    "entry_pacing_enabled",
+    True
+)
+ENTRY_PACING_WINDOW_MINUTES = env_profile_float(
+    "ENTRY_PACING_WINDOW_MINUTES",
+    "entry_pacing_window_minutes",
+    120
+)
+ENTRY_PACING_MAX_BUYS = env_profile_int(
+    "ENTRY_PACING_MAX_BUYS",
+    "entry_pacing_max_buys",
+    2
+)
+ENTRY_PACING_MIN_PRICE_MOVE_PCT = env_profile_float(
+    "ENTRY_PACING_MIN_PRICE_MOVE_PCT",
+    "entry_pacing_min_price_move_pct",
+    0.005
+)
 SENTIMENT_BUY_THRESHOLD = profile_float("sentiment_buy_threshold", 0.03)
 POSITION_SIZE_PCT = profile_float("position_size_pct", 0.10)
 MAX_TRADE_USD = profile_float("max_trade_usd", 0)
@@ -1068,6 +1088,17 @@ def pause_kraken_private_api(reason):
     )
 
 
+def kraken_private_terminal_error(message):
+    return any(
+        marker in message
+        for marker in (
+            "Temporary lockout",
+            "Invalid key",
+            "Permission denied"
+        )
+    )
+
+
 def kraken_signature(endpoint, data):
     postdata = "&".join([f"{k}={v}" for k, v in data.items()])
     encoded = (str(data["nonce"]) + postdata).encode()
@@ -1132,7 +1163,7 @@ def safe_kraken_private(label, endpoint, data=None):
                 kraken_key_fingerprint=key_fingerprint(KRAKEN_API_KEY)
             )
 
-            if "Temporary lockout" in message or "Invalid key" in message:
+            if kraken_private_terminal_error(message):
                 pause_kraken_private_api(message)
                 return None
 
@@ -2558,6 +2589,84 @@ def cooldown_active(now, weighted_signal):
     }
 
 
+def trade_entry_price(entry):
+    for key in ("price", "fill_price", "buy_price"):
+        value = numeric_or_none(entry.get(key))
+        if value is not None and value > 0:
+            return value
+    return None
+
+
+def recent_buy_entries(now):
+    if not ENTRY_PACING_ENABLED or ENTRY_PACING_WINDOW_MINUTES <= 0:
+        return []
+
+    cutoff_seconds = ENTRY_PACING_WINDOW_MINUTES * 60
+    entries = []
+    for entry in state.get("trade_history", []):
+        if entry.get("side") != "buy":
+            continue
+
+        entry_time = parse_iso8601(entry.get("ts"))
+        if entry_time is None:
+            continue
+
+        age_seconds = (now - entry_time).total_seconds()
+        if age_seconds < 0 or age_seconds > cutoff_seconds:
+            continue
+
+        entries.append({
+            "ts": entry.get("ts"),
+            "price": trade_entry_price(entry),
+            "txid": entry.get("txid")
+        })
+
+    return entries
+
+
+def entry_pacing_block(now, price):
+    if not ENTRY_PACING_ENABLED:
+        return None
+
+    recent_entries = recent_buy_entries(now)
+    if ENTRY_PACING_MAX_BUYS > 0 and len(recent_entries) >= ENTRY_PACING_MAX_BUYS:
+        return {
+            "reason": "entry_pacing_max_buys",
+            "entry_pacing_window_minutes": ENTRY_PACING_WINDOW_MINUTES,
+            "entry_pacing_max_buys": ENTRY_PACING_MAX_BUYS,
+            "recent_buy_count": len(recent_entries)
+        }
+
+    current_price = numeric_or_none(price)
+    if current_price is None or ENTRY_PACING_MIN_PRICE_MOVE_PCT <= 0:
+        return None
+
+    comparable_prices = [
+        entry["price"]
+        for entry in recent_entries
+        if entry.get("price") is not None and entry.get("price") > 0
+    ]
+    if not comparable_prices:
+        return None
+
+    nearest_price = min(
+        comparable_prices,
+        key=lambda entry_price: abs(current_price - entry_price)
+    )
+    distance_pct = abs(current_price - nearest_price) / nearest_price
+    if distance_pct < ENTRY_PACING_MIN_PRICE_MOVE_PCT:
+        return {
+            "reason": "entry_pacing_price_cluster",
+            "entry_pacing_window_minutes": ENTRY_PACING_WINDOW_MINUTES,
+            "entry_pacing_min_price_move_pct": ENTRY_PACING_MIN_PRICE_MOVE_PCT,
+            "recent_buy_count": len(recent_entries),
+            "nearest_recent_buy_price": nearest_price,
+            "entry_price_distance_pct": distance_pct
+        }
+
+    return None
+
+
 def numeric_or_none(value):
     try:
         if value is None:
@@ -3598,6 +3707,20 @@ def run_cycle():
         )
         return
 
+    entry_pacing = entry_pacing_block(now, price)
+    if entry_pacing is not None:
+        skip_cycle(
+            entry_pacing.pop("reason"),
+            cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            **entry_pacing
+        )
+        return
+
     last_sell_price = state.get("last_sell_price")
     max_rebuy_price = None
     if PREVENT_BUY_ABOVE_LAST_SELL and last_sell_price is not None:
@@ -4100,6 +4223,10 @@ def main():
         execution_buffer_pct=EXECUTION_BUFFER_PCT,
         rebalance_cooldown_minutes=REBALANCE_COOLDOWN_MINUTES,
         cooldown_override_signal_abs=COOLDOWN_OVERRIDE_SIGNAL_ABS,
+        entry_pacing_enabled=ENTRY_PACING_ENABLED,
+        entry_pacing_window_minutes=ENTRY_PACING_WINDOW_MINUTES,
+        entry_pacing_max_buys=ENTRY_PACING_MAX_BUYS,
+        entry_pacing_min_price_move_pct=ENTRY_PACING_MIN_PRICE_MOVE_PCT,
         sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD,
         position_size_pct=POSITION_SIZE_PCT,
         max_trade_usd=MAX_TRADE_USD,
