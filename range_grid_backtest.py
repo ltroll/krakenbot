@@ -1681,12 +1681,18 @@ def summarize_potential_from_approved_events(replay, snapshots):
     potential_results = []
     potential_results_by_phase = defaultdict(list)
     potential_results_by_reanchor = defaultdict(list)
+    potential_results_by_modeled_reanchor_profit_guard = defaultdict(list)
+    modeled_reanchor_profit_guard_counts = Counter()
+    modeled_reanchor_profit_guard_reason_counts = Counter()
+    modeled_profit_history = []
     for event in replay.get("approved_events") or []:
         snapshot = snapshot_by_timestamp.get(event.get("captured_at"))
         if not snapshot:
             continue
         potential = simulate_missed_opportunity(snapshot, event, snapshots or [])
         if potential:
+            event_time = parse_iso8601(event.get("captured_at"))
+            config = strategy_payload(snapshot)
             size_multiplier = safe_float(
                 event.get("risk_context_position_size_effective_multiplier")
             )
@@ -1703,9 +1709,111 @@ def summarize_potential_from_approved_events(replay, snapshots):
                 else "normal"
             )
             potential["stale_level_reanchor_group"] = reanchor_key
+            modeled_profit_guard_key = "not_applicable"
+            if event.get("stale_level_reanchor_applied") and strategy_bool(
+                config,
+                "stale_level_reanchor_profit_guard_enabled",
+                False,
+            ):
+                modeled_reanchor_profit_guard_counts["enabled"] += 1
+                lookback_hours = strategy_float(
+                    config,
+                    "stale_level_reanchor_profit_lookback_hours",
+                    24.0,
+                )
+                min_samples = int(
+                    strategy_float(
+                        config,
+                        "stale_level_reanchor_profit_min_samples",
+                        1,
+                    )
+                )
+                min_projected_avg = strategy_float(
+                    config,
+                    "stale_level_reanchor_min_projected_avg_net_return_pct",
+                    0.0,
+                )
+                assumed_return = strategy_float(
+                    config,
+                    "stale_level_reanchor_assumed_net_return_pct",
+                    0.0,
+                )
+                fail_closed = strategy_bool(
+                    config,
+                    "stale_level_reanchor_profit_guard_fail_closed",
+                    True,
+                )
+                if event_time is not None and lookback_hours > 0:
+                    history_start = event_time - timedelta(hours=lookback_hours)
+                    active_history = [
+                        return_pct
+                        for history_time, return_pct in modeled_profit_history
+                        if history_time >= history_start
+                    ]
+                else:
+                    active_history = [
+                        return_pct for _, return_pct in modeled_profit_history
+                    ]
+                sample_count = len(active_history)
+                avg_return = (
+                    statistics.mean(active_history)
+                    if active_history
+                    else None
+                )
+                if sample_count < min_samples or avg_return is None:
+                    allowed = not fail_closed
+                    reason = "insufficient_modeled_profit_samples"
+                    projected_avg = None
+                else:
+                    projected_avg = (
+                        (avg_return * sample_count) + assumed_return
+                    ) / (sample_count + 1)
+                    allowed = projected_avg >= min_projected_avg
+                    reason = (
+                        None
+                        if allowed
+                        else "projected_modeled_avg_return_below_target"
+                    )
+
+                modeled_profit_guard_key = "allowed" if allowed else "blocked"
+                modeled_reanchor_profit_guard_counts[modeled_profit_guard_key] += 1
+                if reason:
+                    modeled_reanchor_profit_guard_reason_counts[reason] += 1
+                potential["modeled_stale_level_reanchor_profit_guard_allowed"] = (
+                    allowed
+                )
+                potential["modeled_stale_level_reanchor_profit_guard_reason"] = (
+                    reason
+                )
+                potential["modeled_stale_level_reanchor_profit_sample_count"] = (
+                    sample_count
+                )
+                potential[
+                    "modeled_stale_level_reanchor_recent_avg_return_pct"
+                ] = (
+                    round(avg_return, 6)
+                    if avg_return is not None
+                    else None
+                )
+                potential[
+                    "modeled_stale_level_reanchor_projected_avg_return_pct"
+                ] = (
+                    round(projected_avg, 6)
+                    if projected_avg is not None
+                    else None
+                )
+            else:
+                modeled_reanchor_profit_guard_counts[modeled_profit_guard_key] += 1
+
             potential_results.append(potential)
             potential_results_by_phase[phase].append(potential)
             potential_results_by_reanchor[reanchor_key].append(potential)
+            potential_results_by_modeled_reanchor_profit_guard[
+                modeled_profit_guard_key
+            ].append(potential)
+            end_return_pct = potential.get("end_return_pct")
+            if event_time is not None and end_return_pct is not None:
+                modeled_profit_history.append((event_time, end_return_pct))
 
     end_returns = [
         result["end_return_pct"]
@@ -1853,6 +1961,18 @@ def summarize_potential_from_approved_events(replay, snapshots):
                 potential_results_by_reanchor.items()
             )
         },
+        "modeled_stale_level_reanchor_profit_guard_counts": dict(
+            modeled_reanchor_profit_guard_counts.most_common()
+        ),
+        "modeled_stale_level_reanchor_profit_guard_reason_counts": dict(
+            modeled_reanchor_profit_guard_reason_counts.most_common()
+        ),
+        "by_modeled_stale_level_reanchor_profit_guard": {
+            guard_group: summarize_phase_results(results)
+            for guard_group, results in sorted(
+                potential_results_by_modeled_reanchor_profit_guard.items()
+            )
+        },
     }
 
 
@@ -1993,6 +2113,36 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
             ),
             "potential_by_stale_level_reanchor": json.dumps(
                 potential.get("by_stale_level_reanchor") or {},
+                sort_keys=True,
+            ),
+            "modeled_stale_level_reanchor_profit_guard_counts": json.dumps(
+                potential.get(
+                    "modeled_stale_level_reanchor_profit_guard_counts"
+                ) or {},
+                sort_keys=True,
+            ),
+            "modeled_stale_level_reanchor_profit_guard_blocked": (
+                (
+                    potential.get(
+                        "modeled_stale_level_reanchor_profit_guard_counts"
+                    ) or {}
+                ).get("blocked", 0)
+            ),
+            "modeled_stale_level_reanchor_profit_guard_allowed": (
+                (
+                    potential.get(
+                        "modeled_stale_level_reanchor_profit_guard_counts"
+                    ) or {}
+                ).get("allowed", 0)
+            ),
+            "modeled_stale_level_reanchor_profit_guard_reasons": json.dumps(
+                potential.get(
+                    "modeled_stale_level_reanchor_profit_guard_reason_counts"
+                ) or {},
+                sort_keys=True,
+            ),
+            "potential_by_modeled_stale_level_reanchor_profit_guard": json.dumps(
+                potential.get("by_modeled_stale_level_reanchor_profit_guard") or {},
                 sort_keys=True,
             ),
             "approved_sentiment_hard_safety_flag_events": risk_summary.get(
@@ -2317,6 +2467,11 @@ def write_strategy_comparison_csv(comparison, output_path):
         "approved_avg_stale_level_reanchor_above_level_pct",
         "approved_max_stale_level_reanchor_above_level_pct",
         "potential_by_stale_level_reanchor",
+        "modeled_stale_level_reanchor_profit_guard_counts",
+        "modeled_stale_level_reanchor_profit_guard_blocked",
+        "modeled_stale_level_reanchor_profit_guard_allowed",
+        "modeled_stale_level_reanchor_profit_guard_reasons",
+        "potential_by_modeled_stale_level_reanchor_profit_guard",
         "approved_sentiment_hard_safety_flag_events",
         "approved_sentiment_hard_safety_flags",
         "approved_avg_sentiment_market_risk_score",
@@ -2384,6 +2539,11 @@ def write_ranked_strategy_csv(comparison, output_path):
         "approved_avg_stale_level_reanchor_above_level_pct",
         "approved_max_stale_level_reanchor_above_level_pct",
         "potential_by_stale_level_reanchor",
+        "modeled_stale_level_reanchor_profit_guard_counts",
+        "modeled_stale_level_reanchor_profit_guard_blocked",
+        "modeled_stale_level_reanchor_profit_guard_allowed",
+        "modeled_stale_level_reanchor_profit_guard_reasons",
+        "potential_by_modeled_stale_level_reanchor_profit_guard",
         "approved_sentiment_hard_safety_flag_events",
         "approved_sentiment_hard_safety_flags",
         "approved_avg_sentiment_market_risk_score",
