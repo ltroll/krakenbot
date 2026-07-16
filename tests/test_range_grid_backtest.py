@@ -1916,6 +1916,10 @@ class RangeGridBacktestTests(unittest.TestCase):
                 "2026-06-13T12:10:00+00:00",
                 99.0,
             ),
+            make_snapshot(
+                "2026-06-13T12:20:00+00:00",
+                101.0,
+            ),
         ]
         replay = {
             "approved_events": [
@@ -1924,6 +1928,13 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "level": 100.0,
                     "buy_source": "range_low",
                     "risk_context_position_size_effective_multiplier": 0.675,
+                },
+                {
+                    "captured_at": "2026-06-13T12:10:00+00:00",
+                    "level": 99.0,
+                    "buy_source": "range_low",
+                    "stale_level_reanchor_applied": True,
+                    "risk_context_position_size_effective_multiplier": 0.5,
                 }
             ]
         }
@@ -1933,10 +1944,26 @@ class RangeGridBacktestTests(unittest.TestCase):
             snapshots,
         )
 
-        self.assertEqual(summary["avg_end_return_pct"], -1.0)
-        self.assertEqual(summary["avg_risk_size_multiplier"], 0.675)
-        self.assertEqual(summary["risk_sized_avg_end_return_pct"], -0.675)
-        self.assertEqual(summary["risk_sized_avg_max_drawdown_pct"], -0.675)
+        self.assertAlmostEqual(summary["avg_end_return_pct"], 1.510101, places=6)
+        self.assertAlmostEqual(summary["avg_risk_size_multiplier"], 0.5875)
+        self.assertAlmostEqual(
+            summary["risk_sized_avg_end_return_pct"],
+            0.84255,
+            places=6,
+        )
+        self.assertEqual(
+            summary["by_stale_level_reanchor"]["normal"]["evaluated_count"],
+            1,
+        )
+        self.assertEqual(
+            summary["by_stale_level_reanchor"]["reanchored"]["evaluated_count"],
+            1,
+        )
+        self.assertAlmostEqual(
+            summary["by_stale_level_reanchor"]["reanchored"]["avg_end_return_pct"],
+            2.020202,
+            places=6,
+        )
 
     def test_missed_opportunities_prefer_runtime_status_block_reason(self):
         snapshots = [
@@ -2262,6 +2289,8 @@ class RangeGridBacktestTests(unittest.TestCase):
             self.assertIn("approved_weather_opportunity_phases", text)
             self.assertIn("approved_avg_weather_entry_opportunity_score", text)
             self.assertIn("potential_by_weather_opportunity_phase", text)
+            self.assertIn("approved_stale_level_reanchor_count", text)
+            self.assertIn("potential_by_stale_level_reanchor", text)
             self.assertIn("potential_risk_sized_avg_end_return_pct", text)
             self.assertIn("0.3", text)
             self.assertIn("0.081", text)
@@ -2437,6 +2466,8 @@ class RangeGridBacktestTests(unittest.TestCase):
             self.assertIn("approved_weather_opportunity_phases", text)
             self.assertIn("approved_avg_weather_entry_opportunity_score", text)
             self.assertIn("potential_by_weather_opportunity_phase", text)
+            self.assertIn("approved_stale_level_reanchor_count", text)
+            self.assertIn("potential_by_stale_level_reanchor", text)
             self.assertIn("potential_risk_sized_avg_end_return_pct", text)
             self.assertIn("0.081", text)
             self.assertIn("dip_leveling_entry", text)

@@ -716,6 +716,52 @@ def summarize_sentiment_risk_events(events):
     return summary
 
 
+def summarize_stale_level_reanchor_events(events):
+    approved_count = 0
+    reanchor_count = 0
+    source_counts = Counter()
+    phase_counts = Counter()
+    above_level_pcts = []
+
+    for event in events or []:
+        approved_count += 1
+        if not event.get("stale_level_reanchor_applied"):
+            continue
+        reanchor_count += 1
+        source_counts[str(event.get("buy_source") or "unknown")] += 1
+        phase_counts[str(event.get("weather_opportunity_phase") or "unknown")] += 1
+        above_level_pct = safe_float(
+            event.get("stale_level_reanchor_above_level_pct")
+        )
+        if above_level_pct is not None:
+            above_level_pcts.append(above_level_pct)
+
+    return {
+        "approved_stale_level_reanchor_count": reanchor_count,
+        "approved_stale_level_reanchor_rate": (
+            round(reanchor_count / approved_count, 4)
+            if approved_count
+            else 0.0
+        ),
+        "approved_stale_level_reanchor_by_source": dict(
+            source_counts.most_common()
+        ),
+        "approved_stale_level_reanchor_by_phase": dict(
+            phase_counts.most_common()
+        ),
+        "approved_avg_stale_level_reanchor_above_level_pct": (
+            round(statistics.mean(above_level_pcts), 6)
+            if above_level_pcts
+            else None
+        ),
+        "approved_max_stale_level_reanchor_above_level_pct": (
+            round(max(above_level_pcts), 6)
+            if above_level_pcts
+            else None
+        ),
+    }
+
+
 def state_payload(snapshot):
     payload = snapshot.get("state") or {}
     return payload if isinstance(payload, dict) else {}
@@ -1634,6 +1680,7 @@ def summarize_potential_from_approved_events(replay, snapshots):
 
     potential_results = []
     potential_results_by_phase = defaultdict(list)
+    potential_results_by_reanchor = defaultdict(list)
     for event in replay.get("approved_events") or []:
         snapshot = snapshot_by_timestamp.get(event.get("captured_at"))
         if not snapshot:
@@ -1650,8 +1697,15 @@ def summarize_potential_from_approved_events(replay, snapshots):
             )
             phase = str(event.get("weather_opportunity_phase") or "unknown")
             potential["weather_opportunity_phase"] = phase
+            reanchor_key = (
+                "reanchored"
+                if event.get("stale_level_reanchor_applied")
+                else "normal"
+            )
+            potential["stale_level_reanchor_group"] = reanchor_key
             potential_results.append(potential)
             potential_results_by_phase[phase].append(potential)
+            potential_results_by_reanchor[reanchor_key].append(potential)
 
     end_returns = [
         result["end_return_pct"]
@@ -1793,6 +1847,12 @@ def summarize_potential_from_approved_events(replay, snapshots):
             phase: summarize_phase_results(results)
             for phase, results in sorted(potential_results_by_phase.items())
         },
+        "by_stale_level_reanchor": {
+            reanchor_group: summarize_phase_results(results)
+            for reanchor_group, results in sorted(
+                potential_results_by_reanchor.items()
+            )
+        },
     }
 
 
@@ -1823,6 +1883,9 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
         potential = summarize_potential_from_approved_events(replay, variant_snapshots)
         summary = replay["summary"]
         risk_summary = summary.get("approved_sentiment_risk") or {}
+        reanchor_summary = summarize_stale_level_reanchor_events(
+            replay.get("approved_events") or []
+        )
         row = {
             "strategy_label": entry["label"],
             "strategy_file": strategy_path,
@@ -1898,6 +1961,38 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
             ),
             "potential_by_weather_opportunity_phase": json.dumps(
                 potential.get("by_weather_opportunity_phase") or {},
+                sort_keys=True,
+            ),
+            "approved_stale_level_reanchor_count": reanchor_summary.get(
+                "approved_stale_level_reanchor_count"
+            ),
+            "approved_stale_level_reanchor_rate": reanchor_summary.get(
+                "approved_stale_level_reanchor_rate"
+            ),
+            "approved_stale_level_reanchor_by_source": json.dumps(
+                reanchor_summary.get(
+                    "approved_stale_level_reanchor_by_source"
+                ) or {},
+                sort_keys=True,
+            ),
+            "approved_stale_level_reanchor_by_phase": json.dumps(
+                reanchor_summary.get(
+                    "approved_stale_level_reanchor_by_phase"
+                ) or {},
+                sort_keys=True,
+            ),
+            "approved_avg_stale_level_reanchor_above_level_pct": (
+                reanchor_summary.get(
+                    "approved_avg_stale_level_reanchor_above_level_pct"
+                )
+            ),
+            "approved_max_stale_level_reanchor_above_level_pct": (
+                reanchor_summary.get(
+                    "approved_max_stale_level_reanchor_above_level_pct"
+                )
+            ),
+            "potential_by_stale_level_reanchor": json.dumps(
+                potential.get("by_stale_level_reanchor") or {},
                 sort_keys=True,
             ),
             "approved_sentiment_hard_safety_flag_events": risk_summary.get(
@@ -2215,6 +2310,13 @@ def write_strategy_comparison_csv(comparison, output_path):
         "approved_avg_weather_hold_through_score",
         "approved_weather_pattern_tags",
         "potential_by_weather_opportunity_phase",
+        "approved_stale_level_reanchor_count",
+        "approved_stale_level_reanchor_rate",
+        "approved_stale_level_reanchor_by_source",
+        "approved_stale_level_reanchor_by_phase",
+        "approved_avg_stale_level_reanchor_above_level_pct",
+        "approved_max_stale_level_reanchor_above_level_pct",
+        "potential_by_stale_level_reanchor",
         "approved_sentiment_hard_safety_flag_events",
         "approved_sentiment_hard_safety_flags",
         "approved_avg_sentiment_market_risk_score",
@@ -2275,6 +2377,13 @@ def write_ranked_strategy_csv(comparison, output_path):
         "approved_avg_weather_hold_through_score",
         "approved_weather_pattern_tags",
         "potential_by_weather_opportunity_phase",
+        "approved_stale_level_reanchor_count",
+        "approved_stale_level_reanchor_rate",
+        "approved_stale_level_reanchor_by_source",
+        "approved_stale_level_reanchor_by_phase",
+        "approved_avg_stale_level_reanchor_above_level_pct",
+        "approved_max_stale_level_reanchor_above_level_pct",
+        "potential_by_stale_level_reanchor",
         "approved_sentiment_hard_safety_flag_events",
         "approved_sentiment_hard_safety_flags",
         "approved_avg_sentiment_market_risk_score",
