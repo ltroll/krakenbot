@@ -248,6 +248,16 @@ class RangeGridBacktestTests(unittest.TestCase):
                             "leveling_state": "leveling",
                             "leveling_score": 0.82,
                         },
+                        "market_opportunity": {
+                            "schema_version": "market-opportunity-v1",
+                            "cycle_phase": "dip_leveling_entry",
+                            "bot_hint": "probe_or_accumulate",
+                            "entry_opportunity_score": 0.67,
+                            "rebound_confirmation_score": 0.58,
+                            "exit_pressure_score": 0.21,
+                            "hold_through_score": 0.49,
+                            "pattern_tags": ["dip_leveling_candidate"],
+                        },
                     },
                 },
             ),
@@ -275,6 +285,16 @@ class RangeGridBacktestTests(unittest.TestCase):
                             "schema_version": "market-stability-v1",
                             "leveling_state": "trending_up",
                             "leveling_score": 0.2,
+                        },
+                        "market_opportunity": {
+                            "schema_version": "market-opportunity-v1",
+                            "cycle_phase": "early_rebound",
+                            "bot_hint": "normal_range_entry",
+                            "entry_opportunity_score": 0.47,
+                            "rebound_confirmation_score": 0.72,
+                            "exit_pressure_score": 0.31,
+                            "hold_through_score": 0.53,
+                            "pattern_tags": ["rebound_confirming"],
                         },
                     },
                 },
@@ -308,6 +328,25 @@ class RangeGridBacktestTests(unittest.TestCase):
         )
         self.assertEqual(risk_summary["avg_weather_leveling_score"], 0.51)
         self.assertEqual(
+            risk_summary["weather_opportunity_phase_counts"],
+            {"dip_leveling_entry": 1, "early_rebound": 1},
+        )
+        self.assertEqual(
+            risk_summary["weather_opportunity_bot_hint_counts"],
+            {"normal_range_entry": 1, "probe_or_accumulate": 1},
+        )
+        self.assertEqual(
+            risk_summary["weather_pattern_tag_counts"],
+            {"dip_leveling_candidate": 1, "rebound_confirming": 1},
+        )
+        self.assertEqual(risk_summary["avg_weather_entry_opportunity_score"], 0.57)
+        self.assertEqual(
+            risk_summary["avg_weather_rebound_confirmation_score"],
+            0.65,
+        )
+        self.assertEqual(risk_summary["avg_weather_exit_pressure_score"], 0.26)
+        self.assertEqual(risk_summary["avg_weather_hold_through_score"], 0.51)
+        self.assertEqual(
             result["recent_approved_events"][0]["sentiment_risk_posture"],
             "entry_allowed",
         )
@@ -318,6 +357,14 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(
             result["recent_approved_events"][0]["weather_leveling_score"],
             0.82,
+        )
+        self.assertEqual(
+            result["recent_approved_events"][0]["weather_opportunity_phase"],
+            "dip_leveling_entry",
+        )
+        self.assertEqual(
+            result["recent_approved_events"][0]["weather_pattern_tags"],
+            ["dip_leveling_candidate"],
         )
         self.assertEqual(
             result["recent_approved_events"][0][
@@ -2040,6 +2087,22 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "approved_sentiment_risk_postures": '{"entry_allowed": 2}',
                     "approved_weather_leveling_states": '{"leveling": 2}',
                     "approved_avg_weather_leveling_score": 0.82,
+                    "approved_weather_opportunity_phases": (
+                        '{"dip_leveling_entry": 2}'
+                    ),
+                    "approved_weather_opportunity_bot_hints": (
+                        '{"probe_or_accumulate": 2}'
+                    ),
+                    "approved_avg_weather_entry_opportunity_score": 0.67,
+                    "approved_avg_weather_rebound_confirmation_score": 0.58,
+                    "approved_avg_weather_exit_pressure_score": 0.21,
+                    "approved_avg_weather_hold_through_score": 0.49,
+                    "approved_weather_pattern_tags": (
+                        '{"dip_leveling_candidate": 2}'
+                    ),
+                    "potential_by_weather_opportunity_phase": (
+                        '{"dip_leveling_entry": {"evaluated_count": 2}}'
+                    ),
                     "approved_sentiment_hard_safety_flag_events": 0,
                     "approved_sentiment_hard_safety_flags": "{}",
                     "approved_avg_sentiment_market_risk_score": 0.3,
@@ -2066,9 +2129,13 @@ class RangeGridBacktestTests(unittest.TestCase):
             self.assertIn("approved_sentiment_risk_postures", text)
             self.assertIn("approved_weather_leveling_states", text)
             self.assertIn("approved_avg_weather_leveling_score", text)
+            self.assertIn("approved_weather_opportunity_phases", text)
+            self.assertIn("approved_avg_weather_entry_opportunity_score", text)
+            self.assertIn("potential_by_weather_opportunity_phase", text)
             self.assertIn("potential_risk_sized_avg_end_return_pct", text)
             self.assertIn("0.3", text)
             self.assertIn("0.081", text)
+            self.assertIn("dip_leveling_entry", text)
             with open(output_path, encoding="utf-8") as f:
                 text = f.read()
             self.assertIn("strategy_label", text)
@@ -2193,6 +2260,22 @@ class RangeGridBacktestTests(unittest.TestCase):
                     "approved_sentiment_risk_postures": '{"entry_allowed": 2}',
                     "approved_weather_leveling_states": '{"leveling": 2}',
                     "approved_avg_weather_leveling_score": 0.82,
+                    "approved_weather_opportunity_phases": (
+                        '{"dip_leveling_entry": 2}'
+                    ),
+                    "approved_weather_opportunity_bot_hints": (
+                        '{"probe_or_accumulate": 2}'
+                    ),
+                    "approved_avg_weather_entry_opportunity_score": 0.67,
+                    "approved_avg_weather_rebound_confirmation_score": 0.58,
+                    "approved_avg_weather_exit_pressure_score": 0.21,
+                    "approved_avg_weather_hold_through_score": 0.49,
+                    "approved_weather_pattern_tags": (
+                        '{"dip_leveling_candidate": 2}'
+                    ),
+                    "potential_by_weather_opportunity_phase": (
+                        '{"dip_leveling_entry": {"evaluated_count": 2}}'
+                    ),
                     "approved_sentiment_hard_safety_flag_events": 0,
                     "approved_sentiment_hard_safety_flags": "{}",
                     "approved_avg_sentiment_market_risk_score": 0.3,
@@ -2221,8 +2304,12 @@ class RangeGridBacktestTests(unittest.TestCase):
             self.assertIn("approved_sentiment_risk_postures", text)
             self.assertIn("approved_weather_leveling_states", text)
             self.assertIn("approved_avg_weather_leveling_score", text)
+            self.assertIn("approved_weather_opportunity_phases", text)
+            self.assertIn("approved_avg_weather_entry_opportunity_score", text)
+            self.assertIn("potential_by_weather_opportunity_phase", text)
             self.assertIn("potential_risk_sized_avg_end_return_pct", text)
             self.assertIn("0.081", text)
+            self.assertIn("dip_leveling_entry", text)
             self.assertIn("baseline", text)
 
     def test_build_anchor_winners_selects_top_eligible_per_anchor(self):

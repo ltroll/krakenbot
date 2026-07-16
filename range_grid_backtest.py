@@ -385,6 +385,15 @@ def weather_market_stability(weather_report):
     return stability if isinstance(stability, dict) else {}
 
 
+def weather_market_opportunity(weather_report):
+    opportunity = (
+        weather_report.get("market_opportunity")
+        if isinstance(weather_report, dict)
+        else {}
+    )
+    return opportunity if isinstance(opportunity, dict) else {}
+
+
 def weather_list(value):
     if isinstance(value, list):
         return [str(item) for item in value]
@@ -485,6 +494,7 @@ def sentiment_risk_event_fields(signal):
     weather = weather_report_payload(risk_context)
     bot_tuning = weather_bot_tuning(weather)
     market_stability = weather_market_stability(weather)
+    market_opportunity = weather_market_opportunity(weather)
     fields = {
         "sentiment_risk_posture": risk_context.get("recommended_posture"),
         "sentiment_hard_safety_flags": flags,
@@ -511,6 +521,23 @@ def sentiment_risk_event_fields(signal):
         "weather_leveling_score": safe_float(
             market_stability.get("leveling_score")
         ),
+        "weather_opportunity_phase": market_opportunity.get("cycle_phase"),
+        "weather_opportunity_bot_hint": market_opportunity.get("bot_hint"),
+        "weather_entry_opportunity_score": safe_float(
+            market_opportunity.get("entry_opportunity_score")
+        ),
+        "weather_rebound_confirmation_score": safe_float(
+            market_opportunity.get("rebound_confirmation_score")
+        ),
+        "weather_exit_pressure_score": safe_float(
+            market_opportunity.get("exit_pressure_score")
+        ),
+        "weather_hold_through_score": safe_float(
+            market_opportunity.get("hold_through_score")
+        ),
+        "weather_pattern_tags": weather_list(
+            market_opportunity.get("pattern_tags")
+        ),
     }
     for source_key, output_key in RISK_CONTEXT_NUMERIC_FIELDS.items():
         fields[output_key] = safe_float(risk_context.get(source_key))
@@ -522,6 +549,9 @@ def summarize_sentiment_risk_events(events):
     numeric_counts = Counter()
     posture_counts = Counter()
     leveling_state_counts = Counter()
+    opportunity_phase_counts = Counter()
+    opportunity_bot_hint_counts = Counter()
+    opportunity_pattern_tag_counts = Counter()
     hard_safety_flag_counts = Counter()
     samples = 0
 
@@ -537,11 +567,21 @@ def summarize_sentiment_risk_events(events):
         has_weather_stability = bool(event.get("weather_leveling_state")) or (
             safe_float(event.get("weather_leveling_score")) is not None
         )
+        has_weather_opportunity = (
+            bool(event.get("weather_opportunity_phase"))
+            or bool(event.get("weather_opportunity_bot_hint"))
+            or bool(event.get("weather_pattern_tags"))
+            or safe_float(event.get("weather_entry_opportunity_score")) is not None
+            or safe_float(event.get("weather_rebound_confirmation_score")) is not None
+            or safe_float(event.get("weather_exit_pressure_score")) is not None
+            or safe_float(event.get("weather_hold_through_score")) is not None
+        )
         has_risk_value = (
             bool(posture)
             or bool(flags)
             or has_numeric_value
             or has_weather_stability
+            or has_weather_opportunity
         )
         if not has_risk_value:
             continue
@@ -550,6 +590,17 @@ def summarize_sentiment_risk_events(events):
         leveling_state = event.get("weather_leveling_state")
         if leveling_state:
             leveling_state_counts[str(leveling_state)] += 1
+        opportunity_phase = event.get("weather_opportunity_phase")
+        if opportunity_phase:
+            opportunity_phase_counts[str(opportunity_phase)] += 1
+        opportunity_bot_hint = event.get("weather_opportunity_bot_hint")
+        if opportunity_bot_hint:
+            opportunity_bot_hint_counts[str(opportunity_bot_hint)] += 1
+        pattern_tags = event.get("weather_pattern_tags")
+        if not isinstance(pattern_tags, list):
+            pattern_tags = []
+        for tag in pattern_tags:
+            opportunity_pattern_tag_counts[str(tag)] += 1
         for output_key in RISK_CONTEXT_NUMERIC_FIELDS.values():
             value = safe_float(event.get(output_key))
             if value is None:
@@ -560,6 +611,17 @@ def summarize_sentiment_risk_events(events):
         if leveling_score is not None:
             numeric_totals["weather_leveling_score"] += leveling_score
             numeric_counts["weather_leveling_score"] += 1
+        for output_key in (
+            "weather_entry_opportunity_score",
+            "weather_rebound_confirmation_score",
+            "weather_exit_pressure_score",
+            "weather_hold_through_score",
+        ):
+            value = safe_float(event.get(output_key))
+            if value is None:
+                continue
+            numeric_totals[output_key] += value
+            numeric_counts[output_key] += 1
         risk_size_multiplier = safe_float(
             event.get("risk_context_position_size_effective_multiplier")
         )
@@ -578,6 +640,15 @@ def summarize_sentiment_risk_events(events):
         "sentiment_risk_posture_counts": dict(posture_counts.most_common()),
         "weather_leveling_state_counts": dict(
             leveling_state_counts.most_common()
+        ),
+        "weather_opportunity_phase_counts": dict(
+            opportunity_phase_counts.most_common()
+        ),
+        "weather_opportunity_bot_hint_counts": dict(
+            opportunity_bot_hint_counts.most_common()
+        ),
+        "weather_pattern_tag_counts": dict(
+            opportunity_pattern_tag_counts.most_common()
         ),
         "sentiment_hard_safety_flag_counts": dict(
             hard_safety_flag_counts.most_common()
@@ -614,6 +685,19 @@ def summarize_sentiment_risk_events(events):
         )
     else:
         summary[f"avg_{output_key}"] = None
+    for output_key in (
+        "weather_entry_opportunity_score",
+        "weather_rebound_confirmation_score",
+        "weather_exit_pressure_score",
+        "weather_hold_through_score",
+    ):
+        if numeric_counts[output_key]:
+            summary[f"avg_{output_key}"] = round(
+                numeric_totals[output_key] / numeric_counts[output_key],
+                6,
+            )
+        else:
+            summary[f"avg_{output_key}"] = None
     return summary
 
 
@@ -1404,6 +1488,7 @@ def summarize_potential_from_approved_events(replay, snapshots):
             snapshot_by_timestamp[captured_at] = snapshot
 
     potential_results = []
+    potential_results_by_phase = defaultdict(list)
     for event in replay.get("approved_events") or []:
         snapshot = snapshot_by_timestamp.get(event.get("captured_at"))
         if not snapshot:
@@ -1418,7 +1503,10 @@ def summarize_potential_from_approved_events(replay, snapshots):
             potential["risk_context_position_size_effective_multiplier"] = (
                 size_multiplier
             )
+            phase = str(event.get("weather_opportunity_phase") or "unknown")
+            potential["weather_opportunity_phase"] = phase
             potential_results.append(potential)
+            potential_results_by_phase[phase].append(potential)
 
     end_returns = [
         result["end_return_pct"]
@@ -1461,6 +1549,50 @@ def summarize_potential_from_approved_events(replay, snapshots):
         for result in potential_results
         if result.get("risk_context_position_size_effective_multiplier") is not None
     ]
+
+    def summarize_phase_results(results):
+        phase_end_returns = [
+            result["end_return_pct"]
+            for result in results
+            if result.get("end_return_pct") is not None
+        ]
+        phase_max_runups = [
+            result["max_runup_pct"]
+            for result in results
+            if result.get("max_runup_pct") is not None
+        ]
+        phase_max_drawdowns = [
+            result["max_drawdown_pct"]
+            for result in results
+            if result.get("max_drawdown_pct") is not None
+        ]
+        phase_take_profit_count = sum(
+            1 for result in results if result.get("take_profit_reached")
+        )
+        return {
+            "evaluated_count": len(results),
+            "take_profit_reached_count": phase_take_profit_count,
+            "take_profit_reached_rate": (
+                round(phase_take_profit_count / len(results), 4)
+                if results
+                else None
+            ),
+            "avg_end_return_pct": (
+                round(statistics.mean(phase_end_returns), 6)
+                if phase_end_returns
+                else None
+            ),
+            "avg_max_runup_pct": (
+                round(statistics.mean(phase_max_runups), 6)
+                if phase_max_runups
+                else None
+            ),
+            "avg_max_drawdown_pct": (
+                round(statistics.mean(phase_max_drawdowns), 6)
+                if phase_max_drawdowns
+                else None
+            ),
+        }
 
     return {
         "evaluated_count": len(potential_results),
@@ -1512,6 +1644,10 @@ def summarize_potential_from_approved_events(replay, snapshots):
             if risk_sized_max_drawdowns
             else None
         ),
+        "by_weather_opportunity_phase": {
+            phase: summarize_phase_results(results)
+            for phase, results in sorted(potential_results_by_phase.items())
+        },
     }
 
 
@@ -1590,6 +1726,34 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
             ),
             "approved_avg_weather_leveling_score": risk_summary.get(
                 "avg_weather_leveling_score"
+            ),
+            "approved_weather_opportunity_phases": json.dumps(
+                risk_summary.get("weather_opportunity_phase_counts") or {},
+                sort_keys=True,
+            ),
+            "approved_weather_opportunity_bot_hints": json.dumps(
+                risk_summary.get("weather_opportunity_bot_hint_counts") or {},
+                sort_keys=True,
+            ),
+            "approved_avg_weather_entry_opportunity_score": risk_summary.get(
+                "avg_weather_entry_opportunity_score"
+            ),
+            "approved_avg_weather_rebound_confirmation_score": risk_summary.get(
+                "avg_weather_rebound_confirmation_score"
+            ),
+            "approved_avg_weather_exit_pressure_score": risk_summary.get(
+                "avg_weather_exit_pressure_score"
+            ),
+            "approved_avg_weather_hold_through_score": risk_summary.get(
+                "avg_weather_hold_through_score"
+            ),
+            "approved_weather_pattern_tags": json.dumps(
+                risk_summary.get("weather_pattern_tag_counts") or {},
+                sort_keys=True,
+            ),
+            "potential_by_weather_opportunity_phase": json.dumps(
+                potential.get("by_weather_opportunity_phase") or {},
+                sort_keys=True,
             ),
             "approved_sentiment_hard_safety_flag_events": risk_summary.get(
                 "sentiment_hard_safety_flag_event_count"
@@ -1898,6 +2062,14 @@ def write_strategy_comparison_csv(comparison, output_path):
         "approved_sentiment_risk_postures",
         "approved_weather_leveling_states",
         "approved_avg_weather_leveling_score",
+        "approved_weather_opportunity_phases",
+        "approved_weather_opportunity_bot_hints",
+        "approved_avg_weather_entry_opportunity_score",
+        "approved_avg_weather_rebound_confirmation_score",
+        "approved_avg_weather_exit_pressure_score",
+        "approved_avg_weather_hold_through_score",
+        "approved_weather_pattern_tags",
+        "potential_by_weather_opportunity_phase",
         "approved_sentiment_hard_safety_flag_events",
         "approved_sentiment_hard_safety_flags",
         "approved_avg_sentiment_market_risk_score",
@@ -1950,6 +2122,14 @@ def write_ranked_strategy_csv(comparison, output_path):
         "approved_sentiment_risk_postures",
         "approved_weather_leveling_states",
         "approved_avg_weather_leveling_score",
+        "approved_weather_opportunity_phases",
+        "approved_weather_opportunity_bot_hints",
+        "approved_avg_weather_entry_opportunity_score",
+        "approved_avg_weather_rebound_confirmation_score",
+        "approved_avg_weather_exit_pressure_score",
+        "approved_avg_weather_hold_through_score",
+        "approved_weather_pattern_tags",
+        "potential_by_weather_opportunity_phase",
         "approved_sentiment_hard_safety_flag_events",
         "approved_sentiment_hard_safety_flags",
         "approved_avg_sentiment_market_risk_score",
@@ -3072,6 +3252,12 @@ def summarize_actual_trades(events):
                 "price": event.get("price"),
                 "volume": event.get("volume"),
                 "trade_notional_usd": event.get("trade_notional_usd"),
+                "weather_opportunity_phase": event.get(
+                    "weather_opportunity_phase"
+                ),
+                "weather_opportunity_bot_hint": event.get(
+                    "weather_opportunity_bot_hint"
+                ),
             })
         elif name == "RISK_CONTEXT_PAPER_BUY_PLANNED":
             summary["risk_context_paper_buys_planned"] += 1
@@ -3093,6 +3279,15 @@ def summarize_actual_trades(events):
                     )
                 ),
                 "sentiment_risk_posture": event.get("sentiment_risk_posture"),
+                "weather_opportunity_phase": event.get(
+                    "weather_opportunity_phase"
+                ),
+                "weather_opportunity_bot_hint": event.get(
+                    "weather_opportunity_bot_hint"
+                ),
+                "weather_entry_opportunity_score": event.get(
+                    "weather_entry_opportunity_score"
+                ),
             })
         elif name == "BUY_ORDER_FILLED":
             summary["buy_orders_filled"] += 1
@@ -3158,6 +3353,9 @@ def summarize_actual_trades(events):
                 "gross_pnl": event.get("gross_pnl"),
                 "estimated_net_pnl": event.get("estimated_net_pnl"),
                 "hold_minutes": event.get("hold_minutes"),
+                "weather_opportunity_phase": event.get(
+                    "weather_opportunity_phase"
+                ),
             })
         elif name == "ORDER_REJECTED":
             summary["order_rejected"] += 1

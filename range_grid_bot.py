@@ -2070,6 +2070,7 @@ def sentiment_risk_log_fields(risk_context):
     weather = weather_report_payload(risk_context)
     bot_tuning = weather_bot_tuning(weather)
     market_stability = weather_market_stability(weather)
+    market_opportunity = weather_market_opportunity(weather)
 
     return {
         "sentiment_risk_posture": risk_context.get("recommended_posture"),
@@ -2097,6 +2098,23 @@ def sentiment_risk_log_fields(risk_context):
         "weather_leveling_state": market_stability.get("leveling_state"),
         "weather_leveling_score": optional_float(
             market_stability.get("leveling_score")
+        ),
+        "weather_opportunity_phase": market_opportunity.get("cycle_phase"),
+        "weather_opportunity_bot_hint": market_opportunity.get("bot_hint"),
+        "weather_entry_opportunity_score": optional_float(
+            market_opportunity.get("entry_opportunity_score")
+        ),
+        "weather_rebound_confirmation_score": optional_float(
+            market_opportunity.get("rebound_confirmation_score")
+        ),
+        "weather_exit_pressure_score": optional_float(
+            market_opportunity.get("exit_pressure_score")
+        ),
+        "weather_hold_through_score": optional_float(
+            market_opportunity.get("hold_through_score")
+        ),
+        "weather_pattern_tags": weather_list(
+            market_opportunity.get("pattern_tags")
         ),
         "sentiment_market_risk_score": risk_context.get("market_risk_score"),
         "sentiment_buy_aggression_score": risk_context.get("buy_aggression_score"),
@@ -2183,6 +2201,15 @@ def weather_market_stability(weather_report):
         else {}
     )
     return stability if isinstance(stability, dict) else {}
+
+
+def weather_market_opportunity(weather_report):
+    opportunity = (
+        weather_report.get("market_opportunity")
+        if isinstance(weather_report, dict)
+        else {}
+    )
+    return opportunity if isinstance(opportunity, dict) else {}
 
 
 def weather_list(value):
