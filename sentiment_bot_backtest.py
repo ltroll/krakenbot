@@ -540,6 +540,117 @@ def high_entry_quality_check(risk_view, config, fallback_range_position):
     }
 
 
+def market_entry_quality_check(risk_view, config, fallback_range_position):
+    if not config_bool(config, "market_entry_quality_enabled", True):
+        return {"allowed": True, "reason": None, "size_multiplier": 1.0}
+    if risk_view.get("weather_emergency_bell"):
+        return {
+            "allowed": False,
+            "reason": "weather_emergency_bell",
+            "size_multiplier": 0.0,
+        }
+
+    phase = str(risk_view.get("weather_opportunity_phase") or "").strip()
+    dip_phases = {
+        item.strip()
+        for item in str(config.get("market_entry_dip_phases", "dip_leveling_entry,early_rebound")).split(",")
+        if item.strip()
+    }
+    avoid_phases = {
+        item.strip()
+        for item in str(config.get("market_entry_avoid_phases", "peak_exhaustion_watch,pullback_wait,storm_avoid")).split(",")
+        if item.strip()
+    }
+    entry_score = risk_view.get("weather_entry_opportunity_score")
+    rebound_confirmation = risk_view.get("weather_rebound_confirmation_score")
+    if phase in avoid_phases:
+        return {
+            "allowed": False,
+            "reason": f"market_entry_{phase}",
+            "size_multiplier": 0.0,
+        }
+    if phase in dip_phases:
+        entry_ok = (
+            entry_score is not None
+            and entry_score >= config_float(config, "market_entry_min_opportunity_score", 0.60)
+        )
+        rebound_ok = (
+            rebound_confirmation is not None
+            and rebound_confirmation >= config_float(config, "market_entry_min_rebound_confirmation_score", 0.50)
+        )
+        if entry_ok or rebound_ok:
+            return {
+                "allowed": True,
+                "reason": f"market_entry_{phase}",
+                "size_multiplier": clamp(config_float(config, "market_entry_dip_size_multiplier", 0.50), 0.0, 1.0),
+            }
+
+    range_position = effective_market_location_range_position(
+        risk_view,
+        fallback_range_position,
+    )
+    if (
+        range_position is not None
+        and range_position <= config_float(config, "market_entry_free_range_position_max", 0.25)
+    ):
+        return {"allowed": True, "reason": "market_entry_low_range", "size_multiplier": 1.0}
+    if (
+        range_position is not None
+        and range_position < config_float(config, "market_entry_require_confirmation_above_range", 0.25)
+    ):
+        return {"allowed": True, "reason": "market_entry_lower_range", "size_multiplier": 1.0}
+
+    buy_score = risk_view.get("risk_adjusted_buy_score")
+    rebound_score = risk_view.get("risk_context_rebound_score")
+    bottoming_score = risk_view.get("risk_context_bottoming_score")
+    confirmation_score = max(
+        buy_score or 0.0,
+        rebound_score or 0.0,
+        bottoming_score or 0.0,
+    )
+    min_confirmation = max(
+        config_float(config, "market_entry_min_buy_score", 0.50),
+        min(
+            config_float(config, "market_entry_min_rebound_score", 0.55),
+            config_float(config, "market_entry_min_bottoming_score", 0.55),
+        ),
+    )
+    if (
+        (buy_score is None or buy_score < config_float(config, "market_entry_min_buy_score", 0.50))
+        and (rebound_score is None or rebound_score < config_float(config, "market_entry_min_rebound_score", 0.55))
+        and (bottoming_score is None or bottoming_score < config_float(config, "market_entry_min_bottoming_score", 0.55))
+    ):
+        return {
+            "allowed": False,
+            "reason": "market_entry_confirmation_low",
+            "size_multiplier": 0.0,
+            "confirmation_score": confirmation_score,
+            "market_entry_min_confirmation": min_confirmation,
+        }
+
+    price_return_4h = risk_view.get("weather_market_price_return_4h_pct")
+    if (
+        config_bool(config, "market_entry_require_positive_4h_return", False)
+        and price_return_4h is not None
+        and price_return_4h <= 0
+    ):
+        return {
+            "allowed": False,
+            "reason": "market_entry_4h_momentum_negative",
+            "size_multiplier": 0.0,
+            "confirmation_score": confirmation_score,
+            "market_entry_min_confirmation": min_confirmation,
+        }
+
+    return {
+        "allowed": True,
+        "reason": "market_entry_confirmed",
+        "size_multiplier": 1.0,
+        "confirmation_score": confirmation_score,
+        "market_entry_min_confirmation": min_confirmation,
+    }
+
+
 def evaluate_snapshot(snapshot, variant, strict_high_guard_pct, account_usd):
     at_time = snapshot_time(snapshot)
     price = snapshot_price(snapshot)
@@ -590,6 +701,10 @@ def evaluate_snapshot(snapshot, variant, strict_high_guard_pct, account_usd):
     if allow_market and high_entry["near_high"] and not high_entry["allowed"]:
         return hold(high_entry["reason"], snapshot, price, signal, config, weighted, risk_view, high_entry)
 
+    market_entry = market_entry_quality_check(risk_view, config, range_position)
+    if allow_market and not market_entry["allowed"]:
+        return hold(market_entry["reason"], snapshot, price, signal, config, weighted, risk_view, high_entry, market_entry)
+
     high_guard_pct = config_float(config, "high_price_buy_block_pct", 0.0005)
     price_high = safe_float(price_regime.get("price_high_24h"))
     if price_high is None:
@@ -620,6 +735,8 @@ def evaluate_snapshot(snapshot, variant, strict_high_guard_pct, account_usd):
         )
     if allow_market and high_entry["near_high"] and high_entry["allowed"]:
         trade_value *= high_entry["size_multiplier"]
+    if allow_market and market_entry.get("allowed"):
+        trade_value *= market_entry.get("size_multiplier", 1.0)
     trade_value *= max(0.0, 1 - config_float(config, "execution_buffer_pct", 0.0025))
     if trade_value < config_float(config, "min_trade_usd", 30):
         return hold("small_trade", snapshot, price, signal, config, weighted, risk_view)
@@ -641,6 +758,7 @@ def evaluate_snapshot(snapshot, variant, strict_high_guard_pct, account_usd):
             weighted=weighted,
             risk_view=risk_view,
             high_entry=high_entry,
+            market_entry=market_entry,
             fill_mode="limit",
         )
 
@@ -656,11 +774,12 @@ def evaluate_snapshot(snapshot, variant, strict_high_guard_pct, account_usd):
         weighted=weighted,
         risk_view=risk_view,
         high_entry=high_entry,
+        market_entry=market_entry,
         fill_mode="market",
     )
 
 
-def base_event(status, reason, snapshot, price, signal, config, weighted=None, risk_view=None, high_entry=None):
+def base_event(status, reason, snapshot, price, signal, config, weighted=None, risk_view=None, high_entry=None, market_entry=None):
     at_time = snapshot_time(snapshot)
     risk_view = risk_view or {}
     price_regime = signal.get("price_regime") if isinstance(signal.get("price_regime"), dict) else {}
@@ -693,6 +812,15 @@ def base_event(status, reason, snapshot, price, signal, config, weighted=None, r
         "weather_market_price_return_4h_pct": (
             risk_view.get("weather_market_price_return_4h_pct")
         ),
+        "weather_opportunity_phase": risk_view.get("weather_opportunity_phase"),
+        "weather_opportunity_bot_hint": risk_view.get("weather_opportunity_bot_hint"),
+        "weather_entry_opportunity_score": risk_view.get("weather_entry_opportunity_score"),
+        "weather_rebound_confirmation_score": (
+            risk_view.get("weather_rebound_confirmation_score")
+        ),
+        "weather_exit_pressure_score": risk_view.get("weather_exit_pressure_score"),
+        "weather_hold_through_score": risk_view.get("weather_hold_through_score"),
+        "weather_pattern_tags": risk_view.get("weather_pattern_tags"),
         "mean_reversion_opportunity": safe_float(signal.get("mean_reversion_opportunity")),
         "weather_condition": risk_view.get("weather_condition"),
         "weather_alert_level": risk_view.get("weather_alert_level"),
@@ -704,15 +832,17 @@ def base_event(status, reason, snapshot, price, signal, config, weighted=None, r
         "high_entry_near_high": (high_entry or {}).get("near_high"),
         "high_entry_quality_reason": (high_entry or {}).get("reason"),
         "high_entry_size_multiplier": (high_entry or {}).get("size_multiplier"),
+        "market_entry_quality_reason": (market_entry or {}).get("reason"),
+        "market_entry_size_multiplier": (market_entry or {}).get("size_multiplier"),
     }
 
 
-def hold(reason, snapshot, price, signal, config, weighted=None, risk_view=None, high_entry=None):
-    return base_event("hold", reason, snapshot, price, signal, config, weighted, risk_view, high_entry)
+def hold(reason, snapshot, price, signal, config, weighted=None, risk_view=None, high_entry=None, market_entry=None):
+    return base_event("hold", reason, snapshot, price, signal, config, weighted, risk_view, high_entry, market_entry)
 
 
-def buy(reason, snapshot, signal, config, *, price, decision_price, trade_value, target_profit_pct, weighted, risk_view, high_entry, fill_mode):
-    event = base_event("buy", reason, snapshot, decision_price, signal, config, weighted, risk_view, high_entry)
+def buy(reason, snapshot, signal, config, *, price, decision_price, trade_value, target_profit_pct, weighted, risk_view, high_entry, market_entry, fill_mode):
+    event = base_event("buy", reason, snapshot, decision_price, signal, config, weighted, risk_view, high_entry, market_entry)
     event.update({
         "entry_price": price,
         "decision_price": decision_price,

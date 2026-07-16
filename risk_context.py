@@ -90,6 +90,13 @@ def derive_risk_context(risk_context, *, fallback_processed_at=None, stale=False
             "weather_market_distance_from_recent_low_pct": None,
             "weather_market_price_return_24h_pct": None,
             "weather_market_price_return_4h_pct": None,
+            "weather_opportunity_phase": None,
+            "weather_opportunity_bot_hint": None,
+            "weather_entry_opportunity_score": None,
+            "weather_rebound_confirmation_score": None,
+            "weather_exit_pressure_score": None,
+            "weather_hold_through_score": None,
+            "weather_pattern_tags": [],
             "risk_adjusted_buy_score": None,
             "risk_adjusted_market_score": None,
             "risk_adjusted_posture": None,
@@ -106,6 +113,7 @@ def derive_risk_context(risk_context, *, fallback_processed_at=None, stale=False
     weather = dict_value(risk_context.get("weather_report"))
     bot_tuning = dict_value(weather.get("bot_tuning"))
     market_location = dict_value(weather.get("market_location"))
+    market_opportunity = dict_value(weather.get("market_opportunity"))
     market_risk = clamp(numeric_or_default(risk_context.get("market_risk_score"), 0.5))
     buy_aggression = clamp(numeric_or_default(risk_context.get("buy_aggression_score"), 0.0))
     downside_risk = clamp(numeric_or_default(risk_context.get("downside_risk_score"), 0.5))
@@ -220,6 +228,23 @@ def derive_risk_context(risk_context, *, fallback_processed_at=None, stale=False
         "weather_market_price_return_4h_pct": numeric_or_none(
             market_location.get("price_return_4h_pct")
         ),
+        "weather_opportunity_phase": market_opportunity.get("cycle_phase"),
+        "weather_opportunity_bot_hint": market_opportunity.get("bot_hint"),
+        "weather_entry_opportunity_score": numeric_or_none(
+            market_opportunity.get("entry_opportunity_score")
+        ),
+        "weather_rebound_confirmation_score": numeric_or_none(
+            market_opportunity.get("rebound_confirmation_score")
+        ),
+        "weather_exit_pressure_score": numeric_or_none(
+            market_opportunity.get("exit_pressure_score")
+        ),
+        "weather_hold_through_score": numeric_or_none(
+            market_opportunity.get("hold_through_score")
+        ),
+        "weather_pattern_tags": [
+            str(tag) for tag in list_value(market_opportunity.get("pattern_tags")) if str(tag)
+        ],
         "risk_adjusted_buy_score": round(buy_score, 6),
         "risk_adjusted_market_score": round(market_score, 6),
         "risk_adjusted_posture": posture,

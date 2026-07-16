@@ -358,6 +358,14 @@ def env_profile_float(env_name, profile_name, default):
     return profile_float(profile_name, default)
 
 
+def env_profile_str(env_name, profile_name, default=""):
+    value = os.getenv(env_name)
+    if value is not None:
+        return str(value)
+
+    return profile_str(profile_name, default)
+
+
 def profile_float(name, default):
     value = strategy_config.get(name, default)
     return default if value is None else float(value)
@@ -557,6 +565,74 @@ HIGH_ENTRY_SIZE_MULTIPLIER = env_profile_float(
     "high_entry_size_multiplier",
     0.50
 )
+MARKET_ENTRY_QUALITY_ENABLED = env_profile_bool(
+    "MARKET_ENTRY_QUALITY_ENABLED",
+    "market_entry_quality_enabled",
+    True
+)
+MARKET_ENTRY_FREE_RANGE_POSITION_MAX = env_profile_float(
+    "MARKET_ENTRY_FREE_RANGE_POSITION_MAX",
+    "market_entry_free_range_position_max",
+    0.25
+)
+MARKET_ENTRY_REQUIRE_CONFIRMATION_ABOVE_RANGE = env_profile_float(
+    "MARKET_ENTRY_REQUIRE_CONFIRMATION_ABOVE_RANGE",
+    "market_entry_require_confirmation_above_range",
+    0.25
+)
+MARKET_ENTRY_MIN_BUY_SCORE = env_profile_float(
+    "MARKET_ENTRY_MIN_BUY_SCORE",
+    "market_entry_min_buy_score",
+    0.50
+)
+MARKET_ENTRY_MIN_REBOUND_SCORE = env_profile_float(
+    "MARKET_ENTRY_MIN_REBOUND_SCORE",
+    "market_entry_min_rebound_score",
+    0.55
+)
+MARKET_ENTRY_MIN_BOTTOMING_SCORE = env_profile_float(
+    "MARKET_ENTRY_MIN_BOTTOMING_SCORE",
+    "market_entry_min_bottoming_score",
+    0.55
+)
+MARKET_ENTRY_REQUIRE_POSITIVE_4H_RETURN = env_profile_bool(
+    "MARKET_ENTRY_REQUIRE_POSITIVE_4H_RETURN",
+    "market_entry_require_positive_4h_return",
+    False
+)
+MARKET_ENTRY_DIP_PHASES = {
+    phase.strip()
+    for phase in env_profile_str(
+        "MARKET_ENTRY_DIP_PHASES",
+        "market_entry_dip_phases",
+        "dip_leveling_entry,early_rebound"
+    ).split(",")
+    if phase.strip()
+}
+MARKET_ENTRY_AVOID_PHASES = {
+    phase.strip()
+    for phase in env_profile_str(
+        "MARKET_ENTRY_AVOID_PHASES",
+        "market_entry_avoid_phases",
+        "peak_exhaustion_watch,pullback_wait,storm_avoid"
+    ).split(",")
+    if phase.strip()
+}
+MARKET_ENTRY_MIN_OPPORTUNITY_SCORE = env_profile_float(
+    "MARKET_ENTRY_MIN_OPPORTUNITY_SCORE",
+    "market_entry_min_opportunity_score",
+    0.60
+)
+MARKET_ENTRY_MIN_REBOUND_CONFIRMATION_SCORE = env_profile_float(
+    "MARKET_ENTRY_MIN_REBOUND_CONFIRMATION_SCORE",
+    "market_entry_min_rebound_confirmation_score",
+    0.50
+)
+MARKET_ENTRY_DIP_SIZE_MULTIPLIER = env_profile_float(
+    "MARKET_ENTRY_DIP_SIZE_MULTIPLIER",
+    "market_entry_dip_size_multiplier",
+    0.50
+)
 USE_BACKTEST_HEALTH_GATE = env_bool(
     "USE_BACKTEST_HEALTH_GATE",
     False,
@@ -692,6 +768,13 @@ DECISION_CSV_FIELDS = [
     "weather_market_distance_from_recent_low_pct",
     "weather_market_price_return_24h_pct",
     "weather_market_price_return_4h_pct",
+    "weather_opportunity_phase",
+    "weather_opportunity_bot_hint",
+    "weather_entry_opportunity_score",
+    "weather_rebound_confirmation_score",
+    "weather_exit_pressure_score",
+    "weather_hold_through_score",
+    "weather_pattern_tags",
     "risk_adjusted_buy_score",
     "risk_adjusted_market_score",
     "risk_adjusted_posture",
@@ -705,6 +788,8 @@ DECISION_CSV_FIELDS = [
     "mean_reversion_opportunity",
     "range_position_24h",
     "flow_pressure",
+    "market_entry_quality_reason",
+    "market_entry_size_multiplier",
     "target_buy_price",
     "target_allocation_pct",
     "open_buy_count",
@@ -2873,6 +2958,125 @@ def high_entry_quality_check(risk_view, range_position):
     }
 
 
+def market_entry_quality_check(risk_view, range_position):
+    if not MARKET_ENTRY_QUALITY_ENABLED:
+        return {"allowed": True, "reason": None, "size_multiplier": 1.0}
+
+    if risk_view.get("weather_emergency_bell"):
+        return {
+            "allowed": False,
+            "reason": "weather_emergency_bell",
+            "size_multiplier": 0.0,
+        }
+
+    opportunity_phase = str(risk_view.get("weather_opportunity_phase") or "").strip()
+    entry_score = risk_view.get("weather_entry_opportunity_score")
+    rebound_confirmation = risk_view.get("weather_rebound_confirmation_score")
+    if opportunity_phase in MARKET_ENTRY_AVOID_PHASES:
+        return {
+            "allowed": False,
+            "reason": f"market_entry_{opportunity_phase}",
+            "size_multiplier": 0.0,
+            "weather_opportunity_phase": opportunity_phase,
+        }
+
+    if opportunity_phase in MARKET_ENTRY_DIP_PHASES:
+        entry_ok = (
+            entry_score is not None
+            and entry_score >= MARKET_ENTRY_MIN_OPPORTUNITY_SCORE
+        )
+        rebound_ok = (
+            rebound_confirmation is not None
+            and rebound_confirmation >= MARKET_ENTRY_MIN_REBOUND_CONFIRMATION_SCORE
+        )
+        if entry_ok or rebound_ok:
+            return {
+                "allowed": True,
+                "reason": f"market_entry_{opportunity_phase}",
+                "size_multiplier": clamp(MARKET_ENTRY_DIP_SIZE_MULTIPLIER, 0.0, 1.0),
+                "weather_opportunity_phase": opportunity_phase,
+                "weather_entry_opportunity_score": entry_score,
+                "weather_rebound_confirmation_score": rebound_confirmation,
+            }
+
+    effective_range_position = effective_market_location_range_position(
+        risk_view,
+        range_position
+    )
+    if (
+        effective_range_position is not None
+        and effective_range_position <= MARKET_ENTRY_FREE_RANGE_POSITION_MAX
+    ):
+        return {
+            "allowed": True,
+            "reason": "market_entry_low_range",
+            "size_multiplier": 1.0,
+        }
+
+    if (
+        effective_range_position is not None
+        and effective_range_position < MARKET_ENTRY_REQUIRE_CONFIRMATION_ABOVE_RANGE
+    ):
+        return {
+            "allowed": True,
+            "reason": "market_entry_lower_range",
+            "size_multiplier": 1.0,
+        }
+
+    buy_score = risk_view.get("risk_adjusted_buy_score")
+    rebound_score = risk_view.get("risk_context_rebound_score")
+    bottoming_score = risk_view.get("risk_context_bottoming_score")
+    confirmation_score = max(
+        buy_score or 0.0,
+        rebound_score or 0.0,
+        bottoming_score or 0.0,
+    )
+    min_confirmation = max(
+        MARKET_ENTRY_MIN_BUY_SCORE,
+        min(MARKET_ENTRY_MIN_REBOUND_SCORE, MARKET_ENTRY_MIN_BOTTOMING_SCORE),
+    )
+
+    if (
+        (buy_score is None or buy_score < MARKET_ENTRY_MIN_BUY_SCORE)
+        and (rebound_score is None or rebound_score < MARKET_ENTRY_MIN_REBOUND_SCORE)
+        and (bottoming_score is None or bottoming_score < MARKET_ENTRY_MIN_BOTTOMING_SCORE)
+    ):
+        return {
+            "allowed": False,
+            "reason": "market_entry_confirmation_low",
+            "size_multiplier": 0.0,
+            "confirmation_score": confirmation_score,
+            "market_entry_min_confirmation": min_confirmation,
+            "weather_opportunity_phase": opportunity_phase or None,
+            "weather_entry_opportunity_score": entry_score,
+            "weather_rebound_confirmation_score": rebound_confirmation,
+        }
+
+    price_return_4h = risk_view.get("weather_market_price_return_4h_pct")
+    if (
+        MARKET_ENTRY_REQUIRE_POSITIVE_4H_RETURN
+        and price_return_4h is not None
+        and price_return_4h <= 0
+    ):
+        return {
+            "allowed": False,
+            "reason": "market_entry_4h_momentum_negative",
+            "size_multiplier": 0.0,
+            "confirmation_score": confirmation_score,
+            "market_entry_min_confirmation": min_confirmation,
+            "weather_opportunity_phase": opportunity_phase or None,
+        }
+
+    return {
+        "allowed": True,
+        "reason": "market_entry_confirmed",
+        "size_multiplier": 1.0,
+        "confirmation_score": confirmation_score,
+        "market_entry_min_confirmation": min_confirmation,
+        "weather_opportunity_phase": opportunity_phase or None,
+    }
+
+
 def weather_report_bot_decides(sentiment):
     risk_context = sentiment.get("risk_context")
     if not isinstance(risk_context, dict):
@@ -3552,6 +3756,15 @@ def run_cycle():
         weather_market_price_return_4h_pct=(
             risk_view.get("weather_market_price_return_4h_pct")
         ),
+        weather_opportunity_phase=risk_view.get("weather_opportunity_phase"),
+        weather_opportunity_bot_hint=risk_view.get("weather_opportunity_bot_hint"),
+        weather_entry_opportunity_score=risk_view.get("weather_entry_opportunity_score"),
+        weather_rebound_confirmation_score=(
+            risk_view.get("weather_rebound_confirmation_score")
+        ),
+        weather_exit_pressure_score=risk_view.get("weather_exit_pressure_score"),
+        weather_hold_through_score=risk_view.get("weather_hold_through_score"),
+        weather_pattern_tags=risk_view.get("weather_pattern_tags"),
         risk_adjusted_buy_score=risk_view.get("risk_adjusted_buy_score"),
         risk_adjusted_market_score=risk_view.get("risk_adjusted_market_score"),
         risk_adjusted_posture=risk_view.get("risk_adjusted_posture"),
@@ -3667,6 +3880,34 @@ def run_cycle():
             high_entry_near_high=True,
             high_entry_quality_reason=high_entry["reason"],
             high_entry_size_multiplier=high_entry["size_multiplier"],
+            **risk_view
+        )
+        return
+
+    market_entry = market_entry_quality_check(risk_view, range_position)
+    if allow_market_buy and not market_entry["allowed"]:
+        reason = market_entry.pop("reason")
+        skip_cycle(
+            reason,
+            cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            action_recommendation=action_recommendation,
+            action_policy_reason=action_policy_reason,
+            contributor_count=sentiment.get("contributor_count"),
+            bot_action_allowed=sentiment.get("bot_action_allowed"),
+            market_entry_quality_enabled=MARKET_ENTRY_QUALITY_ENABLED,
+            market_entry_free_range_position_max=MARKET_ENTRY_FREE_RANGE_POSITION_MAX,
+            market_entry_require_confirmation_above_range=(
+                MARKET_ENTRY_REQUIRE_CONFIRMATION_ABOVE_RANGE
+            ),
+            market_entry_min_buy_score=MARKET_ENTRY_MIN_BUY_SCORE,
+            market_entry_min_rebound_score=MARKET_ENTRY_MIN_REBOUND_SCORE,
+            market_entry_min_bottoming_score=MARKET_ENTRY_MIN_BOTTOMING_SCORE,
+            **market_entry,
             **risk_view
         )
         return
@@ -3800,6 +4041,8 @@ def run_cycle():
         )
     if allow_market_buy and high_entry["near_high"] and high_entry["allowed"]:
         trade_value *= high_entry["size_multiplier"]
+    if allow_market_buy and market_entry.get("allowed"):
+        trade_value *= market_entry.get("size_multiplier", 1.0)
     trade_value *= max(0, 1 - EXECUTION_BUFFER_PCT)
 
     projected_inventory = current_inventory_usd(price) + trade_value
@@ -4058,6 +4301,8 @@ def run_cycle():
         high_entry_near_high=high_entry["near_high"],
         high_entry_quality_reason=high_entry["reason"],
         high_entry_size_multiplier=high_entry["size_multiplier"],
+        market_entry_quality_reason=market_entry.get("reason"),
+        market_entry_size_multiplier=market_entry.get("size_multiplier"),
         **risk_view
     )
     append_decision_csv(
@@ -4086,6 +4331,8 @@ def run_cycle():
         high_entry_near_high=high_entry["near_high"],
         high_entry_quality_reason=high_entry["reason"],
         high_entry_size_multiplier=high_entry["size_multiplier"],
+        market_entry_quality_reason=market_entry.get("reason"),
+        market_entry_size_multiplier=market_entry.get("size_multiplier"),
         **risk_view
     )
 
@@ -4109,6 +4356,8 @@ def run_cycle():
         high_entry_near_high=high_entry["near_high"],
         high_entry_quality_reason=high_entry["reason"],
         high_entry_size_multiplier=high_entry["size_multiplier"],
+        market_entry_quality_reason=market_entry.get("reason"),
+        market_entry_size_multiplier=market_entry.get("size_multiplier"),
         **risk_view
     )
 
@@ -4143,6 +4392,8 @@ def run_cycle():
         high_entry_near_high=high_entry["near_high"],
         high_entry_quality_reason=high_entry["reason"],
         high_entry_size_multiplier=high_entry["size_multiplier"],
+        market_entry_quality_reason=market_entry.get("reason"),
+        market_entry_size_multiplier=market_entry.get("size_multiplier"),
         **risk_view,
         **fill,
         result=result_payload or result
@@ -4181,6 +4432,8 @@ def run_cycle():
         high_entry_near_high=high_entry["near_high"],
         high_entry_quality_reason=high_entry["reason"],
         high_entry_size_multiplier=high_entry["size_multiplier"],
+        market_entry_quality_reason=market_entry.get("reason"),
+        market_entry_size_multiplier=market_entry.get("size_multiplier"),
         dry_run=DRY_RUN
     )
 
@@ -4229,6 +4482,24 @@ def main():
         entry_pacing_window_minutes=ENTRY_PACING_WINDOW_MINUTES,
         entry_pacing_max_buys=ENTRY_PACING_MAX_BUYS,
         entry_pacing_min_price_move_pct=ENTRY_PACING_MIN_PRICE_MOVE_PCT,
+        market_entry_quality_enabled=MARKET_ENTRY_QUALITY_ENABLED,
+        market_entry_free_range_position_max=MARKET_ENTRY_FREE_RANGE_POSITION_MAX,
+        market_entry_require_confirmation_above_range=(
+            MARKET_ENTRY_REQUIRE_CONFIRMATION_ABOVE_RANGE
+        ),
+        market_entry_min_buy_score=MARKET_ENTRY_MIN_BUY_SCORE,
+        market_entry_min_rebound_score=MARKET_ENTRY_MIN_REBOUND_SCORE,
+        market_entry_min_bottoming_score=MARKET_ENTRY_MIN_BOTTOMING_SCORE,
+        market_entry_require_positive_4h_return=(
+            MARKET_ENTRY_REQUIRE_POSITIVE_4H_RETURN
+        ),
+        market_entry_dip_phases=sorted(MARKET_ENTRY_DIP_PHASES),
+        market_entry_avoid_phases=sorted(MARKET_ENTRY_AVOID_PHASES),
+        market_entry_min_opportunity_score=MARKET_ENTRY_MIN_OPPORTUNITY_SCORE,
+        market_entry_min_rebound_confirmation_score=(
+            MARKET_ENTRY_MIN_REBOUND_CONFIRMATION_SCORE
+        ),
+        market_entry_dip_size_multiplier=MARKET_ENTRY_DIP_SIZE_MULTIPLIER,
         sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD,
         position_size_pct=POSITION_SIZE_PCT,
         max_trade_usd=MAX_TRADE_USD,
