@@ -14,6 +14,7 @@ import math
 import os
 import sys
 import time
+from urllib.parse import urlencode
 from datetime import datetime, timezone
 
 import requests
@@ -1099,9 +1100,8 @@ def kraken_private_terminal_error(message):
     )
 
 
-def kraken_signature(endpoint, data):
-    postdata = "&".join([f"{k}={v}" for k, v in data.items()])
-    encoded = (str(data["nonce"]) + postdata).encode()
+def kraken_signature(endpoint, postdata, nonce):
+    encoded = (str(nonce) + postdata).encode()
     message = endpoint.encode() + hashlib.sha256(encoded).digest()
     mac = hmac.new(
         base64.b64decode(KRAKEN_API_SECRET),
@@ -1115,16 +1115,18 @@ def kraken_private(endpoint, data):
     url = KRAKEN_API_URL.rstrip("/") + endpoint
     payload = dict(data)
     payload["nonce"] = next_nonce()
+    postdata = urlencode(payload)
 
     headers = {
         "API-Key": KRAKEN_API_KEY,
-        "API-Sign": kraken_signature(endpoint, payload)
+        "API-Sign": kraken_signature(endpoint, postdata, payload["nonce"]),
+        "Content-Type": "application/x-www-form-urlencoded"
     }
 
     r = requests.post(
         url,
         headers=headers,
-        data=payload,
+        data=postdata,
         timeout=REQUEST_TIMEOUT
     )
     r.raise_for_status()

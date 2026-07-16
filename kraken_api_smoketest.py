@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+from urllib.parse import urlencode
 
 import requests
 from dotenv import load_dotenv
@@ -42,9 +43,8 @@ def next_nonce():
     return str(int(time.time() * 1000))
 
 
-def kraken_signature(endpoint, data):
-    postdata = "&".join([f"{k}={v}" for k, v in data.items()])
-    encoded = (str(data["nonce"]) + postdata).encode()
+def kraken_signature(endpoint, postdata, nonce):
+    encoded = (str(nonce) + postdata).encode()
     message = endpoint.encode() + hashlib.sha256(encoded).digest()
     mac = hmac.new(
         base64.b64decode(KRAKEN_API_SECRET),
@@ -60,14 +60,16 @@ def private_post(endpoint, data=None):
 
     payload = dict(data or {})
     payload["nonce"] = next_nonce()
+    postdata = urlencode(payload)
     headers = {
         "API-Key": KRAKEN_API_KEY,
-        "API-Sign": kraken_signature(endpoint, payload)
+        "API-Sign": kraken_signature(endpoint, postdata, payload["nonce"]),
+        "Content-Type": "application/x-www-form-urlencoded"
     }
     response = requests.post(
         KRAKEN_API_URL.rstrip("/") + endpoint,
         headers=headers,
-        data=payload,
+        data=postdata,
         timeout=REQUEST_TIMEOUT
     )
     response.raise_for_status()
@@ -120,11 +122,13 @@ def main():
             print_step("Private Balance", False, str(e))
 
         open_order_txid = None
+        open_order_txids = []
         try:
             open_orders = private_post("/0/private/OpenOrders")
             open_order_map = open_orders.get("result", {}).get("open", {})
             count = len(open_order_map)
             open_order_txid = next(iter(open_order_map.keys()), None)
+            open_order_txids = list(open_order_map.keys())
             print_step("Private OpenOrders", True, f"open_orders={count}")
         except Exception as e:
             failures += 1
@@ -149,6 +153,29 @@ def main():
                 "Private QueryOrders",
                 True,
                 "skipped because no open orders were returned"
+            )
+
+        if len(open_order_txids) >= 2:
+            batch_txids = open_order_txids[:2]
+            try:
+                order_info = private_post(
+                    "/0/private/QueryOrders",
+                    {"txid": ",".join(batch_txids)}
+                )
+                found = sum(
+                    1 for txid in batch_txids
+                    if txid in order_info.get("result", {})
+                )
+                detail = f"txids={len(batch_txids)} found={found}"
+                print_step("Private QueryOrders Batch", True, detail)
+            except Exception as e:
+                failures += 1
+                print_step("Private QueryOrders Batch", False, str(e))
+        else:
+            print_step(
+                "Private QueryOrders Batch",
+                True,
+                "skipped because fewer than two open orders were returned"
             )
     else:
         print_step("Private API", False, "missing credentials")
