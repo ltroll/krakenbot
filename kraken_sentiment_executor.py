@@ -633,6 +633,15 @@ MARKET_ENTRY_DIP_SIZE_MULTIPLIER = env_profile_float(
     "market_entry_dip_size_multiplier",
     0.50
 )
+MARKET_ENTRY_GENERIC_PHASES = {
+    phase.strip()
+    for phase in env_profile_str(
+        "MARKET_ENTRY_GENERIC_PHASES",
+        "market_entry_generic_phases",
+        ""
+    ).split(",")
+    if phase.strip()
+}
 MARKET_ENTRY_STRICT_PHASE_MATCH = env_profile_bool(
     "MARKET_ENTRY_STRICT_PHASE_MATCH",
     "market_entry_strict_phase_match",
@@ -3013,16 +3022,19 @@ def market_entry_quality_check(risk_view, range_position):
                 "weather_rebound_confirmation_score": rebound_confirmation,
             }
 
-    if (
-        MARKET_ENTRY_STRICT_PHASE_MATCH
-        and opportunity_phase
-        and opportunity_phase not in ("neutral", "range_chop", "momentum_ride")
-    ):
+    phase_known = bool(opportunity_phase)
+    phase_enabled = (
+        opportunity_phase in MARKET_ENTRY_DIP_PHASES
+        or opportunity_phase in MARKET_ENTRY_AVOID_PHASES
+        or opportunity_phase in MARKET_ENTRY_GENERIC_PHASES
+    )
+    if MARKET_ENTRY_STRICT_PHASE_MATCH and not phase_enabled:
+        reason_phase = opportunity_phase if phase_known else "unknown"
         return {
             "allowed": False,
-            "reason": f"market_entry_{opportunity_phase}_not_enabled",
+            "reason": f"market_entry_{reason_phase}_not_enabled",
             "size_multiplier": 0.0,
-            "weather_opportunity_phase": opportunity_phase,
+            "weather_opportunity_phase": opportunity_phase or None,
         }
 
     effective_range_position = effective_market_location_range_position(
@@ -4526,6 +4538,7 @@ def main():
             MARKET_ENTRY_MIN_REBOUND_CONFIRMATION_SCORE
         ),
         market_entry_dip_size_multiplier=MARKET_ENTRY_DIP_SIZE_MULTIPLIER,
+        market_entry_generic_phases=sorted(MARKET_ENTRY_GENERIC_PHASES),
         market_entry_strict_phase_match=MARKET_ENTRY_STRICT_PHASE_MATCH,
         sentiment_buy_threshold=SENTIMENT_BUY_THRESHOLD,
         position_size_pct=POSITION_SIZE_PCT,

@@ -640,6 +640,11 @@ def market_entry_quality_check(risk_view, config, fallback_range_position):
         for item in str(config.get("market_entry_avoid_phases", "peak_exhaustion_watch,pullback_wait,storm_avoid")).split(",")
         if item.strip()
     }
+    generic_phases = {
+        item.strip()
+        for item in str(config.get("market_entry_generic_phases", "")).split(",")
+        if item.strip()
+    }
     entry_score = risk_view.get("weather_entry_opportunity_score")
     rebound_confirmation = risk_view.get("weather_rebound_confirmation_score")
     if phase in avoid_phases:
@@ -670,14 +675,12 @@ def market_entry_quality_check(risk_view, config, fallback_range_position):
                 "size_multiplier": 0.0,
             }
 
-    if (
-        config_bool(config, "market_entry_strict_phase_match", True)
-        and phase
-        and phase not in ("neutral", "range_chop", "momentum_ride")
-    ):
+    phase_enabled = phase in dip_phases or phase in avoid_phases or phase in generic_phases
+    if config_bool(config, "market_entry_strict_phase_match", True) and not phase_enabled:
+        reason_phase = phase if phase else "unknown"
         return {
             "allowed": False,
-            "reason": f"market_entry_{phase}_not_enabled",
+            "reason": f"market_entry_{reason_phase}_not_enabled",
             "size_multiplier": 0.0,
         }
 
@@ -1135,22 +1138,23 @@ def strategy_comparison_row(strategy_file, strategy_payload, replay):
         "buy_reason_counts": json_compact(summary.get("buy_reason_counts")),
         "buy_phase_counts": json_compact(summary.get("buy_phase_counts")),
         "hold_phase_counts": json_compact(summary.get("hold_phase_counts")),
-        "sentiment_buy_threshold": strategy_payload.get("sentiment_buy_threshold"),
-        "market_entry_quality_enabled": strategy_payload.get("market_entry_quality_enabled"),
-        "market_entry_dip_phases": strategy_payload.get("market_entry_dip_phases"),
-        "market_entry_avoid_phases": strategy_payload.get("market_entry_avoid_phases"),
-        "market_entry_min_opportunity_score": strategy_payload.get("market_entry_min_opportunity_score"),
-        "market_entry_min_rebound_confirmation_score": strategy_payload.get("market_entry_min_rebound_confirmation_score"),
-        "market_entry_dip_size_multiplier": strategy_payload.get("market_entry_dip_size_multiplier"),
-        "market_entry_strict_phase_match": strategy_payload.get("market_entry_strict_phase_match"),
-        "market_entry_min_buy_score": strategy_payload.get("market_entry_min_buy_score"),
-        "market_entry_min_rebound_score": strategy_payload.get("market_entry_min_rebound_score"),
-        "market_entry_min_bottoming_score": strategy_payload.get("market_entry_min_bottoming_score"),
-        "max_open_sell_orders": strategy_payload.get("max_open_sell_orders"),
-        "max_open_buy_orders": strategy_payload.get("max_open_buy_orders"),
-        "max_inventory_usd": strategy_payload.get("max_inventory_usd"),
-        "max_trade_usd": strategy_payload.get("max_trade_usd"),
-        "position_size_pct": strategy_payload.get("position_size_pct"),
+        "sentiment_buy_threshold": config_float(strategy_payload, "sentiment_buy_threshold", 0.03),
+        "market_entry_quality_enabled": config_bool(strategy_payload, "market_entry_quality_enabled", True),
+        "market_entry_dip_phases": strategy_payload.get("market_entry_dip_phases", "dip_leveling_entry,early_rebound"),
+        "market_entry_avoid_phases": strategy_payload.get("market_entry_avoid_phases", "peak_exhaustion_watch,pullback_wait,storm_avoid"),
+        "market_entry_generic_phases": strategy_payload.get("market_entry_generic_phases", ""),
+        "market_entry_min_opportunity_score": config_float(strategy_payload, "market_entry_min_opportunity_score", 0.67),
+        "market_entry_min_rebound_confirmation_score": config_float(strategy_payload, "market_entry_min_rebound_confirmation_score", 0.55),
+        "market_entry_dip_size_multiplier": config_float(strategy_payload, "market_entry_dip_size_multiplier", 0.50),
+        "market_entry_strict_phase_match": config_bool(strategy_payload, "market_entry_strict_phase_match", True),
+        "market_entry_min_buy_score": config_float(strategy_payload, "market_entry_min_buy_score", 0.50),
+        "market_entry_min_rebound_score": config_float(strategy_payload, "market_entry_min_rebound_score", 0.55),
+        "market_entry_min_bottoming_score": config_float(strategy_payload, "market_entry_min_bottoming_score", 0.55),
+        "max_open_sell_orders": config_float(strategy_payload, "max_open_sell_orders", 4),
+        "max_open_buy_orders": config_float(strategy_payload, "max_open_buy_orders", 3),
+        "max_inventory_usd": config_float(strategy_payload, "max_inventory_usd", 400),
+        "max_trade_usd": config_float(strategy_payload, "max_trade_usd", 90),
+        "position_size_pct": config_float(strategy_payload, "position_size_pct", 0.15),
         "practical_score": strategy_practical_score(summary),
     }
 
@@ -1195,6 +1199,7 @@ def write_csv(path, rows, ranked=False):
         "market_entry_quality_enabled",
         "market_entry_dip_phases",
         "market_entry_avoid_phases",
+        "market_entry_generic_phases",
         "market_entry_min_opportunity_score",
         "market_entry_min_rebound_confirmation_score",
         "market_entry_dip_size_multiplier",

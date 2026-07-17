@@ -26,6 +26,8 @@
       "market_entry_min_opportunity_score": 0.67,
       "market_entry_min_rebound_confirmation_score": 0.55,
       "market_entry_dip_size_multiplier": 0.5,
+      "market_entry_generic_phases": "",
+      "market_entry_strict_phase_match": true,
       "sentiment_buy_threshold": 0.02,
       "target_profit_pct": 0.008,
       "round_trip_fee_pct": 0.006,
