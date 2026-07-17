@@ -247,6 +247,15 @@ class RangeGridBacktestTests(unittest.TestCase):
                             "schema_version": "market-stability-v1",
                             "leveling_state": "leveling",
                             "leveling_score": 0.82,
+                            "stabilization_score": 0.55,
+                        },
+                        "trend_pressure": {
+                            "schema_version": "trend-pressure-v1",
+                            "short_term_direction": "sideways",
+                            "downtrend_strength": 0.19,
+                            "uptrend_strength": 0.0,
+                            "lower_highs_lower_lows": True,
+                            "falling_tape": True,
                         },
                         "market_opportunity": {
                             "schema_version": "market-opportunity-v1",
@@ -256,6 +265,8 @@ class RangeGridBacktestTests(unittest.TestCase):
                             "rebound_confirmation_score": 0.58,
                             "exit_pressure_score": 0.21,
                             "hold_through_score": 0.49,
+                            "failed_rebound_risk": 0.44,
+                            "long_entry_noise_risk": 0.27,
                             "pattern_tags": ["dip_leveling_candidate"],
                         },
                     },
@@ -285,6 +296,15 @@ class RangeGridBacktestTests(unittest.TestCase):
                             "schema_version": "market-stability-v1",
                             "leveling_state": "trending_up",
                             "leveling_score": 0.2,
+                            "stabilization_score": 0.75,
+                        },
+                        "trend_pressure": {
+                            "schema_version": "trend-pressure-v1",
+                            "short_term_direction": "rising",
+                            "downtrend_strength": 0.0,
+                            "uptrend_strength": 0.62,
+                            "lower_highs_lower_lows": False,
+                            "falling_tape": False,
                         },
                         "market_opportunity": {
                             "schema_version": "market-opportunity-v1",
@@ -294,6 +314,8 @@ class RangeGridBacktestTests(unittest.TestCase):
                             "rebound_confirmation_score": 0.72,
                             "exit_pressure_score": 0.31,
                             "hold_through_score": 0.53,
+                            "failed_rebound_risk": 0.18,
+                            "long_entry_noise_risk": 0.34,
                             "pattern_tags": ["rebound_confirming"],
                         },
                     },
@@ -327,6 +349,17 @@ class RangeGridBacktestTests(unittest.TestCase):
             {"leveling": 1, "trending_up": 1},
         )
         self.assertEqual(risk_summary["avg_weather_leveling_score"], 0.51)
+        self.assertEqual(risk_summary["avg_weather_stabilization_score"], 0.65)
+        self.assertEqual(
+            risk_summary["weather_short_term_direction_counts"],
+            {"sideways": 1, "rising": 1},
+        )
+        self.assertEqual(
+            risk_summary["weather_falling_tape_counts"],
+            {"true": 1, "false": 1},
+        )
+        self.assertEqual(risk_summary["avg_weather_downtrend_strength"], 0.095)
+        self.assertEqual(risk_summary["avg_weather_uptrend_strength"], 0.31)
         self.assertEqual(
             risk_summary["weather_opportunity_phase_counts"],
             {"dip_leveling_entry": 1, "early_rebound": 1},
@@ -346,6 +379,8 @@ class RangeGridBacktestTests(unittest.TestCase):
         )
         self.assertEqual(risk_summary["avg_weather_exit_pressure_score"], 0.26)
         self.assertEqual(risk_summary["avg_weather_hold_through_score"], 0.51)
+        self.assertEqual(risk_summary["avg_weather_failed_rebound_risk"], 0.31)
+        self.assertEqual(risk_summary["avg_weather_long_entry_noise_risk"], 0.305)
         self.assertEqual(
             result["recent_approved_events"][0]["sentiment_risk_posture"],
             "entry_allowed",
@@ -357,6 +392,15 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(
             result["recent_approved_events"][0]["weather_leveling_score"],
             0.82,
+        )
+        self.assertEqual(
+            result["recent_approved_events"][0]["weather_stabilization_score"],
+            0.55,
+        )
+        self.assertTrue(result["recent_approved_events"][0]["weather_falling_tape"])
+        self.assertEqual(
+            result["recent_approved_events"][0]["weather_short_term_direction"],
+            "sideways",
         )
         self.assertEqual(
             result["recent_approved_events"][0]["weather_opportunity_phase"],
@@ -2286,8 +2330,15 @@ class RangeGridBacktestTests(unittest.TestCase):
             self.assertIn("approved_sentiment_risk_postures", text)
             self.assertIn("approved_weather_leveling_states", text)
             self.assertIn("approved_avg_weather_leveling_score", text)
+            self.assertIn("approved_avg_weather_stabilization_score", text)
+            self.assertIn("approved_weather_short_term_directions", text)
+            self.assertIn("approved_weather_falling_tape_counts", text)
+            self.assertIn("approved_avg_weather_downtrend_strength", text)
+            self.assertIn("approved_avg_weather_uptrend_strength", text)
             self.assertIn("approved_weather_opportunity_phases", text)
             self.assertIn("approved_avg_weather_entry_opportunity_score", text)
+            self.assertIn("approved_avg_weather_failed_rebound_risk", text)
+            self.assertIn("approved_avg_weather_long_entry_noise_risk", text)
             self.assertIn("potential_by_weather_opportunity_phase", text)
             self.assertIn("approved_stale_level_reanchor_count", text)
             self.assertIn("potential_by_stale_level_reanchor", text)
@@ -2463,8 +2514,15 @@ class RangeGridBacktestTests(unittest.TestCase):
             self.assertIn("approved_sentiment_risk_postures", text)
             self.assertIn("approved_weather_leveling_states", text)
             self.assertIn("approved_avg_weather_leveling_score", text)
+            self.assertIn("approved_avg_weather_stabilization_score", text)
+            self.assertIn("approved_weather_short_term_directions", text)
+            self.assertIn("approved_weather_falling_tape_counts", text)
+            self.assertIn("approved_avg_weather_downtrend_strength", text)
+            self.assertIn("approved_avg_weather_uptrend_strength", text)
             self.assertIn("approved_weather_opportunity_phases", text)
             self.assertIn("approved_avg_weather_entry_opportunity_score", text)
+            self.assertIn("approved_avg_weather_failed_rebound_risk", text)
+            self.assertIn("approved_avg_weather_long_entry_noise_risk", text)
             self.assertIn("potential_by_weather_opportunity_phase", text)
             self.assertIn("approved_stale_level_reanchor_count", text)
             self.assertIn("potential_by_stale_level_reanchor", text)

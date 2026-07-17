@@ -2255,6 +2255,7 @@ def sentiment_risk_log_fields(risk_context):
     weather = weather_report_payload(risk_context)
     bot_tuning = weather_bot_tuning(weather)
     market_stability = weather_market_stability(weather)
+    trend_pressure = weather_trend_pressure(weather)
     market_opportunity = weather_market_opportunity(weather)
 
     return {
@@ -2284,6 +2285,28 @@ def sentiment_risk_log_fields(risk_context):
         "weather_leveling_score": optional_float(
             market_stability.get("leveling_score")
         ),
+        "weather_stabilization_score": optional_float(
+            market_stability.get("stabilization_score")
+        ),
+        "weather_short_term_direction": trend_pressure.get(
+            "short_term_direction"
+        ),
+        "weather_downtrend_strength": optional_float(
+            trend_pressure.get("downtrend_strength")
+        ),
+        "weather_uptrend_strength": optional_float(
+            trend_pressure.get("uptrend_strength")
+        ),
+        "weather_lower_highs_lower_lows": (
+            bool(trend_pressure.get("lower_highs_lower_lows"))
+            if "lower_highs_lower_lows" in trend_pressure
+            else None
+        ),
+        "weather_falling_tape": (
+            bool(trend_pressure.get("falling_tape"))
+            if "falling_tape" in trend_pressure
+            else None
+        ),
         "weather_opportunity_phase": market_opportunity.get("cycle_phase"),
         "weather_opportunity_bot_hint": market_opportunity.get("bot_hint"),
         "weather_entry_opportunity_score": optional_float(
@@ -2297,6 +2320,12 @@ def sentiment_risk_log_fields(risk_context):
         ),
         "weather_hold_through_score": optional_float(
             market_opportunity.get("hold_through_score")
+        ),
+        "weather_failed_rebound_risk": optional_float(
+            market_opportunity.get("failed_rebound_risk")
+        ),
+        "weather_long_entry_noise_risk": optional_float(
+            market_opportunity.get("long_entry_noise_risk")
         ),
         "weather_pattern_tags": weather_list(
             market_opportunity.get("pattern_tags")
@@ -2386,6 +2415,15 @@ def weather_market_stability(weather_report):
         else {}
     )
     return stability if isinstance(stability, dict) else {}
+
+
+def weather_trend_pressure(weather_report):
+    pressure = (
+        weather_report.get("trend_pressure")
+        if isinstance(weather_report, dict)
+        else {}
+    )
+    return pressure if isinstance(pressure, dict) else {}
 
 
 def weather_market_opportunity(weather_report):

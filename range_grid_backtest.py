@@ -385,6 +385,15 @@ def weather_market_stability(weather_report):
     return stability if isinstance(stability, dict) else {}
 
 
+def weather_trend_pressure(weather_report):
+    pressure = (
+        weather_report.get("trend_pressure")
+        if isinstance(weather_report, dict)
+        else {}
+    )
+    return pressure if isinstance(pressure, dict) else {}
+
+
 def weather_market_opportunity(weather_report):
     opportunity = (
         weather_report.get("market_opportunity")
@@ -509,6 +518,7 @@ def sentiment_risk_event_fields(signal):
     weather = weather_report_payload(risk_context)
     bot_tuning = weather_bot_tuning(weather)
     market_stability = weather_market_stability(weather)
+    trend_pressure = weather_trend_pressure(weather)
     market_opportunity = weather_market_opportunity(weather)
     fields = {
         "sentiment_risk_posture": risk_context.get("recommended_posture"),
@@ -536,6 +546,28 @@ def sentiment_risk_event_fields(signal):
         "weather_leveling_score": safe_float(
             market_stability.get("leveling_score")
         ),
+        "weather_stabilization_score": safe_float(
+            market_stability.get("stabilization_score")
+        ),
+        "weather_short_term_direction": trend_pressure.get(
+            "short_term_direction"
+        ),
+        "weather_downtrend_strength": safe_float(
+            trend_pressure.get("downtrend_strength")
+        ),
+        "weather_uptrend_strength": safe_float(
+            trend_pressure.get("uptrend_strength")
+        ),
+        "weather_lower_highs_lower_lows": (
+            bool(trend_pressure.get("lower_highs_lower_lows"))
+            if "lower_highs_lower_lows" in trend_pressure
+            else None
+        ),
+        "weather_falling_tape": (
+            bool(trend_pressure.get("falling_tape"))
+            if "falling_tape" in trend_pressure
+            else None
+        ),
         "weather_opportunity_phase": market_opportunity.get("cycle_phase"),
         "weather_opportunity_bot_hint": market_opportunity.get("bot_hint"),
         "weather_entry_opportunity_score": safe_float(
@@ -549,6 +581,12 @@ def sentiment_risk_event_fields(signal):
         ),
         "weather_hold_through_score": safe_float(
             market_opportunity.get("hold_through_score")
+        ),
+        "weather_failed_rebound_risk": safe_float(
+            market_opportunity.get("failed_rebound_risk")
+        ),
+        "weather_long_entry_noise_risk": safe_float(
+            market_opportunity.get("long_entry_noise_risk")
         ),
         "weather_pattern_tags": weather_list(
             market_opportunity.get("pattern_tags")
@@ -564,6 +602,8 @@ def summarize_sentiment_risk_events(events):
     numeric_counts = Counter()
     posture_counts = Counter()
     leveling_state_counts = Counter()
+    trend_direction_counts = Counter()
+    falling_tape_counts = Counter()
     opportunity_phase_counts = Counter()
     opportunity_bot_hint_counts = Counter()
     opportunity_pattern_tag_counts = Counter()
@@ -581,6 +621,13 @@ def summarize_sentiment_risk_events(events):
         )
         has_weather_stability = bool(event.get("weather_leveling_state")) or (
             safe_float(event.get("weather_leveling_score")) is not None
+            or safe_float(event.get("weather_stabilization_score")) is not None
+        )
+        has_weather_trend = (
+            bool(event.get("weather_short_term_direction"))
+            or safe_float(event.get("weather_downtrend_strength")) is not None
+            or safe_float(event.get("weather_uptrend_strength")) is not None
+            or event.get("weather_falling_tape") is not None
         )
         has_weather_opportunity = (
             bool(event.get("weather_opportunity_phase"))
@@ -590,12 +637,15 @@ def summarize_sentiment_risk_events(events):
             or safe_float(event.get("weather_rebound_confirmation_score")) is not None
             or safe_float(event.get("weather_exit_pressure_score")) is not None
             or safe_float(event.get("weather_hold_through_score")) is not None
+            or safe_float(event.get("weather_failed_rebound_risk")) is not None
+            or safe_float(event.get("weather_long_entry_noise_risk")) is not None
         )
         has_risk_value = (
             bool(posture)
             or bool(flags)
             or has_numeric_value
             or has_weather_stability
+            or has_weather_trend
             or has_weather_opportunity
         )
         if not has_risk_value:
@@ -605,6 +655,12 @@ def summarize_sentiment_risk_events(events):
         leveling_state = event.get("weather_leveling_state")
         if leveling_state:
             leveling_state_counts[str(leveling_state)] += 1
+        short_term_direction = event.get("weather_short_term_direction")
+        if short_term_direction:
+            trend_direction_counts[str(short_term_direction)] += 1
+        falling_tape = event.get("weather_falling_tape")
+        if falling_tape is not None:
+            falling_tape_counts[str(bool(falling_tape)).lower()] += 1
         opportunity_phase = event.get("weather_opportunity_phase")
         if opportunity_phase:
             opportunity_phase_counts[str(opportunity_phase)] += 1
@@ -627,10 +683,22 @@ def summarize_sentiment_risk_events(events):
             numeric_totals["weather_leveling_score"] += leveling_score
             numeric_counts["weather_leveling_score"] += 1
         for output_key in (
+            "weather_stabilization_score",
+            "weather_downtrend_strength",
+            "weather_uptrend_strength",
+        ):
+            value = safe_float(event.get(output_key))
+            if value is None:
+                continue
+            numeric_totals[output_key] += value
+            numeric_counts[output_key] += 1
+        for output_key in (
             "weather_entry_opportunity_score",
             "weather_rebound_confirmation_score",
             "weather_exit_pressure_score",
             "weather_hold_through_score",
+            "weather_failed_rebound_risk",
+            "weather_long_entry_noise_risk",
         ):
             value = safe_float(event.get(output_key))
             if value is None:
@@ -655,6 +723,12 @@ def summarize_sentiment_risk_events(events):
         "sentiment_risk_posture_counts": dict(posture_counts.most_common()),
         "weather_leveling_state_counts": dict(
             leveling_state_counts.most_common()
+        ),
+        "weather_short_term_direction_counts": dict(
+            trend_direction_counts.most_common()
+        ),
+        "weather_falling_tape_counts": dict(
+            falling_tape_counts.most_common()
         ),
         "weather_opportunity_phase_counts": dict(
             opportunity_phase_counts.most_common()
@@ -701,10 +775,24 @@ def summarize_sentiment_risk_events(events):
     else:
         summary[f"avg_{output_key}"] = None
     for output_key in (
+        "weather_stabilization_score",
+        "weather_downtrend_strength",
+        "weather_uptrend_strength",
+    ):
+        if numeric_counts[output_key]:
+            summary[f"avg_{output_key}"] = round(
+                numeric_totals[output_key] / numeric_counts[output_key],
+                6,
+            )
+        else:
+            summary[f"avg_{output_key}"] = None
+    for output_key in (
         "weather_entry_opportunity_score",
         "weather_rebound_confirmation_score",
         "weather_exit_pressure_score",
         "weather_hold_through_score",
+        "weather_failed_rebound_risk",
+        "weather_long_entry_noise_risk",
     ):
         if numeric_counts[output_key]:
             summary[f"avg_{output_key}"] = round(
@@ -2055,6 +2143,23 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
             "approved_avg_weather_leveling_score": risk_summary.get(
                 "avg_weather_leveling_score"
             ),
+            "approved_avg_weather_stabilization_score": risk_summary.get(
+                "avg_weather_stabilization_score"
+            ),
+            "approved_weather_short_term_directions": json.dumps(
+                risk_summary.get("weather_short_term_direction_counts") or {},
+                sort_keys=True,
+            ),
+            "approved_weather_falling_tape_counts": json.dumps(
+                risk_summary.get("weather_falling_tape_counts") or {},
+                sort_keys=True,
+            ),
+            "approved_avg_weather_downtrend_strength": risk_summary.get(
+                "avg_weather_downtrend_strength"
+            ),
+            "approved_avg_weather_uptrend_strength": risk_summary.get(
+                "avg_weather_uptrend_strength"
+            ),
             "approved_weather_opportunity_phases": json.dumps(
                 risk_summary.get("weather_opportunity_phase_counts") or {},
                 sort_keys=True,
@@ -2074,6 +2179,12 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
             ),
             "approved_avg_weather_hold_through_score": risk_summary.get(
                 "avg_weather_hold_through_score"
+            ),
+            "approved_avg_weather_failed_rebound_risk": risk_summary.get(
+                "avg_weather_failed_rebound_risk"
+            ),
+            "approved_avg_weather_long_entry_noise_risk": risk_summary.get(
+                "avg_weather_long_entry_noise_risk"
             ),
             "approved_weather_pattern_tags": json.dumps(
                 risk_summary.get("weather_pattern_tag_counts") or {},
@@ -2452,12 +2563,19 @@ def write_strategy_comparison_csv(comparison, output_path):
         "approved_sentiment_risk_postures",
         "approved_weather_leveling_states",
         "approved_avg_weather_leveling_score",
+        "approved_avg_weather_stabilization_score",
+        "approved_weather_short_term_directions",
+        "approved_weather_falling_tape_counts",
+        "approved_avg_weather_downtrend_strength",
+        "approved_avg_weather_uptrend_strength",
         "approved_weather_opportunity_phases",
         "approved_weather_opportunity_bot_hints",
         "approved_avg_weather_entry_opportunity_score",
         "approved_avg_weather_rebound_confirmation_score",
         "approved_avg_weather_exit_pressure_score",
         "approved_avg_weather_hold_through_score",
+        "approved_avg_weather_failed_rebound_risk",
+        "approved_avg_weather_long_entry_noise_risk",
         "approved_weather_pattern_tags",
         "potential_by_weather_opportunity_phase",
         "approved_stale_level_reanchor_count",
@@ -2524,12 +2642,19 @@ def write_ranked_strategy_csv(comparison, output_path):
         "approved_sentiment_risk_postures",
         "approved_weather_leveling_states",
         "approved_avg_weather_leveling_score",
+        "approved_avg_weather_stabilization_score",
+        "approved_weather_short_term_directions",
+        "approved_weather_falling_tape_counts",
+        "approved_avg_weather_downtrend_strength",
+        "approved_avg_weather_uptrend_strength",
         "approved_weather_opportunity_phases",
         "approved_weather_opportunity_bot_hints",
         "approved_avg_weather_entry_opportunity_score",
         "approved_avg_weather_rebound_confirmation_score",
         "approved_avg_weather_exit_pressure_score",
         "approved_avg_weather_hold_through_score",
+        "approved_avg_weather_failed_rebound_risk",
+        "approved_avg_weather_long_entry_noise_risk",
         "approved_weather_pattern_tags",
         "potential_by_weather_opportunity_phase",
         "approved_stale_level_reanchor_count",
