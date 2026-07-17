@@ -134,6 +134,47 @@ class RiskContextTests(unittest.TestCase):
         self.assertEqual(derived["weather_market_price_return_24h_pct"], 1.5441)
         self.assertEqual(derived["weather_market_price_return_4h_pct"], -0.4585)
 
+    def test_weather_trend_stability_and_noise_are_exposed(self):
+        derived = derive_risk_context(
+            {
+                "weather_report": {
+                    "condition": "neutral",
+                    "alert_level": "watch",
+                    "trend_pressure": {
+                        "short_term_direction": "sideways",
+                        "downtrend_strength": 0.1893,
+                        "uptrend_strength": 0.0,
+                        "lower_highs_lower_lows": True,
+                        "falling_tape": True,
+                    },
+                    "market_stability": {
+                        "leveling_state": "leveling",
+                        "leveling_score": 0.8353,
+                        "stabilization_score": 0.5537,
+                    },
+                    "market_opportunity": {
+                        "cycle_phase": "range_chop_downtrend",
+                        "bot_hint": "wait_for_stabilization",
+                        "failed_rebound_risk": 0.44,
+                        "long_entry_noise_risk": 0.27,
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(derived["weather_short_term_direction"], "sideways")
+        self.assertEqual(derived["weather_downtrend_strength"], 0.1893)
+        self.assertEqual(derived["weather_uptrend_strength"], 0.0)
+        self.assertTrue(derived["weather_lower_highs_lower_lows"])
+        self.assertTrue(derived["weather_falling_tape"])
+        self.assertEqual(derived["weather_leveling_state"], "leveling")
+        self.assertEqual(derived["weather_leveling_score"], 0.8353)
+        self.assertEqual(derived["weather_stabilization_score"], 0.5537)
+        self.assertEqual(derived["weather_opportunity_phase"], "range_chop_downtrend")
+        self.assertEqual(derived["weather_opportunity_bot_hint"], "wait_for_stabilization")
+        self.assertEqual(derived["weather_failed_rebound_risk"], 0.44)
+        self.assertEqual(derived["weather_long_entry_noise_risk"], 0.27)
+
 
 if __name__ == "__main__":
     unittest.main()

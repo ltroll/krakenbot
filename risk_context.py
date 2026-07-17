@@ -44,6 +44,20 @@ def dict_value(value):
     return value if isinstance(value, dict) else {}
 
 
+def bool_or_default(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return True
+        if normalized in ("0", "false", "no", "off"):
+            return False
+    if value is None:
+        return default
+    return bool(value)
+
+
 def risk_context_available(risk_context):
     return isinstance(risk_context, dict) and bool(risk_context)
 
@@ -90,12 +104,22 @@ def derive_risk_context(risk_context, *, fallback_processed_at=None, stale=False
             "weather_market_distance_from_recent_low_pct": None,
             "weather_market_price_return_24h_pct": None,
             "weather_market_price_return_4h_pct": None,
+            "weather_leveling_state": None,
+            "weather_leveling_score": None,
+            "weather_stabilization_score": None,
+            "weather_short_term_direction": None,
+            "weather_downtrend_strength": None,
+            "weather_uptrend_strength": None,
+            "weather_lower_highs_lower_lows": False,
+            "weather_falling_tape": False,
             "weather_opportunity_phase": None,
             "weather_opportunity_bot_hint": None,
             "weather_entry_opportunity_score": None,
             "weather_rebound_confirmation_score": None,
             "weather_exit_pressure_score": None,
             "weather_hold_through_score": None,
+            "weather_failed_rebound_risk": None,
+            "weather_long_entry_noise_risk": None,
             "weather_pattern_tags": [],
             "risk_adjusted_buy_score": None,
             "risk_adjusted_market_score": None,
@@ -113,6 +137,8 @@ def derive_risk_context(risk_context, *, fallback_processed_at=None, stale=False
     weather = dict_value(risk_context.get("weather_report"))
     bot_tuning = dict_value(weather.get("bot_tuning"))
     market_location = dict_value(weather.get("market_location"))
+    market_stability = dict_value(weather.get("market_stability"))
+    trend_pressure = dict_value(weather.get("trend_pressure"))
     market_opportunity = dict_value(weather.get("market_opportunity"))
     market_risk = clamp(numeric_or_default(risk_context.get("market_risk_score"), 0.5))
     buy_aggression = clamp(numeric_or_default(risk_context.get("buy_aggression_score"), 0.0))
@@ -228,6 +254,28 @@ def derive_risk_context(risk_context, *, fallback_processed_at=None, stale=False
         "weather_market_price_return_4h_pct": numeric_or_none(
             market_location.get("price_return_4h_pct")
         ),
+        "weather_leveling_state": market_stability.get("leveling_state"),
+        "weather_leveling_score": numeric_or_none(
+            market_stability.get("leveling_score")
+        ),
+        "weather_stabilization_score": numeric_or_none(
+            market_stability.get("stabilization_score")
+        ),
+        "weather_short_term_direction": trend_pressure.get("short_term_direction"),
+        "weather_downtrend_strength": numeric_or_none(
+            trend_pressure.get("downtrend_strength")
+        ),
+        "weather_uptrend_strength": numeric_or_none(
+            trend_pressure.get("uptrend_strength")
+        ),
+        "weather_lower_highs_lower_lows": bool_or_default(
+            trend_pressure.get("lower_highs_lower_lows"),
+            False,
+        ),
+        "weather_falling_tape": bool_or_default(
+            trend_pressure.get("falling_tape"),
+            False,
+        ),
         "weather_opportunity_phase": market_opportunity.get("cycle_phase"),
         "weather_opportunity_bot_hint": market_opportunity.get("bot_hint"),
         "weather_entry_opportunity_score": numeric_or_none(
@@ -241,6 +289,12 @@ def derive_risk_context(risk_context, *, fallback_processed_at=None, stale=False
         ),
         "weather_hold_through_score": numeric_or_none(
             market_opportunity.get("hold_through_score")
+        ),
+        "weather_failed_rebound_risk": numeric_or_none(
+            market_opportunity.get("failed_rebound_risk")
+        ),
+        "weather_long_entry_noise_risk": numeric_or_none(
+            market_opportunity.get("long_entry_noise_risk")
         ),
         "weather_pattern_tags": [
             str(tag) for tag in list_value(market_opportunity.get("pattern_tags")) if str(tag)

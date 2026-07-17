@@ -637,16 +637,63 @@ def market_entry_quality_check(risk_view, config, fallback_range_position):
     }
     avoid_phases = {
         item.strip()
-        for item in str(config.get("market_entry_avoid_phases", "peak_exhaustion_watch,pullback_wait,storm_avoid")).split(",")
+        for item in str(config.get(
+            "market_entry_avoid_phases",
+            (
+                "peak_exhaustion_watch,pullback_wait,storm_avoid,"
+                "range_chop_downtrend,range_chop_distribution"
+            ),
+        )).split(",")
         if item.strip()
     }
     generic_phases = {
         item.strip()
-        for item in str(config.get("market_entry_generic_phases", "")).split(",")
+        for item in str(config.get(
+            "market_entry_generic_phases",
+            "range_chop_stabilizing,range_chop_accumulation",
+        )).split(",")
         if item.strip()
     }
     entry_score = risk_view.get("weather_entry_opportunity_score")
     rebound_confirmation = risk_view.get("weather_rebound_confirmation_score")
+    stabilization_score = risk_view.get("weather_stabilization_score")
+    failed_rebound_risk = risk_view.get("weather_failed_rebound_risk")
+    long_entry_noise_risk = risk_view.get("weather_long_entry_noise_risk")
+    if (
+        config_bool(config, "market_entry_block_falling_tape", True)
+        and risk_view.get("weather_falling_tape")
+    ):
+        return {
+            "allowed": False,
+            "reason": "market_entry_falling_tape",
+            "size_multiplier": 0.0,
+        }
+    if (
+        failed_rebound_risk is not None
+        and failed_rebound_risk >= config_float(
+            config,
+            "market_entry_max_failed_rebound_risk",
+            0.65,
+        )
+    ):
+        return {
+            "allowed": False,
+            "reason": "market_entry_failed_rebound_risk_high",
+            "size_multiplier": 0.0,
+        }
+    if (
+        long_entry_noise_risk is not None
+        and long_entry_noise_risk >= config_float(
+            config,
+            "market_entry_max_long_entry_noise_risk",
+            0.65,
+        )
+    ):
+        return {
+            "allowed": False,
+            "reason": "market_entry_long_entry_noise_risk_high",
+            "size_multiplier": 0.0,
+        }
     if phase in avoid_phases:
         return {
             "allowed": False,
@@ -654,6 +701,20 @@ def market_entry_quality_check(risk_view, config, fallback_range_position):
             "size_multiplier": 0.0,
         }
     if phase in dip_phases:
+        min_stabilization = (
+            config_float(config, "market_entry_rebound_min_stabilization_score", 0.60)
+            if phase == "early_rebound"
+            else config_float(config, "market_entry_dip_min_stabilization_score", 0.55)
+        )
+        if (
+            stabilization_score is not None
+            and stabilization_score < min_stabilization
+        ):
+            return {
+                "allowed": False,
+                "reason": f"market_entry_{phase}_stabilization_low",
+                "size_multiplier": 0.0,
+            }
         entry_ok = (
             entry_score is not None
             and entry_score >= config_float(config, "market_entry_min_opportunity_score", 0.67)
@@ -683,6 +744,19 @@ def market_entry_quality_check(risk_view, config, fallback_range_position):
             "reason": f"market_entry_{reason_phase}_not_enabled",
             "size_multiplier": 0.0,
         }
+
+    if phase in generic_phases:
+        min_stabilization = config_float(
+            config,
+            "market_entry_min_stabilization_score",
+            0.65,
+        )
+        if stabilization_score is None or stabilization_score < min_stabilization:
+            return {
+                "allowed": False,
+                "reason": f"market_entry_{phase}_stabilization_low",
+                "size_multiplier": 0.0,
+            }
 
     range_position = effective_market_location_range_position(
         risk_view,
@@ -802,7 +876,7 @@ def evaluate_snapshot(snapshot, variant, strict_high_guard_pct, account_usd, str
         return hold(high_entry["reason"], snapshot, price, signal, config, weighted, risk_view, high_entry)
 
     market_entry = market_entry_quality_check(risk_view, config, range_position)
-    if allow_market and not market_entry["allowed"]:
+    if not market_entry["allowed"]:
         return hold(market_entry["reason"], snapshot, price, signal, config, weighted, risk_view, high_entry, market_entry)
 
     high_guard_pct = config_float(config, "high_price_buy_block_pct", 0.0005)
@@ -912,6 +986,14 @@ def base_event(status, reason, snapshot, price, signal, config, weighted=None, r
         "weather_market_price_return_4h_pct": (
             risk_view.get("weather_market_price_return_4h_pct")
         ),
+        "weather_leveling_state": risk_view.get("weather_leveling_state"),
+        "weather_leveling_score": risk_view.get("weather_leveling_score"),
+        "weather_stabilization_score": risk_view.get("weather_stabilization_score"),
+        "weather_short_term_direction": risk_view.get("weather_short_term_direction"),
+        "weather_downtrend_strength": risk_view.get("weather_downtrend_strength"),
+        "weather_uptrend_strength": risk_view.get("weather_uptrend_strength"),
+        "weather_lower_highs_lower_lows": risk_view.get("weather_lower_highs_lower_lows"),
+        "weather_falling_tape": risk_view.get("weather_falling_tape"),
         "weather_opportunity_phase": risk_view.get("weather_opportunity_phase"),
         "weather_opportunity_bot_hint": risk_view.get("weather_opportunity_bot_hint"),
         "weather_entry_opportunity_score": risk_view.get("weather_entry_opportunity_score"),
@@ -920,6 +1002,8 @@ def base_event(status, reason, snapshot, price, signal, config, weighted=None, r
         ),
         "weather_exit_pressure_score": risk_view.get("weather_exit_pressure_score"),
         "weather_hold_through_score": risk_view.get("weather_hold_through_score"),
+        "weather_failed_rebound_risk": risk_view.get("weather_failed_rebound_risk"),
+        "weather_long_entry_noise_risk": risk_view.get("weather_long_entry_noise_risk"),
         "weather_pattern_tags": risk_view.get("weather_pattern_tags"),
         "mean_reversion_opportunity": safe_float(signal.get("mean_reversion_opportunity")),
         "weather_condition": risk_view.get("weather_condition"),
@@ -1141,12 +1225,27 @@ def strategy_comparison_row(strategy_file, strategy_payload, replay):
         "sentiment_buy_threshold": config_float(strategy_payload, "sentiment_buy_threshold", 0.03),
         "market_entry_quality_enabled": config_bool(strategy_payload, "market_entry_quality_enabled", True),
         "market_entry_dip_phases": strategy_payload.get("market_entry_dip_phases", "dip_leveling_entry,early_rebound"),
-        "market_entry_avoid_phases": strategy_payload.get("market_entry_avoid_phases", "peak_exhaustion_watch,pullback_wait,storm_avoid"),
-        "market_entry_generic_phases": strategy_payload.get("market_entry_generic_phases", ""),
+        "market_entry_avoid_phases": strategy_payload.get(
+            "market_entry_avoid_phases",
+            (
+                "peak_exhaustion_watch,pullback_wait,storm_avoid,"
+                "range_chop_downtrend,range_chop_distribution"
+            ),
+        ),
+        "market_entry_generic_phases": strategy_payload.get(
+            "market_entry_generic_phases",
+            "range_chop_stabilizing,range_chop_accumulation",
+        ),
         "market_entry_min_opportunity_score": config_float(strategy_payload, "market_entry_min_opportunity_score", 0.67),
         "market_entry_min_rebound_confirmation_score": config_float(strategy_payload, "market_entry_min_rebound_confirmation_score", 0.55),
         "market_entry_dip_size_multiplier": config_float(strategy_payload, "market_entry_dip_size_multiplier", 0.50),
         "market_entry_strict_phase_match": config_bool(strategy_payload, "market_entry_strict_phase_match", True),
+        "market_entry_block_falling_tape": config_bool(strategy_payload, "market_entry_block_falling_tape", True),
+        "market_entry_min_stabilization_score": config_float(strategy_payload, "market_entry_min_stabilization_score", 0.65),
+        "market_entry_dip_min_stabilization_score": config_float(strategy_payload, "market_entry_dip_min_stabilization_score", 0.55),
+        "market_entry_rebound_min_stabilization_score": config_float(strategy_payload, "market_entry_rebound_min_stabilization_score", 0.60),
+        "market_entry_max_failed_rebound_risk": config_float(strategy_payload, "market_entry_max_failed_rebound_risk", 0.65),
+        "market_entry_max_long_entry_noise_risk": config_float(strategy_payload, "market_entry_max_long_entry_noise_risk", 0.65),
         "market_entry_min_buy_score": config_float(strategy_payload, "market_entry_min_buy_score", 0.50),
         "market_entry_min_rebound_score": config_float(strategy_payload, "market_entry_min_rebound_score", 0.55),
         "market_entry_min_bottoming_score": config_float(strategy_payload, "market_entry_min_bottoming_score", 0.55),
@@ -1204,6 +1303,12 @@ def write_csv(path, rows, ranked=False):
         "market_entry_min_rebound_confirmation_score",
         "market_entry_dip_size_multiplier",
         "market_entry_strict_phase_match",
+        "market_entry_block_falling_tape",
+        "market_entry_min_stabilization_score",
+        "market_entry_dip_min_stabilization_score",
+        "market_entry_rebound_min_stabilization_score",
+        "market_entry_max_failed_rebound_risk",
+        "market_entry_max_long_entry_noise_risk",
         "market_entry_min_buy_score",
         "market_entry_min_rebound_score",
         "market_entry_min_bottoming_score",
