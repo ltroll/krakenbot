@@ -1878,6 +1878,11 @@ class RangeGridBacktestTests(unittest.TestCase):
         ]
 
         replay = backtest.replay_from_snapshots(snapshots)
+        self.assertEqual(replay["summary"]["approved_candidates"], 1)
+        self.assertNotIn(
+            "max_open_sell_orders",
+            replay["summary"]["blocked_reason_counts"],
+        )
         actual = {
             "buy_orders_placed": 0,
             "buy_orders_placed_by_source": {},

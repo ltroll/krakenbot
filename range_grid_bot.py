@@ -5588,6 +5588,22 @@ def main():
                     candidate_effective_max_open_sell_orders = (
                         route_limits["max_open_sell_orders"]
                     )
+                    candidate_sell_backlog_soft_release_minutes = strategy_float(
+                        route_config,
+                        "sell_backlog_soft_release_minutes",
+                        sell_backlog_soft_release_minutes,
+                    )
+                    candidate_sell_backlog_old_order_weight = strategy_float(
+                        route_config,
+                        "sell_backlog_old_order_weight",
+                        sell_backlog_old_order_weight,
+                    )
+                    candidate_sell_backlog = summarize_sell_backlog(
+                        state["open_sell_orders"],
+                        now,
+                        candidate_sell_backlog_soft_release_minutes,
+                        candidate_sell_backlog_old_order_weight,
+                    )
                     candidate_min_buy_notional_usd = strategy_float(
                         route_config,
                         "min_buy_notional_usd",
@@ -5719,7 +5735,7 @@ def main():
                                 else "price_above_level"
                             )
                     elif (
-                        len(state["open_sell_orders"])
+                        candidate_sell_backlog["effective_count"]
                         >= candidate_effective_max_open_sell_orders
                     ):
                         skip_reason = "max_open_sell_orders"
@@ -5834,6 +5850,30 @@ def main():
                     if skip_reason is None and volume < candidate_min_buy_volume_btc:
                         skip_reason = "below_min_volume"
 
+                    candidate_sell_backlog_log_fields = {
+                        "sell_backlog_count": candidate_sell_backlog["count"],
+                        "sell_backlog_effective_count": round(
+                            candidate_sell_backlog["effective_count"],
+                            4,
+                        ),
+                        "sell_backlog_fresh_count": candidate_sell_backlog[
+                            "fresh_count"
+                        ],
+                        "sell_backlog_aged_count": candidate_sell_backlog[
+                            "aged_count"
+                        ],
+                        "sell_backlog_oldest_minutes": round(
+                            candidate_sell_backlog["oldest_age_minutes"],
+                            2,
+                        ),
+                        "sell_backlog_soft_release_minutes": (
+                            candidate_sell_backlog["soft_release_minutes"]
+                        ),
+                        "sell_backlog_old_order_weight": (
+                            candidate_sell_backlog["old_order_weight"]
+                        ),
+                    }
+
                     if skip_reason is not None:
                         log_event(
                             "BUY_CANDIDATE_SKIPPED",
@@ -5926,6 +5966,7 @@ def main():
                             runtime_block_reason=runtime_block_reason,
                             buy_source=buy_source,
                             bucket_name=bucket_name,
+                            **candidate_sell_backlog_log_fields,
                             high_anchor_order_count=high_anchor_order_count,
                             high_anchor_effective_order_count=round(
                                 high_anchor_effective_order_count,
@@ -6064,6 +6105,7 @@ def main():
                             bucket_name=bucket_name,
                             bucket_inventory_usd=round(bucket_inventory_usd, 8),
                             bucket_inventory_cap_usd=round(bucket_cap_usd, 8),
+                            **candidate_sell_backlog_log_fields,
                             high_anchor_order_count=high_anchor_order_count,
                             high_anchor_effective_order_count=round(
                                 high_anchor_effective_order_count,

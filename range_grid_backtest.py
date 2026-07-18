@@ -3364,7 +3364,7 @@ def evaluate_candidate(snapshot, candidate, price):
             return False, "open_buy_order"
         if key in open_sell_levels:
             return False, "open_sell_order"
-    if int(state_info.get("open_sell_count") or 0) >= max_open_sell_orders:
+    if sell_backlog_effective_count(snapshot) >= max_open_sell_orders:
         return False, "max_open_sell_orders"
     if deployed_inventory_usd >= max_inventory_usd:
         return False, "max_inventory_usd"
