@@ -551,6 +551,11 @@ high_anchor_buy_cooldown_minutes = profile_int(
     "high_anchor_buy_cooldown_minutes",
     15
 )
+buy_cooldown_minutes = profile_float("buy_cooldown_minutes", 0.0)
+buy_cooldown_minutes_by_source = normalized_source_config_map(
+    strategy_config,
+    "buy_cooldown_minutes_by_source"
+)
 max_open_high_anchor_orders = profile_int("max_open_high_anchor_orders", 3)
 high_anchor_backlog_soft_release_minutes = profile_int(
     "high_anchor_backlog_soft_release_minutes",
@@ -1943,6 +1948,8 @@ def load_state():
         "range_mean": None,
         "range_median": None,
         "last_range_refresh": None,
+        "last_buy_at": None,
+        "last_buy_at_by_source": {},
         "last_high_anchor_buy_at": None,
         "last_sell_price": None,
         "last_sell_at": None,
@@ -2715,6 +2722,61 @@ def high_anchor_cooldown_remaining_minutes(now):
 
     elapsed_minutes = (now - last_buy_at).total_seconds() / 60
     return max(0, high_anchor_buy_cooldown_minutes - elapsed_minutes)
+
+
+def buy_cooldown_minutes_for_source(config, buy_source):
+    source_key = buy_source_bucket(buy_source)
+    source_map = normalized_source_config_map(config, "buy_cooldown_minutes_by_source")
+    if source_key in source_map:
+        return max(0.0, source_map[source_key])
+    if buy_source in source_map:
+        return max(0.0, source_map[buy_source])
+    if source_key in buy_cooldown_minutes_by_source:
+        return max(0.0, buy_cooldown_minutes_by_source[source_key])
+    if buy_source in buy_cooldown_minutes_by_source:
+        return max(0.0, buy_cooldown_minutes_by_source[buy_source])
+    return max(0.0, strategy_float(config, "buy_cooldown_minutes", buy_cooldown_minutes))
+
+
+def buy_cooldown_status(config, buy_source, now):
+    global_minutes = max(
+        0.0,
+        strategy_float(config, "buy_cooldown_minutes", buy_cooldown_minutes),
+    )
+    source_minutes = buy_cooldown_minutes_for_source(config, buy_source)
+    global_last_buy_at = parse_iso8601(state.get("last_buy_at"))
+    source_last_buy_map = state.get("last_buy_at_by_source") or {}
+    if not isinstance(source_last_buy_map, dict):
+        source_last_buy_map = {}
+    source_last_buy_at = parse_iso8601(source_last_buy_map.get(buy_source))
+    source_key = buy_source_bucket(buy_source)
+    if source_last_buy_at is None:
+        source_last_buy_at = parse_iso8601(source_last_buy_map.get(source_key))
+
+    global_remaining = 0.0
+    if global_minutes > 0 and global_last_buy_at is not None:
+        elapsed_minutes = (now - global_last_buy_at).total_seconds() / 60
+        global_remaining = max(0.0, global_minutes - elapsed_minutes)
+
+    source_remaining = 0.0
+    if source_minutes > 0 and source_last_buy_at is not None:
+        elapsed_minutes = (now - source_last_buy_at).total_seconds() / 60
+        source_remaining = max(0.0, source_minutes - elapsed_minutes)
+
+    return {
+        "remaining_minutes": max(global_remaining, source_remaining),
+        "global_remaining_minutes": global_remaining,
+        "source_remaining_minutes": source_remaining,
+        "global_cooldown_minutes": global_minutes,
+        "source_cooldown_minutes": source_minutes,
+    }
+
+
+def record_buy_cooldown_timestamp(buy_source, timestamp):
+    state["last_buy_at"] = timestamp
+    source_map = state.setdefault("last_buy_at_by_source", {})
+    source_map[buy_source] = timestamp
+    source_map[buy_source_bucket(buy_source)] = timestamp
 
 
 def llm_sell_cooldown_remaining_minutes(now):
@@ -4137,6 +4199,8 @@ def main():
         aging_step_minutes=aging_step_minutes,
         aging_profit_reduction_pct=aging_profit_reduction_pct,
         min_profit_target_pct=min_profit_target_pct,
+        buy_cooldown_minutes=buy_cooldown_minutes,
+        buy_cooldown_minutes_by_source=buy_cooldown_minutes_by_source,
         high_anchor_buy_cooldown_minutes=high_anchor_buy_cooldown_minutes,
         max_open_high_anchor_orders=max_open_high_anchor_orders,
         high_anchor_backlog_soft_release_minutes=(
@@ -5673,6 +5737,11 @@ def main():
                             weather_report
                         )
                     )
+                    buy_cooldown = buy_cooldown_status(
+                        route_config,
+                        buy_source,
+                        now,
+                    )
 
                     if key in state["open_buy_orders"]:
                         skip_reason = "open_buy_order"
@@ -5734,11 +5803,8 @@ def main():
                                 )
                                 else "price_above_level"
                             )
-                    elif (
-                        candidate_sell_backlog["effective_count"]
-                        >= candidate_effective_max_open_sell_orders
-                    ):
-                        skip_reason = "max_open_sell_orders"
+                    elif buy_cooldown["remaining_minutes"] > 0:
+                        skip_reason = "buy_cooldown"
                     elif (
                         deployed_inventory_usd
                         >= candidate_effective_max_inventory_usd
@@ -5991,6 +6057,24 @@ def main():
                                 high_anchor_cooldown_remaining,
                                 2
                             ),
+                            buy_cooldown_remaining_minutes=round(
+                                buy_cooldown["remaining_minutes"],
+                                2,
+                            ),
+                            buy_cooldown_global_remaining_minutes=round(
+                                buy_cooldown["global_remaining_minutes"],
+                                2,
+                            ),
+                            buy_cooldown_source_remaining_minutes=round(
+                                buy_cooldown["source_remaining_minutes"],
+                                2,
+                            ),
+                            buy_cooldown_minutes=(
+                                buy_cooldown["global_cooldown_minutes"]
+                            ),
+                            buy_cooldown_source_minutes=(
+                                buy_cooldown["source_cooldown_minutes"]
+                            ),
                             llm_sell_cooldown_remaining_minutes=round(
                                 llm_sell_cooldown_remaining,
                                 2
@@ -6123,6 +6207,24 @@ def main():
                             high_anchor_cooldown_remaining_minutes=round(
                                 high_anchor_cooldown_remaining,
                                 2
+                            ),
+                            buy_cooldown_remaining_minutes=round(
+                                buy_cooldown["remaining_minutes"],
+                                2,
+                            ),
+                            buy_cooldown_global_remaining_minutes=round(
+                                buy_cooldown["global_remaining_minutes"],
+                                2,
+                            ),
+                            buy_cooldown_source_remaining_minutes=round(
+                                buy_cooldown["source_remaining_minutes"],
+                                2,
+                            ),
+                            buy_cooldown_minutes=(
+                                buy_cooldown["global_cooldown_minutes"]
+                            ),
+                            buy_cooldown_source_minutes=(
+                                buy_cooldown["source_cooldown_minutes"]
                             ),
                             llm_sell_cooldown_remaining_minutes=round(
                                 llm_sell_cooldown_remaining,
@@ -6555,6 +6657,8 @@ def main():
                         )
                         reserved_buy_usd += level * volume
                         available_usd = max(0.0, usd - reserved_buy_usd)
+                        record_buy_cooldown_timestamp(buy_source, cycle_id)
+                        save_state(state)
                         continue
 
                     buy_resp = kraken_call(
@@ -6677,6 +6781,7 @@ def main():
                         high_anchor_cooldown_remaining = (
                             high_anchor_buy_cooldown_minutes
                         )
+                    record_buy_cooldown_timestamp(buy_source, cycle_id)
                     state["stats"]["buy_orders_placed"] += 1
                     increment_source_stat(
                         state["stats"],
@@ -6721,6 +6826,12 @@ def main():
                         **stale_reanchor_profit_guard_log_fields(stale_reanchor),
                         buy_source=buy_source,
                         sell_pct_override=active_sell_pct_override,
+                        buy_cooldown_minutes=(
+                            buy_cooldown["global_cooldown_minutes"]
+                        ),
+                        buy_cooldown_source_minutes=(
+                            buy_cooldown["source_cooldown_minutes"]
+                        ),
                         above_last_sell_breakout_bypass=(
                             above_last_sell_breakout_bypass
                         ),
@@ -6781,6 +6892,12 @@ def main():
                         trade_notional_usd=round(level * volume, 8),
                         buy_source=buy_source,
                         sell_pct_override=active_sell_pct_override,
+                        buy_cooldown_minutes=(
+                            buy_cooldown["global_cooldown_minutes"]
+                        ),
+                        buy_cooldown_source_minutes=(
+                            buy_cooldown["source_cooldown_minutes"]
+                        ),
                         above_last_sell_breakout_bypass=(
                             above_last_sell_breakout_bypass
                         ),

@@ -910,6 +910,69 @@ def normalized_source_config_map(config, key):
     return normalized
 
 
+def buy_source_bucket(buy_source):
+    mapping = {
+        "llm_target": "llm_target",
+        "range_low": "range_low",
+        "range_mean": "range_mean",
+        "range_median": "range_median",
+        "range_high_band": "range_high_band",
+    }
+    return mapping.get(buy_source or "", "unknown")
+
+
+def buy_cooldown_minutes_for_source(config, buy_source):
+    source_key = buy_source_bucket(buy_source)
+    source_map = normalized_source_config_map(config, "buy_cooldown_minutes_by_source")
+    if source_key in source_map:
+        return max(0.0, source_map[source_key])
+    if buy_source in source_map:
+        return max(0.0, source_map[buy_source])
+    return max(
+        0.0,
+        strategy_float(config, "buy_cooldown_minutes", 0.0),
+    )
+
+
+def buy_cooldown_status(config, buy_source, now, last_buy_at, last_buy_at_by_source):
+    if now is None:
+        return {
+            "remaining_minutes": 0.0,
+            "global_remaining_minutes": 0.0,
+            "source_remaining_minutes": 0.0,
+            "global_cooldown_minutes": 0.0,
+            "source_cooldown_minutes": 0.0,
+        }
+
+    global_minutes = max(
+        0.0,
+        strategy_float(config, "buy_cooldown_minutes", 0.0),
+    )
+    source_minutes = buy_cooldown_minutes_for_source(config, buy_source)
+    source_key = buy_source_bucket(buy_source)
+    source_last_buy_at = last_buy_at_by_source.get(buy_source)
+    if source_last_buy_at is None:
+        source_last_buy_at = last_buy_at_by_source.get(source_key)
+
+    global_remaining = 0.0
+    if global_minutes > 0 and last_buy_at is not None:
+        elapsed_minutes = (now - last_buy_at).total_seconds() / 60
+        global_remaining = max(0.0, global_minutes - elapsed_minutes)
+
+    source_remaining = 0.0
+    if source_minutes > 0 and source_last_buy_at is not None:
+        elapsed_minutes = (now - source_last_buy_at).total_seconds() / 60
+        source_remaining = max(0.0, source_minutes - elapsed_minutes)
+
+    return {
+        "remaining_minutes": max(global_remaining, source_remaining),
+        "global_remaining_minutes": global_remaining,
+        "source_remaining_minutes": source_remaining,
+        "global_cooldown_minutes": global_minutes,
+        "source_cooldown_minutes": source_minutes,
+    }
+
+
 def range_momentum_entry_tolerance_pct(config, buy_source, fallback_config=None):
     if buy_source not in ("range_low", "range_mean", "range_median"):
         return 0.0
@@ -3315,7 +3378,6 @@ def evaluate_candidate(snapshot, candidate, price):
     )
     if high_anchor_backlog_old_order_weight is None:
         high_anchor_backlog_old_order_weight = 1.0
-    max_open_sell_orders = int(config.get("max_open_sell_orders", 999999))
     max_inventory_usd = safe_float(config.get("max_inventory_usd")) or float("inf")
     deployed_inventory_usd = safe_float(state_info.get("deployed_inventory_usd")) or 0.0
 
@@ -3364,8 +3426,6 @@ def evaluate_candidate(snapshot, candidate, price):
             return False, "open_buy_order"
         if key in open_sell_levels:
             return False, "open_sell_order"
-    if sell_backlog_effective_count(snapshot) >= max_open_sell_orders:
-        return False, "max_open_sell_orders"
     if deployed_inventory_usd >= max_inventory_usd:
         return False, "max_inventory_usd"
     if buy_source == "llm_target" and not llm_signal_gates_allow:
@@ -3463,6 +3523,8 @@ def replay_from_snapshots(snapshots):
     candidate_counts_by_strategy_mode = Counter()
     approved_counts_by_source = Counter()
     approved_counts_by_strategy_mode = Counter()
+    last_replay_buy_at = None
+    last_replay_buy_at_by_source = {}
 
     for snapshot in snapshots:
         summary["snapshots"] += 1
@@ -3557,7 +3619,26 @@ def replay_from_snapshots(snapshots):
                 )
             )
             approved, reason = evaluate_candidate(snapshot, candidate, price)
+            cooldown = buy_cooldown_status(
+                strategy_payload(snapshot),
+                candidate["buy_source"],
+                snapshot_timestamp(snapshot),
+                last_replay_buy_at,
+                last_replay_buy_at_by_source,
+            )
+            if approved and cooldown["remaining_minutes"] > 0:
+                approved = False
+                reason = "buy_cooldown"
             if approved:
+                approved_at = snapshot_timestamp(snapshot)
+                if approved_at is not None:
+                    last_replay_buy_at = approved_at
+                    last_replay_buy_at_by_source[candidate["buy_source"]] = (
+                        approved_at
+                    )
+                    last_replay_buy_at_by_source[
+                        buy_source_bucket(candidate["buy_source"])
+                    ] = approved_at
                 summary["approved_candidates"] += 1
                 approved_counts_by_source[candidate["buy_source"]] += 1
                 approved_counts_by_strategy_mode[candidate["strategy_mode"]] += 1
@@ -3582,6 +3663,16 @@ def replay_from_snapshots(snapshots):
                         leveling_size_multiplier
                     ),
                     "weather_leveling_bypass_blocked": leveling_bypass_blocked,
+                    "buy_cooldown_remaining_minutes": round(
+                        cooldown["remaining_minutes"],
+                        2,
+                    ),
+                    "buy_cooldown_minutes": (
+                        cooldown["global_cooldown_minutes"]
+                    ),
+                    "buy_cooldown_source_minutes": (
+                        cooldown["source_cooldown_minutes"]
+                    ),
                     "buy_source": candidate["buy_source"],
                     "strategy_mode": candidate["strategy_mode"],
                     "level": round(candidate["level"], 2),
@@ -3637,6 +3728,16 @@ def replay_from_snapshots(snapshots):
                         leveling_size_multiplier
                     ),
                     "weather_leveling_bypass_blocked": leveling_bypass_blocked,
+                    "buy_cooldown_remaining_minutes": round(
+                        cooldown["remaining_minutes"],
+                        2,
+                    ),
+                    "buy_cooldown_minutes": (
+                        cooldown["global_cooldown_minutes"]
+                    ),
+                    "buy_cooldown_source_minutes": (
+                        cooldown["source_cooldown_minutes"]
+                    ),
                     "buy_source": candidate["buy_source"],
                     "strategy_mode": candidate["strategy_mode"],
                     "level": round(candidate["level"], 2),

@@ -54,7 +54,7 @@
   "position_size_pct": 0.09,
   "min_buy_notional_usd": 8.0,
   "min_buy_volume_btc": 0.0001,
-  "max_open_sell_orders": 11,
+  "max_open_sell_orders": 999,
   "max_inventory_usd": 675,
   "inventory_pressure_size_scaling_enabled": true,
   "inventory_pressure_start_usage_pct": 0.48,
@@ -86,6 +86,13 @@
     "range_median": 0.004,
     "range_high_band": 0.0035,
     "llm_target": 0.0045
+  },
+  "buy_cooldown_minutes": 5,
+  "buy_cooldown_minutes_by_source": {
+    "range_low": 5,
+    "range_median": 10,
+    "range_high_band": 20,
+    "llm_target": 30
   },
   "high_anchor_buy_cooldown_minutes": 15,
   "max_open_high_anchor_orders": 3,
@@ -131,7 +138,7 @@
   "range_refresh_interval_minutes": 15,
   "reconcile_state_interval_minutes": 30,
   "max_daily_loss_usd": 25,
-  "disable_new_buys_on_sell_backlog_count": 9,
+  "disable_new_buys_on_sell_backlog_count": 0,
   "disable_new_buys_on_sell_backlog_minutes": 0,
   "sell_backlog_soft_release_minutes": 1440,
   "sell_backlog_old_order_weight": 0.25,

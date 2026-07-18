@@ -205,6 +205,48 @@ class RangeGridBacktestTests(unittest.TestCase):
             "Bearish actions disabled for this asset.",
         )
 
+    def test_replay_applies_source_buy_cooldown(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                104.5,
+                action_recommendation="watch_only",
+                strategy_modes=["high"],
+                strategy_overrides={
+                    "operating_mode": "range_only",
+                    "buy_cooldown_minutes_by_source": {
+                        "range_high_band": 20,
+                    },
+                    "max_open_high_anchor_orders": 99,
+                },
+            ),
+            make_snapshot(
+                "2026-06-13T12:05:00+00:00",
+                104.5,
+                action_recommendation="watch_only",
+                strategy_modes=["high"],
+                strategy_overrides={
+                    "operating_mode": "range_only",
+                    "buy_cooldown_minutes_by_source": {
+                        "range_high_band": 20,
+                    },
+                    "max_open_high_anchor_orders": 99,
+                },
+            ),
+        ]
+
+        result = backtest.replay_from_snapshots(snapshots)
+
+        self.assertEqual(result["summary"]["approved_candidates"], 1)
+        self.assertEqual(
+            result["summary"]["blocked_reason_counts"],
+            {"buy_cooldown": 1},
+        )
+        self.assertEqual(
+            result["recent_replay_events"][-1]["buy_cooldown_remaining_minutes"],
+            15.0,
+        )
+
     def test_replay_approves_llm_target_candidate(self):
         snapshots = [make_snapshot("2026-06-13T12:00:00+00:00", 100.0, strategy_modes=["llm_target"])]
 
