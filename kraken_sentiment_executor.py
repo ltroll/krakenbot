@@ -6,6 +6,7 @@
 
 import base64
 import csv
+import glob
 import hashlib
 import hmac
 import argparse
@@ -163,6 +164,12 @@ LOG_FILE = (
     os.getenv("SENTIMENT_TRADE_LOG_FILE")
     or os.getenv("TRADE_LOG_FILE")
     or "sentiment_trade_log.jsonl"
+)
+LOG_ROTATE_MAX_BYTES = int(
+    float(os.getenv("SENTIMENT_TRADE_LOG_MAX_MB", "50")) * 1024 * 1024
+)
+LOG_ROTATE_RETENTION = int(
+    os.getenv("SENTIMENT_TRADE_LOG_RETENTION", "8")
 )
 TRADE_ACTIVITY_FILE = (
     os.getenv("SENTIMENT_TRADE_ACTIVITY_FILE")
@@ -881,6 +888,56 @@ def console(msg):
     print(f"[{datetime.now(timezone.utc).isoformat()}] {msg}")
 
 
+def rotated_size_log_path(base_path, dt):
+    root, ext = os.path.splitext(base_path)
+    suffix = dt.strftime("%Y%m%dT%H%M%SZ")
+    return f"{root}_{suffix}{ext or '.jsonl'}"
+
+
+def prune_rotated_trade_logs(base_path):
+    if LOG_ROTATE_RETENTION < 0:
+        return
+
+    root, ext = os.path.splitext(os.path.abspath(base_path))
+    pattern = f"{root}_[0-9][0-9][0-9][0-9]*{ext or '.jsonl'}"
+    rotated_paths = [
+        path
+        for path in glob.glob(pattern)
+        if os.path.isfile(path)
+    ]
+    rotated_paths.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+
+    for old_path in rotated_paths[LOG_ROTATE_RETENTION:]:
+        try:
+            os.remove(old_path)
+        except OSError as e:
+            console(f"LOG_PRUNE_ERROR: {e}")
+
+
+def rotate_trade_log_if_needed():
+    if LOG_ROTATE_MAX_BYTES <= 0:
+        return None
+
+    path = os.path.abspath(LOG_FILE)
+    if not os.path.exists(path):
+        return None
+
+    try:
+        if os.path.getsize(path) < LOG_ROTATE_MAX_BYTES:
+            return None
+
+        rotated_path = rotated_size_log_path(path, datetime.now(timezone.utc))
+        if os.path.exists(rotated_path):
+            root, ext = os.path.splitext(rotated_path)
+            rotated_path = f"{root}_{os.getpid()}{ext}"
+        os.replace(path, rotated_path)
+        prune_rotated_trade_logs(path)
+        return rotated_path
+    except OSError as e:
+        console(f"LOG_ROTATE_ERROR: {e}")
+        return None
+
+
 def log_event(event, message="", **kwargs):
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -894,6 +951,7 @@ def log_event(event, message="", **kwargs):
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
 
+        rotate_trade_log_if_needed()
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
             f.flush()
@@ -4626,6 +4684,8 @@ def main():
         strategy_profile=STRATEGY_PROFILE,
         state_file=STATE_FILE,
         log_file=LOG_FILE,
+        trade_log_rotate_max_bytes=LOG_ROTATE_MAX_BYTES,
+        trade_log_rotate_retention=LOG_ROTATE_RETENTION,
         trade_activity_file=TRADE_ACTIVITY_FILE,
         shadow_trades_enabled=SHADOW_TRADES_ENABLED,
         pair=KRAKEN_PAIR,
