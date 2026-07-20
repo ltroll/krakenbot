@@ -460,6 +460,11 @@ DYNAMIC_PROFIT_HIGH_VOLATILITY_PCT = profile_float(
     0.06
 )
 MAX_OPEN_SELL_ORDERS = profile_int("max_open_sell_orders", 1)
+ENFORCE_OPEN_ORDER_LIMITS = env_profile_bool(
+    "ENFORCE_OPEN_ORDER_LIMITS",
+    "enforce_open_order_limits",
+    False
+)
 MAX_INVENTORY_USD = profile_float("max_inventory_usd", 250)
 PREVENT_BUY_ABOVE_LAST_SELL = profile_bool("prevent_buy_above_last_sell", True)
 BUY_AFTER_SELL_DISCOUNT_PCT = profile_float("buy_after_sell_discount_pct", 0.0)
@@ -4145,24 +4150,26 @@ def run_cycle():
                 )
                 return
 
-    if len(state["open_buy_orders"]) >= MAX_OPEN_BUY_ORDERS:
-        skip_cycle(
-            "max_open_buy_orders",
-            cycle_id,
-            price=price,
-            open_buy_count=len(state["open_buy_orders"]),
-            max_open_buy_orders=MAX_OPEN_BUY_ORDERS
-        )
-        return
+    if ENFORCE_OPEN_ORDER_LIMITS:
+        if len(state["open_buy_orders"]) >= MAX_OPEN_BUY_ORDERS:
+            skip_cycle(
+                "max_open_buy_orders",
+                cycle_id,
+                price=price,
+                open_buy_count=len(state["open_buy_orders"]),
+                max_open_buy_orders=MAX_OPEN_BUY_ORDERS
+            )
+            return
 
-    if len(state["open_sell_orders"]) >= MAX_OPEN_SELL_ORDERS:
-        skip_cycle(
-            "max_open_sell_orders",
-            cycle_id,
-            price=price,
-            open_sell_count=len(state["open_sell_orders"])
-        )
-        return
+        if len(state["open_sell_orders"]) >= MAX_OPEN_SELL_ORDERS:
+            skip_cycle(
+                "max_open_sell_orders",
+                cycle_id,
+                price=price,
+                open_sell_count=len(state["open_sell_orders"]),
+                max_open_sell_orders=MAX_OPEN_SELL_ORDERS
+            )
+            return
 
     if current_inventory_usd(price) >= MAX_INVENTORY_USD:
         skip_cycle(
@@ -4231,7 +4238,10 @@ def run_cycle():
         placed_orders = 0
 
         for order in orders:
-            if len(state["open_buy_orders"]) >= MAX_OPEN_BUY_ORDERS:
+            if (
+                ENFORCE_OPEN_ORDER_LIMITS
+                and len(state["open_buy_orders"]) >= MAX_OPEN_BUY_ORDERS
+            ):
                 break
 
             target_price = order["buy_price"]
@@ -4682,6 +4692,7 @@ def main():
         max_target_profit_pct=MAX_TARGET_PROFIT_PCT,
         dynamic_profit_low_volatility_pct=DYNAMIC_PROFIT_LOW_VOLATILITY_PCT,
         dynamic_profit_high_volatility_pct=DYNAMIC_PROFIT_HIGH_VOLATILITY_PCT,
+        enforce_open_order_limits=ENFORCE_OPEN_ORDER_LIMITS,
         max_open_sell_orders=MAX_OPEN_SELL_ORDERS,
         max_open_buy_orders=MAX_OPEN_BUY_ORDERS,
         max_inventory_usd=MAX_INVENTORY_USD,

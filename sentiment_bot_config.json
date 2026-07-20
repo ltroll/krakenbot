@@ -43,6 +43,7 @@
       "max_target_profit_pct": 0.015,
       "dynamic_profit_low_volatility_pct": 0.025,
       "dynamic_profit_high_volatility_pct": 0.06,
+      "enforce_open_order_limits": false,
       "max_open_sell_orders": 4,
       "max_open_buy_orders": 3,
       "max_inventory_usd": 400,

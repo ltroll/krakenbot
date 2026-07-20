@@ -889,10 +889,11 @@ def evaluate_snapshot(snapshot, variant, strict_high_guard_pct, account_usd, str
             if not (high_entry["near_high"] and high_entry["allowed"]):
                 return hold("price_near_regime_high", snapshot, price, signal, config, weighted, risk_view, high_entry)
 
-    if open_order_count(snapshot, "buy") >= config_int(config, "max_open_buy_orders", 2):
-        return hold("max_open_buy_orders", snapshot, price, signal, config, weighted, risk_view)
-    if open_order_count(snapshot, "sell") >= config_int(config, "max_open_sell_orders", 1):
-        return hold("max_open_sell_orders", snapshot, price, signal, config, weighted, risk_view)
+    if config_bool(config, "enforce_open_order_limits", False):
+        if open_order_count(snapshot, "buy") >= config_int(config, "max_open_buy_orders", 2):
+            return hold("max_open_buy_orders", snapshot, price, signal, config, weighted, risk_view)
+        if open_order_count(snapshot, "sell") >= config_int(config, "max_open_sell_orders", 1):
+            return hold("max_open_sell_orders", snapshot, price, signal, config, weighted, risk_view)
     if current_inventory_usd(snapshot, price) >= config_float(config, "max_inventory_usd", 250):
         return hold("max_inventory_usd", snapshot, price, signal, config, weighted, risk_view)
 
@@ -1249,6 +1250,7 @@ def strategy_comparison_row(strategy_file, strategy_payload, replay):
         "market_entry_min_buy_score": config_float(strategy_payload, "market_entry_min_buy_score", 0.50),
         "market_entry_min_rebound_score": config_float(strategy_payload, "market_entry_min_rebound_score", 0.55),
         "market_entry_min_bottoming_score": config_float(strategy_payload, "market_entry_min_bottoming_score", 0.55),
+        "enforce_open_order_limits": config_bool(strategy_payload, "enforce_open_order_limits", False),
         "max_open_sell_orders": config_float(strategy_payload, "max_open_sell_orders", 4),
         "max_open_buy_orders": config_float(strategy_payload, "max_open_buy_orders", 3),
         "max_inventory_usd": config_float(strategy_payload, "max_inventory_usd", 400),
@@ -1312,6 +1314,7 @@ def write_csv(path, rows, ranked=False):
         "market_entry_min_buy_score",
         "market_entry_min_rebound_score",
         "market_entry_min_bottoming_score",
+        "enforce_open_order_limits",
         "max_open_sell_orders",
         "max_open_buy_orders",
         "max_inventory_usd",
