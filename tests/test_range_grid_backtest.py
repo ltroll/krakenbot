@@ -1584,6 +1584,29 @@ class RangeGridBacktestTests(unittest.TestCase):
                 "buy_source": "range_high_band",
                 "reason": "max_open_sell_orders",
             },
+            {
+                "ts": "2026-06-13T16:00:00+00:00",
+                "event": "ACTIVITY_SUMMARY",
+                "cycle_id": "2026-06-13T16:00:00+00:00",
+                "price": 108.0,
+                "strategy_profile": "range_grid_strategy_test.json",
+                "strategy_modes": ["high"],
+                "runtime_block_reason": None,
+                "open_buy_count": 0,
+                "open_sell_count": 1,
+                "sell_backlog_count": 1,
+                "sell_backlog_effective_count": 0.25,
+                "deployed_inventory_usd": 10.8,
+                "last_buy_at": "2026-06-13T12:01:00+00:00",
+                "last_buy_at_by_source": {
+                    "range_high_band": "2026-06-13T12:01:00+00:00",
+                },
+                "last_sell_at": "2026-06-13T14:02:00+00:00",
+                "weather_condition": "breakout_tailwind",
+                "weather_alert_level": "watch",
+                "weather_opportunity_phase": "momentum_ride",
+                "weather_stabilization_score": 0.64,
+            },
         ]
 
         summary = backtest.summarize_actual_trades(events)
@@ -1616,6 +1639,17 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(
             summary["candidate_skip_reason_counts"],
             {"max_open_sell_orders": 1},
+        )
+        self.assertEqual(summary["activity_summary_count"], 1)
+        self.assertEqual(
+            summary["latest_activity_summary"]["open_sell_count"],
+            1,
+        )
+        self.assertEqual(
+            summary["recent_activity_summaries"][0][
+                "weather_opportunity_phase"
+            ],
+            "momentum_ride",
         )
         self.assertEqual(
             summary["capital_recycling_summary"]["total_buy_notional_usd"],

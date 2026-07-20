@@ -730,6 +730,10 @@ reconcile_state_interval_minutes = profile_int(
     "reconcile_state_interval_minutes",
     30
 )
+activity_summary_interval_minutes = profile_int(
+    "activity_summary_interval_minutes",
+    int(os.getenv("RANGE_GRID_ACTIVITY_SUMMARY_INTERVAL_MINUTES", "120"))
+)
 max_consecutive_loop_errors = profile_int("max_consecutive_loop_errors", 10)
 max_consecutive_private_api_failures = profile_int(
     "max_consecutive_private_api_failures",
@@ -1950,6 +1954,7 @@ def load_state():
         "last_range_refresh": None,
         "last_buy_at": None,
         "last_buy_at_by_source": {},
+        "last_activity_summary_at": None,
         "last_high_anchor_buy_at": None,
         "last_sell_price": None,
         "last_sell_at": None,
@@ -4174,6 +4179,7 @@ def main():
         sell_backlog_soft_release_minutes=sell_backlog_soft_release_minutes,
         sell_backlog_old_order_weight=sell_backlog_old_order_weight,
         reconcile_state_interval_minutes=reconcile_state_interval_minutes,
+        activity_summary_interval_minutes=activity_summary_interval_minutes,
         max_consecutive_loop_errors=max_consecutive_loop_errors,
         max_consecutive_private_api_failures=(
             max_consecutive_private_api_failures
@@ -7055,6 +7061,138 @@ def main():
                 actions.append("hold")
 
             cycle_high_anchor_exposure = high_anchor_backlog_exposure(now)
+            activity_summary_written = False
+            if activity_summary_interval_minutes > 0:
+                last_activity_summary_at = parse_iso8601(
+                    state.get("last_activity_summary_at")
+                )
+                activity_summary_due = last_activity_summary_at is None
+                if last_activity_summary_at is not None:
+                    elapsed_minutes = (
+                        now - last_activity_summary_at
+                    ).total_seconds() / 60.0
+                    activity_summary_due = (
+                        elapsed_minutes >= activity_summary_interval_minutes
+                    )
+
+                if activity_summary_due:
+                    open_buy_volume = sum(
+                        order.get("volume", 0) or 0
+                        for order in state["open_buy_orders"].values()
+                    )
+                    open_sell_volume = sum(
+                        order.get("volume", 0) or 0
+                        for order in state["open_sell_orders"].values()
+                    )
+                    deployed_inventory_usd = round(
+                        current_inventory_usd(price),
+                        8,
+                    )
+                    log_trade_activity(
+                        "ACTIVITY_SUMMARY",
+                        mode=("paper" if paper_trading_enabled else "live"),
+                        cycle_id=cycle_id,
+                        price=price,
+                        strategy_profile=STRATEGY_PROFILE,
+                        operating_mode=operating_mode,
+                        sentiment_control_mode=sentiment_control_mode,
+                        grid_anchor=grid_anchor,
+                        configured_strategy_modes=configured_strategy_modes,
+                        strategy_modes=active_strategy_modes,
+                        range_low=low,
+                        range_high=high,
+                        range_mean=mean,
+                        range_median=median,
+                        effective_entry_step_pct=current_entry_step_pct,
+                        effective_position_size_pct=effective_position_size_pct,
+                        effective_max_inventory_usd=effective_max_inventory_usd,
+                        effective_max_open_sell_orders=(
+                            effective_max_open_sell_orders
+                        ),
+                        high_anchor_enabled=effective_high_anchor_enabled,
+                        weather_high_anchor_allowed=weather_high_anchor_allowed,
+                        runtime_block_reason=runtime_block_reason,
+                        realized_pnl_today=round(realized_pnl_today, 8),
+                        sell_backlog_count=sell_backlog["count"],
+                        sell_backlog_effective_count=round(
+                            sell_backlog["effective_count"],
+                            4,
+                        ),
+                        sell_backlog_fresh_count=sell_backlog["fresh_count"],
+                        sell_backlog_aged_count=sell_backlog["aged_count"],
+                        sell_backlog_oldest_minutes=round(
+                            sell_backlog["oldest_age_minutes"],
+                            2,
+                        ),
+                        open_buy_count=len(state["open_buy_orders"]),
+                        open_sell_count=len(state["open_sell_orders"]),
+                        open_buy_volume=open_buy_volume,
+                        open_sell_volume=open_sell_volume,
+                        deployed_inventory_usd=deployed_inventory_usd,
+                        inventory_buckets_usd={
+                            bucket: round(value, 8)
+                            for bucket, value in inventory_usd_by_bucket(price).items()
+                        },
+                        buy_cooldown_minutes=buy_cooldown_minutes,
+                        buy_cooldown_minutes_by_source=(
+                            buy_cooldown_minutes_by_source
+                        ),
+                        last_buy_at=state.get("last_buy_at"),
+                        last_buy_at_by_source=state.get(
+                            "last_buy_at_by_source",
+                            {},
+                        ),
+                        last_sell_price=state.get("last_sell_price"),
+                        last_sell_at=state.get("last_sell_at"),
+                        last_high_anchor_buy_at=state.get(
+                            "last_high_anchor_buy_at"
+                        ),
+                        buy_orders_placed=state["stats"]["buy_orders_placed"],
+                        buy_orders_filled=state["stats"]["buy_orders_filled"],
+                        sell_orders_placed=state["stats"]["sell_orders_placed"],
+                        sell_orders_filled=state["stats"]["sell_orders_filled"],
+                        realized_gross_pnl=round(
+                            state["stats"]["realized_gross_pnl"],
+                            8,
+                        ),
+                        realized_estimated_net_pnl=round(
+                            state["stats"]["realized_estimated_net_pnl"],
+                            8,
+                        ),
+                        approved_counts_by_source=state["stats"].get(
+                            "approved_counts_by_source",
+                            {},
+                        ),
+                        buy_orders_placed_by_source=state["stats"].get(
+                            "buy_orders_placed_by_source",
+                            {},
+                        ),
+                        buy_orders_filled_by_source=state["stats"].get(
+                            "buy_orders_filled_by_source",
+                            {},
+                        ),
+                        sell_orders_placed_by_source=state["stats"].get(
+                            "sell_orders_placed_by_source",
+                            {},
+                        ),
+                        sell_orders_filled_by_source=state["stats"].get(
+                            "sell_orders_filled_by_source",
+                            {},
+                        ),
+                        anchor_strategy_router_enabled=(
+                            anchor_strategy_router_enabled
+                        ),
+                        anchor_strategy_router_file=anchor_strategy_router_file,
+                        anchor_strategy_router_route_count=len(
+                            anchor_strategy_router_cache.get("routes") or {}
+                        ),
+                        **weather_status_fields(risk_context),
+                    )
+                    state["last_activity_summary_at"] = cycle_id
+                    save_state(state)
+                    activity_summary_written = True
+                    actions.append("activity_summary")
+
             log_event(
                 "CYCLE_SUMMARY",
                 cycle_id=cycle_id,
@@ -7082,6 +7220,7 @@ def main():
                 sentiment_control_mode=sentiment_control_mode,
                 source_guard_allows_trading=source_guard_allows_trading,
                 runtime_block_reason=runtime_block_reason,
+                activity_summary_written=activity_summary_written,
                 realized_pnl_today=round(realized_pnl_today, 8),
                 sell_backlog_count=sell_backlog["count"],
                 sell_backlog_effective_count=round(

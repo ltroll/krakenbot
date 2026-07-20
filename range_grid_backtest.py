@@ -3858,6 +3858,8 @@ def summarize_actual_trades(events):
         "order_rejected": 0,
         "sell_order_repriced": 0,
         "risk_context_paper_buys_planned": 0,
+        "activity_summary_count": 0,
+        "latest_activity_summary": None,
         "realized_gross_pnl": 0.0,
         "realized_estimated_net_pnl": 0.0,
         "candidate_skip_reason_counts": {},
@@ -3870,6 +3872,7 @@ def summarize_actual_trades(events):
         "recent_fills": [],
         "recent_buy_orders": [],
         "recent_risk_context_paper_buys": [],
+        "recent_activity_summaries": [],
     }
     buy_orders_placed_by_source = Counter()
     risk_context_paper_buys_by_source = Counter()
@@ -3894,6 +3897,7 @@ def summarize_actual_trades(events):
     buy_cohorts = {}
     anonymous_cohort_count = 0
     reference_time = None
+    latest_activity_summary_time = None
 
     for event in events:
         ts_value = event_time(event)
@@ -3970,6 +3974,46 @@ def summarize_actual_trades(events):
                 ),
                 "weather_entry_opportunity_score": event.get(
                     "weather_entry_opportunity_score"
+                ),
+            })
+        elif name == "ACTIVITY_SUMMARY":
+            summary["activity_summary_count"] += 1
+            if (
+                summary["latest_activity_summary"] is None
+                or (
+                    ts_value is not None
+                    and (
+                        latest_activity_summary_time is None
+                        or ts_value >= latest_activity_summary_time
+                    )
+                )
+            ):
+                latest_activity_summary_time = ts_value
+                summary["latest_activity_summary"] = event
+            summary["recent_activity_summaries"].append({
+                "ts": event.get("ts"),
+                "cycle_id": event.get("cycle_id"),
+                "price": event.get("price"),
+                "strategy_profile": event.get("strategy_profile"),
+                "strategy_modes": event.get("strategy_modes"),
+                "runtime_block_reason": event.get("runtime_block_reason"),
+                "open_buy_count": event.get("open_buy_count"),
+                "open_sell_count": event.get("open_sell_count"),
+                "sell_backlog_count": event.get("sell_backlog_count"),
+                "sell_backlog_effective_count": event.get(
+                    "sell_backlog_effective_count"
+                ),
+                "deployed_inventory_usd": event.get("deployed_inventory_usd"),
+                "last_buy_at": event.get("last_buy_at"),
+                "last_buy_at_by_source": event.get("last_buy_at_by_source"),
+                "last_sell_at": event.get("last_sell_at"),
+                "weather_condition": event.get("weather_condition"),
+                "weather_alert_level": event.get("weather_alert_level"),
+                "weather_opportunity_phase": event.get(
+                    "weather_opportunity_phase"
+                ),
+                "weather_stabilization_score": event.get(
+                    "weather_stabilization_score"
                 ),
             })
         elif name == "BUY_ORDER_FILLED":
@@ -4082,6 +4126,9 @@ def summarize_actual_trades(events):
     summary["recent_buy_orders"] = summary["recent_buy_orders"][-BACKTEST_RECENT_LIMIT:]
     summary["recent_risk_context_paper_buys"] = (
         summary["recent_risk_context_paper_buys"][-BACKTEST_RECENT_LIMIT:]
+    )
+    summary["recent_activity_summaries"] = (
+        summary["recent_activity_summaries"][-BACKTEST_RECENT_LIMIT:]
     )
     summary["shadow_to_real_summary"] = {
         "shadow_buys_planned": summary["risk_context_paper_buys_planned"],
