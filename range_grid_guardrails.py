@@ -105,6 +105,8 @@ def validate_strategy_config(strategy_config):
         "min_profit_target_pct",
         "buy_after_sell_discount_pct",
         "llm_buy_cooldown_minutes_after_sell",
+        "buy_cooldown_after_sell_fill_minutes",
+        "buy_cooldown_after_sell_fill_high_band_minutes",
         "high_anchor_backlog_soft_release_minutes",
         "sell_backlog_soft_release_minutes",
         "mean_reversion_min_opportunity",
@@ -151,6 +153,9 @@ def validate_strategy_config(strategy_config):
         "stale_level_reanchor_min_entry_opportunity_score",
         "stale_level_reanchor_min_rebound_confirmation_score",
         "stale_level_reanchor_max_exit_pressure_score",
+        "buy_cooldown_after_sell_fill_weather_min_rebound_confirmation",
+        "buy_cooldown_after_sell_fill_weather_min_hold_through",
+        "buy_cooldown_after_sell_fill_weather_max_exit_pressure",
     )
     for field in bounded_score_fields:
         value = strategy_config.get(field)
@@ -205,6 +210,7 @@ def validate_strategy_config(strategy_config):
         "aging_step_minutes_by_source": ("positive", None),
         "aging_profit_reduction_pct_by_source": ("non_negative", None),
         "min_profit_target_pct_by_source": ("non_negative", None),
+        "buy_cooldown_after_sell_fill_minutes_by_source": ("non_negative", None),
     }
     for field, (kind, _) in source_numeric_maps.items():
         value = strategy_config.get(field)

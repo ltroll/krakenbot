@@ -416,6 +416,16 @@ def env_default_bool(name, default=False):
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def env_default_float(name, default):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
 def is_http_url(value):
     return str(value or "").strip().lower().startswith(("http://", "https://"))
 
@@ -562,6 +572,66 @@ buy_cooldown_minutes = profile_float("buy_cooldown_minutes", 0.0)
 buy_cooldown_minutes_by_source = normalized_source_config_map(
     strategy_config,
     "buy_cooldown_minutes_by_source"
+)
+buy_cooldown_after_sell_fill_minutes = profile_float(
+    "buy_cooldown_after_sell_fill_minutes",
+    20,
+)
+buy_cooldown_after_sell_fill_minutes = env_default_float(
+    "RANGE_GRID_BUY_COOLDOWN_AFTER_SELL_FILL_MINUTES",
+    buy_cooldown_after_sell_fill_minutes,
+)
+buy_cooldown_after_sell_fill_high_band_minutes = profile_float(
+    "buy_cooldown_after_sell_fill_high_band_minutes",
+    45,
+)
+buy_cooldown_after_sell_fill_high_band_minutes = env_default_float(
+    "RANGE_GRID_BUY_COOLDOWN_AFTER_SELL_FILL_HIGH_BAND_MINUTES",
+    buy_cooldown_after_sell_fill_high_band_minutes,
+)
+buy_cooldown_after_sell_fill_low_bypass = profile_bool(
+    "buy_cooldown_after_sell_fill_low_bypass",
+    True,
+)
+buy_cooldown_after_sell_fill_low_bypass = env_default_bool(
+    "RANGE_GRID_BUY_COOLDOWN_AFTER_SELL_FILL_LOW_BYPASS",
+    buy_cooldown_after_sell_fill_low_bypass,
+)
+buy_cooldown_after_sell_fill_weather_bypass = profile_bool(
+    "buy_cooldown_after_sell_fill_weather_bypass",
+    True,
+)
+buy_cooldown_after_sell_fill_weather_bypass = env_default_bool(
+    "RANGE_GRID_BUY_COOLDOWN_AFTER_SELL_FILL_WEATHER_BYPASS",
+    buy_cooldown_after_sell_fill_weather_bypass,
+)
+buy_cooldown_after_sell_fill_weather_min_rebound_confirmation = profile_float(
+    "buy_cooldown_after_sell_fill_weather_min_rebound_confirmation",
+    0.55,
+)
+buy_cooldown_after_sell_fill_weather_min_rebound_confirmation = env_default_float(
+    "RANGE_GRID_BUY_COOLDOWN_AFTER_SELL_FILL_WEATHER_MIN_REBOUND_CONFIRMATION",
+    buy_cooldown_after_sell_fill_weather_min_rebound_confirmation,
+)
+buy_cooldown_after_sell_fill_weather_min_hold_through = profile_float(
+    "buy_cooldown_after_sell_fill_weather_min_hold_through",
+    0.50,
+)
+buy_cooldown_after_sell_fill_weather_min_hold_through = env_default_float(
+    "RANGE_GRID_BUY_COOLDOWN_AFTER_SELL_FILL_WEATHER_MIN_HOLD_THROUGH",
+    buy_cooldown_after_sell_fill_weather_min_hold_through,
+)
+buy_cooldown_after_sell_fill_weather_max_exit_pressure = profile_float(
+    "buy_cooldown_after_sell_fill_weather_max_exit_pressure",
+    0.40,
+)
+buy_cooldown_after_sell_fill_weather_max_exit_pressure = env_default_float(
+    "RANGE_GRID_BUY_COOLDOWN_AFTER_SELL_FILL_WEATHER_MAX_EXIT_PRESSURE",
+    buy_cooldown_after_sell_fill_weather_max_exit_pressure,
+)
+buy_cooldown_after_sell_fill_minutes_by_source = normalized_source_config_map(
+    strategy_config,
+    "buy_cooldown_after_sell_fill_minutes_by_source",
 )
 max_open_high_anchor_orders = profile_int("max_open_high_anchor_orders", 3)
 high_anchor_backlog_soft_release_minutes = profile_int(
@@ -2920,6 +2990,155 @@ def llm_sell_cooldown_remaining_minutes(now):
     return max(0, llm_buy_cooldown_minutes_after_sell - elapsed_minutes)
 
 
+def buy_cooldown_after_sell_fill_minutes_for_source(config, buy_source):
+    source_key = buy_source_bucket(buy_source)
+    source_map = normalized_source_config_map(
+        config,
+        "buy_cooldown_after_sell_fill_minutes_by_source",
+    )
+    if buy_source in source_map:
+        return max(0.0, source_map[buy_source])
+    if source_key in source_map:
+        return max(0.0, source_map[source_key])
+    if buy_source in buy_cooldown_after_sell_fill_minutes_by_source:
+        return max(0.0, buy_cooldown_after_sell_fill_minutes_by_source[buy_source])
+    if source_key in buy_cooldown_after_sell_fill_minutes_by_source:
+        return max(0.0, buy_cooldown_after_sell_fill_minutes_by_source[source_key])
+    low_bypass_enabled = env_default_bool(
+        "RANGE_GRID_BUY_COOLDOWN_AFTER_SELL_FILL_LOW_BYPASS",
+        strategy_bool(
+            config,
+            "buy_cooldown_after_sell_fill_low_bypass",
+            buy_cooldown_after_sell_fill_low_bypass,
+        ),
+    )
+    if buy_source == "range_low" and low_bypass_enabled:
+        return 0.0
+    if buy_source == "range_high_band":
+        return max(
+            0.0,
+            env_default_float(
+                "RANGE_GRID_BUY_COOLDOWN_AFTER_SELL_FILL_HIGH_BAND_MINUTES",
+                strategy_float(
+                    config,
+                    "buy_cooldown_after_sell_fill_high_band_minutes",
+                    buy_cooldown_after_sell_fill_high_band_minutes,
+                ),
+            ),
+        )
+    return max(
+        0.0,
+        env_default_float(
+            "RANGE_GRID_BUY_COOLDOWN_AFTER_SELL_FILL_MINUTES",
+            strategy_float(
+                config,
+                "buy_cooldown_after_sell_fill_minutes",
+                buy_cooldown_after_sell_fill_minutes,
+            ),
+        ),
+    )
+
+
+def buy_cooldown_after_sell_fill_weather_bypass_allowed(config, weather_report):
+    weather_bypass_enabled = env_default_bool(
+        "RANGE_GRID_BUY_COOLDOWN_AFTER_SELL_FILL_WEATHER_BYPASS",
+        strategy_bool(
+            config,
+            "buy_cooldown_after_sell_fill_weather_bypass",
+            buy_cooldown_after_sell_fill_weather_bypass,
+        ),
+    )
+    if not weather_bypass_enabled:
+        return False
+    if not isinstance(weather_report, dict):
+        return False
+    if weather_report.get("emergency_bell"):
+        return False
+
+    opportunity = weather_report.get("market_opportunity") or {}
+    condition = str(weather_report.get("condition") or "").strip().lower()
+    phase = str(opportunity.get("cycle_phase") or "").strip().lower()
+    rebound_confirmation = numeric_or_default(
+        opportunity.get("rebound_confirmation_score"),
+        0.0,
+    )
+    hold_through = numeric_or_default(
+        opportunity.get("hold_through_score"),
+        0.0,
+    )
+    exit_pressure = numeric_or_default(
+        opportunity.get("exit_pressure_score"),
+        1.0,
+    )
+    min_rebound = env_default_float(
+        "RANGE_GRID_BUY_COOLDOWN_AFTER_SELL_FILL_WEATHER_MIN_REBOUND_CONFIRMATION",
+        strategy_float(
+            config,
+            "buy_cooldown_after_sell_fill_weather_min_rebound_confirmation",
+            buy_cooldown_after_sell_fill_weather_min_rebound_confirmation,
+        ),
+    )
+    min_hold = env_default_float(
+        "RANGE_GRID_BUY_COOLDOWN_AFTER_SELL_FILL_WEATHER_MIN_HOLD_THROUGH",
+        strategy_float(
+            config,
+            "buy_cooldown_after_sell_fill_weather_min_hold_through",
+            buy_cooldown_after_sell_fill_weather_min_hold_through,
+        ),
+    )
+    max_exit = env_default_float(
+        "RANGE_GRID_BUY_COOLDOWN_AFTER_SELL_FILL_WEATHER_MAX_EXIT_PRESSURE",
+        strategy_float(
+            config,
+            "buy_cooldown_after_sell_fill_weather_max_exit_pressure",
+            buy_cooldown_after_sell_fill_weather_max_exit_pressure,
+        ),
+    )
+
+    continuation_conditions = {
+        "breakout_tailwind",
+        "constructive",
+        "rebound_tailwind",
+    }
+    continuation_phases = {
+        "early_rebound",
+        "momentum_ride",
+    }
+    return (
+        (condition in continuation_conditions or phase in continuation_phases)
+        and rebound_confirmation >= min_rebound
+        and hold_through >= min_hold
+        and exit_pressure <= max_exit
+    )
+
+
+def buy_cooldown_after_sell_fill_status(config, buy_source, weather_report, now):
+    configured_minutes = buy_cooldown_after_sell_fill_minutes_for_source(
+        config,
+        buy_source,
+    )
+    last_sell_at = parse_iso8601(state.get("last_sell_at"))
+    remaining = 0.0
+    if configured_minutes > 0 and last_sell_at is not None:
+        elapsed_minutes = (now - last_sell_at).total_seconds() / 60
+        remaining = max(0.0, configured_minutes - elapsed_minutes)
+
+    weather_bypass_allowed = (
+        remaining > 0
+        and buy_cooldown_after_sell_fill_weather_bypass_allowed(
+            config,
+            weather_report,
+        )
+    )
+    return {
+        "remaining_minutes": 0.0 if weather_bypass_allowed else remaining,
+        "raw_remaining_minutes": remaining,
+        "configured_minutes": configured_minutes,
+        "last_sell_at": state.get("last_sell_at"),
+        "weather_bypass_allowed": weather_bypass_allowed,
+    }
+
+
 def buy_above_last_sell_guard_active(last_sell_at, now, guard_minutes):
     if guard_minutes <= 0:
         return True
@@ -4471,6 +4690,30 @@ def main():
         min_profit_target_pct=min_profit_target_pct,
         buy_cooldown_minutes=buy_cooldown_minutes,
         buy_cooldown_minutes_by_source=buy_cooldown_minutes_by_source,
+        buy_cooldown_after_sell_fill_minutes=(
+            buy_cooldown_after_sell_fill_minutes
+        ),
+        buy_cooldown_after_sell_fill_high_band_minutes=(
+            buy_cooldown_after_sell_fill_high_band_minutes
+        ),
+        buy_cooldown_after_sell_fill_low_bypass=(
+            buy_cooldown_after_sell_fill_low_bypass
+        ),
+        buy_cooldown_after_sell_fill_weather_bypass=(
+            buy_cooldown_after_sell_fill_weather_bypass
+        ),
+        buy_cooldown_after_sell_fill_weather_min_rebound_confirmation=(
+            buy_cooldown_after_sell_fill_weather_min_rebound_confirmation
+        ),
+        buy_cooldown_after_sell_fill_weather_min_hold_through=(
+            buy_cooldown_after_sell_fill_weather_min_hold_through
+        ),
+        buy_cooldown_after_sell_fill_weather_max_exit_pressure=(
+            buy_cooldown_after_sell_fill_weather_max_exit_pressure
+        ),
+        buy_cooldown_after_sell_fill_minutes_by_source=(
+            buy_cooldown_after_sell_fill_minutes_by_source
+        ),
         high_anchor_buy_cooldown_minutes=high_anchor_buy_cooldown_minutes,
         max_open_high_anchor_orders=max_open_high_anchor_orders,
         high_anchor_backlog_soft_release_minutes=(
@@ -6156,6 +6399,12 @@ def main():
                         buy_source,
                         now,
                     )
+                    sell_fill_cooldown = buy_cooldown_after_sell_fill_status(
+                        route_config,
+                        buy_source,
+                        weather_report,
+                        now,
+                    )
 
                     if key in state["open_buy_orders"]:
                         skip_reason = "open_buy_order"
@@ -6219,6 +6468,8 @@ def main():
                             )
                     elif buy_cooldown["remaining_minutes"] > 0:
                         skip_reason = "buy_cooldown"
+                    elif sell_fill_cooldown["remaining_minutes"] > 0:
+                        skip_reason = "buy_after_sell_fill_cooldown"
                     elif (
                         deployed_inventory_usd
                         >= candidate_effective_max_inventory_usd
@@ -6489,6 +6740,20 @@ def main():
                             buy_cooldown_source_minutes=(
                                 buy_cooldown["source_cooldown_minutes"]
                             ),
+                            buy_after_sell_fill_cooldown_remaining_minutes=round(
+                                sell_fill_cooldown["remaining_minutes"],
+                                2,
+                            ),
+                            buy_after_sell_fill_cooldown_raw_remaining_minutes=round(
+                                sell_fill_cooldown["raw_remaining_minutes"],
+                                2,
+                            ),
+                            buy_after_sell_fill_cooldown_minutes=(
+                                sell_fill_cooldown["configured_minutes"]
+                            ),
+                            buy_after_sell_fill_cooldown_weather_bypass=(
+                                sell_fill_cooldown["weather_bypass_allowed"]
+                            ),
                             llm_sell_cooldown_remaining_minutes=round(
                                 llm_sell_cooldown_remaining,
                                 2
@@ -6639,6 +6904,20 @@ def main():
                             ),
                             buy_cooldown_source_minutes=(
                                 buy_cooldown["source_cooldown_minutes"]
+                            ),
+                            buy_after_sell_fill_cooldown_remaining_minutes=round(
+                                sell_fill_cooldown["remaining_minutes"],
+                                2,
+                            ),
+                            buy_after_sell_fill_cooldown_raw_remaining_minutes=round(
+                                sell_fill_cooldown["raw_remaining_minutes"],
+                                2,
+                            ),
+                            buy_after_sell_fill_cooldown_minutes=(
+                                sell_fill_cooldown["configured_minutes"]
+                            ),
+                            buy_after_sell_fill_cooldown_weather_bypass=(
+                                sell_fill_cooldown["weather_bypass_allowed"]
                             ),
                             llm_sell_cooldown_remaining_minutes=round(
                                 llm_sell_cooldown_remaining,
@@ -7246,6 +7525,12 @@ def main():
                         buy_cooldown_source_minutes=(
                             buy_cooldown["source_cooldown_minutes"]
                         ),
+                        buy_after_sell_fill_cooldown_minutes=(
+                            sell_fill_cooldown["configured_minutes"]
+                        ),
+                        buy_after_sell_fill_cooldown_weather_bypass=(
+                            sell_fill_cooldown["weather_bypass_allowed"]
+                        ),
                         above_last_sell_breakout_bypass=(
                             above_last_sell_breakout_bypass
                         ),
@@ -7311,6 +7596,12 @@ def main():
                         ),
                         buy_cooldown_source_minutes=(
                             buy_cooldown["source_cooldown_minutes"]
+                        ),
+                        buy_after_sell_fill_cooldown_minutes=(
+                            sell_fill_cooldown["configured_minutes"]
+                        ),
+                        buy_after_sell_fill_cooldown_weather_bypass=(
+                            sell_fill_cooldown["weather_bypass_allowed"]
                         ),
                         above_last_sell_breakout_bypass=(
                             above_last_sell_breakout_bypass
