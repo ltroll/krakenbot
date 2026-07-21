@@ -71,6 +71,12 @@ ACTIVITY_LOG_ROTATE_DAILY = (
     .lower()
     in ("1", "true", "yes", "on")
 )
+ACTIVITY_LOG_ROTATE_MAX_BYTES = int(
+    float(os.getenv("RANGE_GRID_ACTIVITY_LOG_MAX_MB", "50")) * 1024 * 1024
+)
+ACTIVITY_LOG_ROTATE_RETENTION = int(
+    os.getenv("RANGE_GRID_ACTIVITY_LOG_RETENTION", "8")
+)
 INSTANCE_LOCK_FILE = (
     os.getenv("RANGE_GRID_LOCK_FILE")
     or os.getenv("BOT_LOCK_FILE")
@@ -980,8 +986,8 @@ def rotated_size_log_path(base_path, dt):
     return f"{root}_{suffix}{ext or '.jsonl'}"
 
 
-def prune_rotated_trade_logs(base_path):
-    if LOG_ROTATE_RETENTION < 0:
+def prune_rotated_logs(base_path, retention, error_event):
+    if retention < 0:
         return
 
     root, ext = os.path.splitext(os.path.abspath(base_path))
@@ -993,26 +999,26 @@ def prune_rotated_trade_logs(base_path):
     ]
     rotated_paths.sort(key=lambda path: os.path.getmtime(path), reverse=True)
 
-    for old_path in rotated_paths[LOG_ROTATE_RETENTION:]:
+    for old_path in rotated_paths[retention:]:
         try:
             os.remove(old_path)
         except OSError as e:
             print(
                 f"[{datetime.now(timezone.utc).isoformat()}] "
-                f"LOG_PRUNE_ERROR: {e}"
+                f"{error_event}: {e}"
             )
 
 
-def rotate_trade_log_if_needed():
-    if LOG_ROTATE_MAX_BYTES <= 0:
+def rotate_log_if_needed(base_path, max_bytes, retention, error_prefix):
+    if max_bytes <= 0:
         return None
 
-    path = os.path.abspath(LOG_FILE)
+    path = os.path.abspath(base_path)
     if not os.path.exists(path):
         return None
 
     try:
-        if os.path.getsize(path) < LOG_ROTATE_MAX_BYTES:
+        if os.path.getsize(path) < max_bytes:
             return None
 
         rotated_path = rotated_size_log_path(path, datetime.now(timezone.utc))
@@ -1020,14 +1026,34 @@ def rotate_trade_log_if_needed():
             root, ext = os.path.splitext(rotated_path)
             rotated_path = f"{root}_{os.getpid()}{ext}"
         os.replace(path, rotated_path)
-        prune_rotated_trade_logs(path)
+        prune_rotated_logs(path, retention, f"{error_prefix}_PRUNE_ERROR")
         return rotated_path
     except OSError as e:
         print(
             f"[{datetime.now(timezone.utc).isoformat()}] "
-            f"LOG_ROTATE_ERROR: {e}"
+            f"{error_prefix}_ROTATE_ERROR: {e}"
         )
         return None
+
+
+def rotate_trade_log_if_needed():
+    return rotate_log_if_needed(
+        LOG_FILE,
+        LOG_ROTATE_MAX_BYTES,
+        LOG_ROTATE_RETENTION,
+        "LOG",
+    )
+
+
+def rotate_activity_log_if_needed(path):
+    if ACTIVITY_LOG_ROTATE_DAILY:
+        return None
+    return rotate_log_if_needed(
+        path,
+        ACTIVITY_LOG_ROTATE_MAX_BYTES,
+        ACTIVITY_LOG_ROTATE_RETENTION,
+        "ACTIVITY_LOG",
+    )
 
 
 def log_event(event, **kwargs):
@@ -1083,6 +1109,21 @@ def rotated_log_path(base_path, dt):
     return f"{root}_{suffix}{ext or '.jsonl'}"
 
 
+def size_rotated_log_paths(base_path):
+    if not base_path or is_http_url(base_path):
+        return []
+
+    root, ext = os.path.splitext(os.path.abspath(base_path))
+    pattern = f"{root}_[0-9][0-9][0-9][0-9]*{ext or '.jsonl'}"
+    paths = [
+        path
+        for path in glob.glob(pattern)
+        if os.path.isfile(path)
+    ]
+    paths.sort(key=lambda path: os.path.getmtime(path))
+    return paths
+
+
 def log_trade_activity(event, **kwargs):
     now = datetime.now(timezone.utc)
     record = {
@@ -1097,6 +1138,7 @@ def log_trade_activity(event, **kwargs):
             if ACTIVITY_LOG_ROTATE_DAILY else
             ACTIVITY_LOG_FILE
         )
+        rotate_activity_log_if_needed(path)
         append_jsonl(path, record)
     except Exception as e:
         log_event("ACTIVITY_LOG_WRITE_ERROR", message=str(e), activity_event=event)
@@ -1357,6 +1399,7 @@ def recent_activity_log_paths(now, lookback_hours):
                 )
                 day += timedelta(days=1)
         else:
+            paths.extend(size_rotated_log_paths(ACTIVITY_LOG_FILE))
             paths.append(ACTIVITY_LOG_FILE)
     return list(dict.fromkeys(paths))
 
@@ -4694,6 +4737,14 @@ def main():
         alert_log_file=os.path.abspath(ALERT_LOG_FILE),
         activity_log_file=os.path.abspath(ACTIVITY_LOG_FILE),
         activity_log_rotate_daily=ACTIVITY_LOG_ROTATE_DAILY,
+        activity_log_rotate_max_bytes=(
+            None if ACTIVITY_LOG_ROTATE_DAILY
+            else ACTIVITY_LOG_ROTATE_MAX_BYTES
+        ),
+        activity_log_rotate_retention=(
+            None if ACTIVITY_LOG_ROTATE_DAILY
+            else ACTIVITY_LOG_ROTATE_RETENTION
+        ),
         order_tracker_configured=bool(
             order_tracker_url and order_tracker_user_agent
         ),

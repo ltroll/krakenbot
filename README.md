@@ -407,6 +407,19 @@ range-grid activity log rolls daily, so
 `/var/www/html/bot/range_grid_activity.jsonl` is written as files such as
 `/var/www/html/bot/range_grid_activity_20260629.jsonl`.
 
+For split-host backtests that reconcile live order activity over multiple days,
+use a fixed current activity log and size-based rollover instead:
+
+```bash
+RANGE_GRID_ACTIVITY_LOG_FILE=/var/www/html/bot/range_grid_activity.jsonl
+RANGE_GRID_ACTIVITY_LOG_ROTATE_DAILY=false
+RANGE_GRID_ACTIVITY_LOG_MAX_MB=50
+RANGE_GRID_ACTIVITY_LOG_RETENTION=8
+```
+
+In that mode, the bot keeps writing the fixed file until it reaches the size
+limit, then archives it as a timestamped file and starts a fresh fixed file.
+
 Each line is one JSON object, for example:
 
 ```json
@@ -440,12 +453,20 @@ The active range-grid bot currently writes events such as:
 This structure is important because other utilities can consume it without regex parsing.
 
 For split-host backtests, point the backtest process at the production activity
-log base path or URL. The backtest expands daily rotated files for the reporting
-window:
+log base path or URL. With daily rotation enabled, the backtest expands daily
+rotated files for the reporting window:
 
 ```bash
 RANGE_GRID_ACTIVITY_LOG_FILE=http://pibot.local/bot/range_grid_activity.jsonl
 RANGE_GRID_ACTIVITY_LOG_ROTATE_DAILY=true
+```
+
+With fixed size-based rollover, use the same fixed URL and set daily rotation
+off on the backtest host too:
+
+```bash
+RANGE_GRID_ACTIVITY_LOG_FILE=http://pibot.local/bot/range_grid_activity.jsonl
+RANGE_GRID_ACTIVITY_LOG_ROTATE_DAILY=false
 ```
 
 ## Viewing logs

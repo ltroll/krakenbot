@@ -100,10 +100,33 @@ def dated_jsonl_path(path, day):
     return source.with_name(f"{base}_{day.strftime('%Y%m%d')}{suffix}")
 
 
+def size_rotated_jsonl_paths(path):
+    source = Path(path)
+    name = source.name
+    if name.endswith(".jsonl"):
+        base = name[:-len(".jsonl")]
+        suffix = ".jsonl"
+    else:
+        base = source.stem
+        suffix = source.suffix or ".jsonl"
+
+    paths = [
+        candidate
+        for candidate in source.parent.glob(f"{base}_[0-9][0-9][0-9][0-9]*{suffix}")
+        if candidate.is_file()
+    ]
+    paths.sort(key=lambda candidate: candidate.stat().st_mtime)
+    return paths
+
+
 def read_activity_records(now=None):
     now = now or utc_now()
     if not ACTIVITY_LOG_ROTATE_DAILY:
-        return read_jsonl_tail(ACTIVITY_LOG_FILE, MAX_LOG_SCAN_LINES)
+        records = []
+        for path in [*size_rotated_jsonl_paths(ACTIVITY_LOG_FILE), Path(ACTIVITY_LOG_FILE)]:
+            records.extend(read_jsonl_tail(path, MAX_LOG_SCAN_LINES))
+        records.sort(key=lambda record: record.get("ts") or "")
+        return records[-MAX_LOG_SCAN_LINES:]
 
     days = max(1, int((LOOKBACK_HOURS + 23) // 24) + 1)
     records = []

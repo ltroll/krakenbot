@@ -3,6 +3,7 @@
 import argparse
 import copy
 import csv
+import glob
 import json
 import os
 import statistics
@@ -190,6 +191,21 @@ def rotated_snapshot_path(base_path, dt):
     return f"{root}_{suffix}{ext or '.jsonl'}"
 
 
+def size_rotated_source_files(base_path):
+    if not base_path or is_http_url(base_path):
+        return []
+
+    root, ext = os.path.splitext(os.path.abspath(base_path))
+    pattern = f"{root}_[0-9][0-9][0-9][0-9]*{ext or '.jsonl'}"
+    paths = [
+        path
+        for path in glob.glob(pattern)
+        if os.path.isfile(path)
+    ]
+    paths.sort(key=lambda path: os.path.getmtime(path))
+    return [display_source_path(path) for path in paths]
+
+
 def daterange(start_date, end_date):
     current = start_date
     while current <= end_date:
@@ -210,6 +226,13 @@ def rotated_source_files(base_path, since_dt, until_dt, rotate_daily):
 
     if rotated_files:
         return rotated_files
+
+    size_rotated_files = size_rotated_source_files(base_path)
+    if size_rotated_files:
+        files = list(size_rotated_files)
+        if is_http_url(base_path) or os.path.exists(base_path):
+            files.append(display_source_path(base_path))
+        return list(dict.fromkeys(files))
 
     if is_http_url(base_path) or os.path.exists(base_path):
         return [display_source_path(base_path)]
