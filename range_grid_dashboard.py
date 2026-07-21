@@ -19,6 +19,7 @@ STATUS_FILE = os.getenv("RANGE_GRID_STATUS_FILE", "range_grid_status.json")
 ALERT_LOG_FILE = os.getenv("RANGE_GRID_ALERT_LOG_FILE", "range_grid_alerts.jsonl")
 STATE_FILE = os.getenv("RANGE_GRID_STATE_FILE", "last_state.json")
 TRADE_LOG_FILE = os.getenv("RANGE_GRID_TRADE_LOG_FILE", "trade_log.jsonl")
+ACTIVITY_LOG_FILE = os.getenv("RANGE_GRID_ACTIVITY_LOG_FILE", "range_grid_activity.jsonl")
 OUTPUT_FILE = os.getenv(
     "RANGE_GRID_DASHBOARD_OUTPUT",
     "/var/www/html/bot/range_grid_dashboard.html",
@@ -27,6 +28,13 @@ LOOKBACK_HOURS = float(os.getenv("RANGE_GRID_DASHBOARD_LOOKBACK_HOURS", "24"))
 RECENT_EVENT_LIMIT = int(os.getenv("RANGE_GRID_DASHBOARD_RECENT_EVENT_LIMIT", "30"))
 MAX_LOG_SCAN_LINES = int(os.getenv("RANGE_GRID_DASHBOARD_MAX_LOG_SCAN_LINES", "5000"))
 HEALTH_STALE_MINUTES = float(os.getenv("RANGE_GRID_DASHBOARD_HEALTH_STALE_MINUTES", "5"))
+ACTIVITY_LOG_ROTATE_DAILY = os.getenv(
+    "RANGE_GRID_ACTIVITY_LOG_ROTATE_DAILY", "true"
+).lower() not in {"0", "false", "no", "off"}
+DASHBOARD_ROUND_TRIP_FEE_PCT = float(os.getenv(
+    "RANGE_GRID_DASHBOARD_ROUND_TRIP_FEE_PCT",
+    os.getenv("ROUND_TRIP_FEE_PCT", "0.0065"),
+))
 
 
 def parse_iso8601(value):
@@ -52,6 +60,15 @@ def safe_read_json(path):
         return None
 
 
+def safe_float(value, default=None):
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
 def read_jsonl_tail(path, limit):
     records = deque(maxlen=limit)
     try:
@@ -69,6 +86,38 @@ def read_jsonl_tail(path, limit):
     except Exception:
         return []
     return list(records)
+
+
+def dated_jsonl_path(path, day):
+    source = Path(path)
+    name = source.name
+    if name.endswith(".jsonl"):
+        base = name[:-len(".jsonl")]
+        suffix = ".jsonl"
+    else:
+        base = source.stem
+        suffix = source.suffix
+    return source.with_name(f"{base}_{day.strftime('%Y%m%d')}{suffix}")
+
+
+def read_activity_records(now=None):
+    now = now or utc_now()
+    if not ACTIVITY_LOG_ROTATE_DAILY:
+        return read_jsonl_tail(ACTIVITY_LOG_FILE, MAX_LOG_SCAN_LINES)
+
+    days = max(1, int((LOOKBACK_HOURS + 23) // 24) + 1)
+    records = []
+    seen = set()
+    for offset in range(days):
+        day = (now - timedelta(days=offset)).date()
+        for path in (dated_jsonl_path(ACTIVITY_LOG_FILE, day), Path(ACTIVITY_LOG_FILE)):
+            path_key = str(path)
+            if path_key in seen:
+                continue
+            seen.add(path_key)
+            records.extend(read_jsonl_tail(path, MAX_LOG_SCAN_LINES))
+    records.sort(key=lambda record: record.get("ts") or "")
+    return records[-MAX_LOG_SCAN_LINES:]
 
 
 def fmt_number(value, digits=2, fallback="--"):
@@ -191,6 +240,14 @@ def compute_recent_metrics(trade_records, now=None):
         "alerts": 0,
         "reconciliations": 0,
         "realized_net_pnl": 0.0,
+        "realized_gross_pnl": 0.0,
+        "buy_notional_usd": 0.0,
+        "filled_buy_notional_usd": 0.0,
+        "sell_notional_usd": 0.0,
+        "sell_extension_shadow_decisions": 0,
+        "sell_extension_shadow_additional_gross_pnl": 0.0,
+        "activity_summary_count": 0,
+        "latest_activity_summary": None,
         "actions": Counter(),
         "approved_by_source": Counter(),
         "placed_by_source": Counter(),
@@ -210,18 +267,33 @@ def compute_recent_metrics(trade_records, now=None):
         elif event == "BUY_ORDER_PLACED":
             summary["buys_placed"] += 1
             summary["placed_by_source"][record.get("buy_source") or "unknown"] += 1
+            summary["buy_notional_usd"] += safe_float(
+                record.get("trade_notional_usd"),
+                (safe_float(record.get("price"), 0.0) * safe_float(record.get("volume"), 0.0)),
+            ) or 0.0
         elif event == "BUY_ORDER_FILLED":
             summary["buys_filled"] += 1
             summary["filled_by_source"][record.get("buy_source") or "unknown"] += 1
+            summary["filled_buy_notional_usd"] += safe_float(
+                record.get("trade_notional_usd"),
+                (safe_float(record.get("price"), 0.0) * safe_float(record.get("volume"), 0.0)),
+            ) or 0.0
         elif event == "SELL_ORDER_PLACED":
             summary["sells_placed"] += 1
+            summary["sell_notional_usd"] += safe_float(
+                record.get("trade_notional_usd"),
+                (safe_float(record.get("price"), 0.0) * safe_float(record.get("volume"), 0.0)),
+            ) or 0.0
         elif event == "SELL_ORDER_FILLED":
             summary["sells_filled"] += 1
             summary["exited_by_source"][record.get("buy_source") or "unknown"] += 1
-            try:
-                summary["realized_net_pnl"] += float(record.get("estimated_net_pnl") or 0.0)
-            except Exception:
-                pass
+            summary["realized_net_pnl"] += safe_float(record.get("estimated_net_pnl"), 0.0) or 0.0
+            summary["realized_gross_pnl"] += safe_float(record.get("gross_pnl"), 0.0) or 0.0
+        elif event == "SELL_EXTENSION_SHADOW_DECISION":
+            summary["sell_extension_shadow_decisions"] += 1
+            summary["sell_extension_shadow_additional_gross_pnl"] += safe_float(
+                record.get("proposed_additional_gross_pnl"), 0.0
+            ) or 0.0
         elif event == "ORDER_REJECTED":
             summary["order_rejected"] += 1
             if record.get("side") == "buy":
@@ -232,12 +304,75 @@ def compute_recent_metrics(trade_records, now=None):
             summary["alerts"] += 1
         elif event in ("BTC_RECONCILED", "STARTUP_RECONCILE_COMPLETE"):
             summary["reconciliations"] += 1
+        elif event == "ACTIVITY_SUMMARY":
+            summary["activity_summary_count"] += 1
+            summary["latest_activity_summary"] = record
 
         if event:
             summary["actions"][event] += 1
             recent.append(record)
 
     return summary, recent[-RECENT_EVENT_LIMIT:]
+
+
+def compute_open_sell_pnl(state, current_price=None, now=None):
+    now = now or utc_now()
+    open_sells = (state or {}).get("open_sell_orders") or {}
+    summary = {
+        "open_sell_count": len(open_sells),
+        "open_sell_volume": 0.0,
+        "open_sell_buy_notional_usd": 0.0,
+        "open_sell_target_notional_usd": 0.0,
+        "open_sell_target_gross_pnl": 0.0,
+        "open_sell_target_estimated_net_pnl": 0.0,
+        "open_sell_current_gross_pnl": None,
+        "open_sell_current_estimated_net_pnl": None,
+        "open_sell_avg_age_minutes": None,
+        "open_sell_oldest_age_minutes": None,
+    }
+    total_age = 0.0
+    age_count = 0
+    oldest_age = None
+    current_gross = 0.0
+    current_estimated_net = 0.0
+    has_current_price = current_price is not None
+
+    for order in open_sells.values():
+        volume = safe_float(order.get("volume"), 0.0) or 0.0
+        buy_price = safe_float(order.get("buy_price"), safe_float(order.get("level"), 0.0)) or 0.0
+        sell_price = safe_float(order.get("sell_price"), 0.0) or 0.0
+        if volume <= 0 or buy_price <= 0 or sell_price <= 0:
+            continue
+
+        buy_notional = volume * buy_price
+        target_notional = volume * sell_price
+        target_gross = target_notional - buy_notional
+        estimated_fee = buy_notional * DASHBOARD_ROUND_TRIP_FEE_PCT
+
+        summary["open_sell_volume"] += volume
+        summary["open_sell_buy_notional_usd"] += buy_notional
+        summary["open_sell_target_notional_usd"] += target_notional
+        summary["open_sell_target_gross_pnl"] += target_gross
+        summary["open_sell_target_estimated_net_pnl"] += target_gross - estimated_fee
+
+        if has_current_price:
+            mark_gross = volume * (current_price - buy_price)
+            current_gross += mark_gross
+            current_estimated_net += mark_gross - estimated_fee
+
+        age = age_minutes(order.get("placed_at"), now)
+        if age is not None:
+            total_age += age
+            age_count += 1
+            oldest_age = age if oldest_age is None else max(oldest_age, age)
+
+    if has_current_price:
+        summary["open_sell_current_gross_pnl"] = current_gross
+        summary["open_sell_current_estimated_net_pnl"] = current_estimated_net
+    if age_count:
+        summary["open_sell_avg_age_minutes"] = total_age / age_count
+        summary["open_sell_oldest_age_minutes"] = oldest_age
+    return summary
 
 
 def render_source_counter(counter):
@@ -416,7 +551,87 @@ def render_grid_levels_table(levels):
     return "\n".join(rows)
 
 
-def render_dashboard(status, state, recent_summary, recent_events, alert_summary, now=None):
+def pnl_tone(value):
+    if value is None:
+        return "neutral"
+    return "positive" if value >= 0 else "negative"
+
+
+def pnl_metric_rows(recent_summary, open_pnl, state):
+    state_summary = ((state or {}).get("stats") or {})
+    latest_activity = recent_summary.get("latest_activity_summary") or {}
+    avg_buy_size = (
+        recent_summary.get("buy_notional_usd", 0.0) / recent_summary.get("buys_placed", 0)
+        if recent_summary.get("buys_placed")
+        else None
+    )
+    return key_value_rows([
+        (
+            f"Realized Net PnL ({LOOKBACK_HOURS:g}h)",
+            f"${fmt_number(recent_summary.get('realized_net_pnl'), 4)}",
+        ),
+        (
+            f"Realized Gross PnL ({LOOKBACK_HOURS:g}h)",
+            f"${fmt_number(recent_summary.get('realized_gross_pnl'), 4)}",
+        ),
+        (
+            f"Buy Notional Placed ({LOOKBACK_HOURS:g}h)",
+            f"${fmt_number(recent_summary.get('buy_notional_usd'), 2)}",
+        ),
+        (
+            f"Avg Buy Size ({LOOKBACK_HOURS:g}h)",
+            f"${fmt_number(avg_buy_size, 2)}",
+        ),
+        (
+            "Open Sell Target Net PnL",
+            f"${fmt_number(open_pnl.get('open_sell_target_estimated_net_pnl'), 4)}",
+        ),
+        (
+            "Open Sell Target Gross PnL",
+            f"${fmt_number(open_pnl.get('open_sell_target_gross_pnl'), 4)}",
+        ),
+        (
+            "Open Sell Mark-to-Market Net",
+            f"${fmt_number(open_pnl.get('open_sell_current_estimated_net_pnl'), 4)}",
+        ),
+        (
+            "Open Sell Buy Notional",
+            f"${fmt_number(open_pnl.get('open_sell_buy_notional_usd'), 2)}",
+        ),
+        ("Open Sell Count", fmt_int(open_pnl.get("open_sell_count"))),
+        (
+            "Open Sell Avg Age",
+            f"{fmt_number(open_pnl.get('open_sell_avg_age_minutes'), 1)}m",
+        ),
+        (
+            "Open Sell Oldest Age",
+            f"{fmt_number(open_pnl.get('open_sell_oldest_age_minutes'), 1)}m",
+        ),
+        (
+            "Shadow Extension Upside",
+            f"${fmt_number(recent_summary.get('sell_extension_shadow_additional_gross_pnl'), 4)}"
+            f" across {fmt_int(recent_summary.get('sell_extension_shadow_decisions'))} ideas",
+        ),
+        (
+            "Latest Activity Realized Today",
+            f"${fmt_number(latest_activity.get('realized_pnl_today'), 4)}",
+        ),
+        (
+            "Lifetime Realized Gross PnL",
+            f"${fmt_number(state_summary.get('realized_gross_pnl'), 8)}",
+        ),
+        (
+            "Lifetime Realized Net PnL",
+            f"${fmt_number(state_summary.get('realized_estimated_net_pnl'), 8)}",
+        ),
+        (
+            "Dashboard Fee Assumption",
+            fmt_pct(DASHBOARD_ROUND_TRIP_FEE_PCT * 100, 4),
+        ),
+    ])
+
+
+def render_dashboard(status, state, recent_summary, recent_events, alert_summary, open_pnl, now=None):
     now = now or utc_now()
     health_state, health_message = classify_health(status, alert_summary["recent"], now)
     inventory_buckets = (status or {}).get("inventory_buckets_usd") or {}
@@ -454,7 +669,20 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
         stat_card(
             f"{int(LOOKBACK_HOURS)}h Net PnL",
             f"${fmt_number(recent_summary['realized_net_pnl'], 4)}",
-            tone="positive" if recent_summary["realized_net_pnl"] >= 0 else "negative",
+            tone=pnl_tone(recent_summary["realized_net_pnl"]),
+            subtext="filled sells only",
+        ),
+        stat_card(
+            "Open Target Net",
+            f"${fmt_number(open_pnl.get('open_sell_target_estimated_net_pnl'), 4)}",
+            tone=pnl_tone(open_pnl.get("open_sell_target_estimated_net_pnl")),
+            subtext="if current sells fill",
+        ),
+        stat_card(
+            "Open Mark Net",
+            f"${fmt_number(open_pnl.get('open_sell_current_estimated_net_pnl'), 4)}",
+            tone=pnl_tone(open_pnl.get("open_sell_current_estimated_net_pnl")),
+            subtext="at current price",
         ),
         stat_card("Alerts", fmt_int(alert_summary["count"]), subtext=f"last {LOOKBACK_HOURS:g}h"),
         stat_card("Snapshot Age", human_age(status_timestamp, now)),
@@ -474,6 +702,7 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
         ("Oldest Sell Age", f"{fmt_number((status or {}).get('sell_backlog_oldest_minutes'), 2)}m"),
         ("Last Alert Age", human_age(last_alert_ts, now)),
     ])
+    pnl_rows = pnl_metric_rows(recent_summary, open_pnl, state)
 
     kpi_rows = key_value_rows([
         ("Approved Candidates", recent_summary["approved_candidates"]),
@@ -684,6 +913,10 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
         <h2>Recent KPI Window ({LOOKBACK_HOURS:g}h)</h2>
         <table>{kpi_rows}</table>
       </div>
+      <div class="panel">
+        <h2>PnL Accounting</h2>
+        <table>{pnl_rows}</table>
+      </div>
     </section>
 
     <section class="two">
@@ -734,7 +967,7 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
     </section>
 
     <div class="foot">
-      Sources: {html.escape(os.path.abspath(STATUS_FILE))}, {html.escape(os.path.abspath(ALERT_LOG_FILE))}, {html.escape(os.path.abspath(STATE_FILE))}, {html.escape(os.path.abspath(TRADE_LOG_FILE))}.
+      Sources: {html.escape(os.path.abspath(STATUS_FILE))}, {html.escape(os.path.abspath(ALERT_LOG_FILE))}, {html.escape(os.path.abspath(STATE_FILE))}, {html.escape(os.path.abspath(ACTIVITY_LOG_FILE))}, {html.escape(os.path.abspath(TRADE_LOG_FILE))}.
     </div>
   </div>
 </body>
@@ -761,15 +994,20 @@ def build_dashboard(output_file=OUTPUT_FILE):
     status = safe_read_json(STATUS_FILE)
     state = safe_read_json(STATE_FILE) or {}
     trade_records = read_jsonl_tail(TRADE_LOG_FILE, MAX_LOG_SCAN_LINES)
+    activity_records = read_activity_records(now)
     alert_records = read_jsonl_tail(ALERT_LOG_FILE, MAX_LOG_SCAN_LINES)
-    recent_summary, recent_events = compute_recent_metrics(trade_records, now)
+    metrics_records = activity_records or trade_records
+    recent_summary, recent_events = compute_recent_metrics(metrics_records, now)
     alert_summary = compute_alert_metrics(alert_records, now)
+    current_price = safe_float((status or {}).get("price"))
+    open_pnl = compute_open_sell_pnl(state, current_price=current_price, now=now)
     html_content = render_dashboard(
         status,
         state,
         recent_summary,
         recent_events,
         alert_summary,
+        open_pnl,
         now,
     )
     atomic_write(output_file, html_content)
@@ -779,6 +1017,8 @@ def build_dashboard(output_file=OUTPUT_FILE):
         "alert_log_file": os.path.abspath(ALERT_LOG_FILE),
         "state_file": os.path.abspath(STATE_FILE),
         "trade_log_file": os.path.abspath(TRADE_LOG_FILE),
+        "activity_log_file": os.path.abspath(ACTIVITY_LOG_FILE),
+        "activity_log_records": len(activity_records),
         "generated_at": now.isoformat(),
         "recent_alert_count": alert_summary["count"],
         "recent_event_count": len(recent_events),
