@@ -292,7 +292,7 @@ def compute_recent_metrics(trade_records, now=None):
         elif event == "SELL_EXTENSION_SHADOW_DECISION":
             summary["sell_extension_shadow_decisions"] += 1
             summary["sell_extension_shadow_additional_gross_pnl"] += safe_float(
-                record.get("proposed_additional_gross_pnl"), 0.0
+                record.get("additional_gross_pnl"), 0.0
             ) or 0.0
         elif event == "ORDER_REJECTED":
             summary["order_rejected"] += 1
