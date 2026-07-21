@@ -1607,6 +1607,25 @@ class RangeGridBacktestTests(unittest.TestCase):
                 "weather_opportunity_phase": "momentum_ride",
                 "weather_stabilization_score": 0.64,
             },
+            {
+                "ts": "2026-06-13T16:05:00+00:00",
+                "event": "SELL_EXTENSION_SHADOW_DECISION",
+                "txid": "SELL-OPEN",
+                "trade_id": "BUY-2",
+                "buy_source": "range_high_band",
+                "buy_price": 104.5,
+                "current_sell_price": 107.0,
+                "proposed_sell_price": 107.2675,
+                "current_price": 106.9,
+                "extension_pct": 0.0025,
+                "additional_gross_pnl": 0.02675,
+                "age_minutes": 40,
+                "reason": "weather_supports_extended_profit",
+                "weather_condition": "breakout_tailwind",
+                "weather_opportunity_phase": "momentum_ride",
+                "weather_hold_through_score": 0.62,
+                "weather_exit_pressure_score": 0.31,
+            },
         ]
 
         summary = backtest.summarize_actual_trades(events)
@@ -1650,6 +1669,11 @@ class RangeGridBacktestTests(unittest.TestCase):
                 "weather_opportunity_phase"
             ],
             "momentum_ride",
+        )
+        self.assertEqual(summary["sell_extension_shadow_decisions"], 1)
+        self.assertEqual(
+            summary["recent_sell_extension_shadow_decisions"][0]["reason"],
+            "weather_supports_extended_profit",
         )
         self.assertEqual(
             summary["capital_recycling_summary"]["total_buy_notional_usd"],

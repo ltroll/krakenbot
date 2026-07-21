@@ -3858,6 +3858,7 @@ def summarize_actual_trades(events):
         "order_rejected": 0,
         "sell_order_repriced": 0,
         "risk_context_paper_buys_planned": 0,
+        "sell_extension_shadow_decisions": 0,
         "activity_summary_count": 0,
         "latest_activity_summary": None,
         "realized_gross_pnl": 0.0,
@@ -3872,6 +3873,7 @@ def summarize_actual_trades(events):
         "recent_fills": [],
         "recent_buy_orders": [],
         "recent_risk_context_paper_buys": [],
+        "recent_sell_extension_shadow_decisions": [],
         "recent_activity_summaries": [],
     }
     buy_orders_placed_by_source = Counter()
@@ -4089,6 +4091,32 @@ def summarize_actual_trades(events):
             rejected_by_side[event.get("side") or "unknown"] += 1
         elif name == "SELL_ORDER_REPRICED":
             summary["sell_order_repriced"] += 1
+        elif name == "SELL_EXTENSION_SHADOW_DECISION":
+            summary["sell_extension_shadow_decisions"] += 1
+            summary["recent_sell_extension_shadow_decisions"].append({
+                "ts": event.get("ts"),
+                "txid": event.get("txid"),
+                "trade_id": event.get("trade_id"),
+                "buy_source": event.get("buy_source"),
+                "buy_price": event.get("buy_price"),
+                "current_sell_price": event.get("current_sell_price"),
+                "proposed_sell_price": event.get("proposed_sell_price"),
+                "current_price": event.get("current_price"),
+                "extension_pct": event.get("extension_pct"),
+                "additional_gross_pnl": event.get("additional_gross_pnl"),
+                "age_minutes": event.get("age_minutes"),
+                "reason": event.get("reason"),
+                "weather_condition": event.get("weather_condition"),
+                "weather_opportunity_phase": event.get(
+                    "weather_opportunity_phase"
+                ),
+                "weather_hold_through_score": event.get(
+                    "weather_hold_through_score"
+                ),
+                "weather_exit_pressure_score": event.get(
+                    "weather_exit_pressure_score"
+                ),
+            })
         elif name == "BUY_CANDIDATE_SKIPPED":
             source = event_source(event)
             reason = (
@@ -4126,6 +4154,9 @@ def summarize_actual_trades(events):
     summary["recent_buy_orders"] = summary["recent_buy_orders"][-BACKTEST_RECENT_LIMIT:]
     summary["recent_risk_context_paper_buys"] = (
         summary["recent_risk_context_paper_buys"][-BACKTEST_RECENT_LIMIT:]
+    )
+    summary["recent_sell_extension_shadow_decisions"] = (
+        summary["recent_sell_extension_shadow_decisions"][-BACKTEST_RECENT_LIMIT:]
     )
     summary["recent_activity_summaries"] = (
         summary["recent_activity_summaries"][-BACKTEST_RECENT_LIMIT:]

@@ -712,6 +712,67 @@ risk_context_position_size_blend = profile_float(
     "risk_context_position_size_blend",
     0.5
 )
+sell_extension_shadow_enabled = profile_bool(
+    "sell_extension_shadow_enabled",
+    env_default_bool("RANGE_GRID_SELL_EXTENSION_SHADOW_ENABLED", False)
+)
+sell_extension_shadow_cooldown_minutes = profile_float(
+    "sell_extension_shadow_cooldown_minutes",
+    float(os.getenv("RANGE_GRID_SELL_EXTENSION_SHADOW_COOLDOWN_MINUTES", "120"))
+)
+sell_extension_shadow_max_age_minutes = profile_float(
+    "sell_extension_shadow_max_age_minutes",
+    float(
+        os.getenv(
+            "RANGE_GRID_SELL_EXTENSION_SHADOW_MAX_AGE_MINUTES",
+            str(aging_start_minutes),
+        )
+    )
+)
+sell_extension_shadow_price_proximity_pct = profile_float(
+    "sell_extension_shadow_price_proximity_pct",
+    float(os.getenv("RANGE_GRID_SELL_EXTENSION_SHADOW_PROXIMITY_PCT", "0.002"))
+)
+sell_extension_shadow_extension_pct = profile_float(
+    "sell_extension_shadow_extension_pct",
+    float(os.getenv("RANGE_GRID_SELL_EXTENSION_SHADOW_EXTENSION_PCT", "0.0025"))
+)
+sell_extension_shadow_min_hold_through_score = profile_float(
+    "sell_extension_shadow_min_hold_through_score",
+    float(
+        os.getenv(
+            "RANGE_GRID_SELL_EXTENSION_SHADOW_MIN_HOLD_THROUGH_SCORE",
+            "0.50",
+        )
+    )
+)
+sell_extension_shadow_max_exit_pressure_score = profile_float(
+    "sell_extension_shadow_max_exit_pressure_score",
+    float(
+        os.getenv(
+            "RANGE_GRID_SELL_EXTENSION_SHADOW_MAX_EXIT_PRESSURE_SCORE",
+            "0.60",
+        )
+    )
+)
+sell_extension_shadow_max_market_risk_score = profile_float(
+    "sell_extension_shadow_max_market_risk_score",
+    float(
+        os.getenv(
+            "RANGE_GRID_SELL_EXTENSION_SHADOW_MAX_MARKET_RISK_SCORE",
+            "0.35",
+        )
+    )
+)
+sell_extension_shadow_min_rebound_or_breakout_score = profile_float(
+    "sell_extension_shadow_min_rebound_or_breakout_score",
+    float(
+        os.getenv(
+            "RANGE_GRID_SELL_EXTENSION_SHADOW_MIN_REBOUND_OR_BREAKOUT_SCORE",
+            "0.55",
+        )
+    )
+)
 range_fallback_execution_signal = profile_float(
     "range_fallback_execution_signal",
     max(execution_signal_threshold, sentiment_defensive_threshold)
@@ -2019,6 +2080,7 @@ def load_state():
         "last_buy_at": None,
         "last_buy_at_by_source": {},
         "last_activity_summary_at": None,
+        "last_sell_extension_shadow_at_by_txid": {},
         "last_high_anchor_buy_at": None,
         "last_sell_price": None,
         "last_sell_at": None,
@@ -2957,6 +3019,142 @@ def compute_sell_target_price(buy_price, profit_target_override=None):
         else profit_target_override
     )
     return buy_price * (1 + profit_target + round_trip_fee_pct)
+
+
+def sell_extension_shadow_decision(
+    order,
+    current_price,
+    now,
+    risk_context,
+    age_minutes,
+):
+    if not sell_extension_shadow_enabled:
+        return {
+            "approved": False,
+            "reason": "disabled",
+        }
+
+    buy_price = positive_float(order.get("buy_price"))
+    current_sell_price = positive_float(order.get("sell_price"))
+    volume = positive_float(order.get("volume"))
+    if buy_price is None or current_sell_price is None or volume is None:
+        return {
+            "approved": False,
+            "reason": "missing_order_fields",
+        }
+
+    if (
+        sell_extension_shadow_max_age_minutes > 0
+        and age_minutes is not None
+        and age_minutes > sell_extension_shadow_max_age_minutes
+    ):
+        return {
+            "approved": False,
+            "reason": "order_too_old",
+        }
+
+    price = positive_float(current_price)
+    if price is None:
+        return {
+            "approved": False,
+            "reason": "missing_current_price",
+        }
+    proximity_floor = current_sell_price * (
+        1 - max(0.0, sell_extension_shadow_price_proximity_pct)
+    )
+    if price < proximity_floor:
+        return {
+            "approved": False,
+            "reason": "price_not_near_sell_target",
+        }
+
+    weather = weather_report_payload(risk_context)
+    if bool(weather.get("emergency_bell")):
+        return {
+            "approved": False,
+            "reason": "emergency_bell",
+        }
+
+    condition = str(weather.get("condition") or "").strip().lower()
+    if condition not in ("breakout_tailwind", "constructive"):
+        return {
+            "approved": False,
+            "reason": "weather_condition_not_supportive",
+        }
+
+    market_opportunity = weather_market_opportunity(weather)
+    market_risk_score = optional_float(risk_context.get("market_risk_score"))
+    rebound_score = optional_float(risk_context.get("rebound_score"))
+    breakout_score = optional_float(risk_context.get("breakout_score"))
+    hold_through_score = optional_float(
+        market_opportunity.get("hold_through_score")
+    )
+    exit_pressure_score = optional_float(
+        market_opportunity.get("exit_pressure_score")
+    )
+
+    if (
+        market_risk_score is not None
+        and market_risk_score > sell_extension_shadow_max_market_risk_score
+    ):
+        return {
+            "approved": False,
+            "reason": "market_risk_high",
+        }
+    if (
+        hold_through_score is not None
+        and hold_through_score < sell_extension_shadow_min_hold_through_score
+    ):
+        return {
+            "approved": False,
+            "reason": "hold_through_low",
+        }
+    if (
+        exit_pressure_score is not None
+        and exit_pressure_score > sell_extension_shadow_max_exit_pressure_score
+    ):
+        return {
+            "approved": False,
+            "reason": "exit_pressure_high",
+        }
+
+    best_follow_through_score = max(
+        rebound_score or 0.0,
+        breakout_score or 0.0,
+    )
+    if best_follow_through_score < (
+        sell_extension_shadow_min_rebound_or_breakout_score
+    ):
+        return {
+            "approved": False,
+            "reason": "follow_through_low",
+        }
+
+    extension_pct = max(0.0, sell_extension_shadow_extension_pct)
+    if extension_pct <= 0:
+        return {
+            "approved": False,
+            "reason": "extension_pct_disabled",
+        }
+
+    proposed_sell_price = current_sell_price * (1 + extension_pct)
+    additional_gross_pnl = volume * (proposed_sell_price - current_sell_price)
+    current_gross_pnl = volume * (current_sell_price - buy_price)
+    proposed_gross_pnl = volume * (proposed_sell_price - buy_price)
+    return {
+        "approved": True,
+        "reason": "weather_supports_extended_profit",
+        "proposed_sell_price": proposed_sell_price,
+        "extension_pct": extension_pct,
+        "additional_gross_pnl": additional_gross_pnl,
+        "current_gross_pnl": current_gross_pnl,
+        "proposed_gross_pnl": proposed_gross_pnl,
+        "market_risk_score": market_risk_score,
+        "rebound_score": rebound_score,
+        "breakout_score": breakout_score,
+        "hold_through_score": hold_through_score,
+        "exit_pressure_score": exit_pressure_score,
+    }
 
 
 def sell_backoff_remaining_seconds():
@@ -4349,6 +4547,31 @@ def main():
         risk_context_position_size_blend=(
             risk_context_position_size_blend
         ),
+        sell_extension_shadow_enabled=sell_extension_shadow_enabled,
+        sell_extension_shadow_cooldown_minutes=(
+            sell_extension_shadow_cooldown_minutes
+        ),
+        sell_extension_shadow_max_age_minutes=(
+            sell_extension_shadow_max_age_minutes
+        ),
+        sell_extension_shadow_price_proximity_pct=(
+            sell_extension_shadow_price_proximity_pct
+        ),
+        sell_extension_shadow_extension_pct=(
+            sell_extension_shadow_extension_pct
+        ),
+        sell_extension_shadow_min_hold_through_score=(
+            sell_extension_shadow_min_hold_through_score
+        ),
+        sell_extension_shadow_max_exit_pressure_score=(
+            sell_extension_shadow_max_exit_pressure_score
+        ),
+        sell_extension_shadow_max_market_risk_score=(
+            sell_extension_shadow_max_market_risk_score
+        ),
+        sell_extension_shadow_min_rebound_or_breakout_score=(
+            sell_extension_shadow_min_rebound_or_breakout_score
+        ),
         anchor_strategy_router_enabled=anchor_strategy_router_enabled,
         anchor_strategy_router_file=anchor_strategy_router_file,
         anchor_strategy_router_refresh_seconds=(
@@ -4784,6 +5007,10 @@ def main():
                 if status == "closed":
                     if fill_already_processed("sell", txid):
                         del state["open_sell_orders"][txid]
+                        state.setdefault(
+                            "last_sell_extension_shadow_at_by_txid",
+                            {},
+                        ).pop(txid, None)
                         save_state(state)
                         actions.append("sell_fill_already_processed")
                         log_event(
@@ -4820,6 +5047,10 @@ def main():
 
                     sell_level = order.get("level")
                     del state["open_sell_orders"][txid]
+                    state.setdefault(
+                        "last_sell_extension_shadow_at_by_txid",
+                        {},
+                    ).pop(txid, None)
                     state["last_sell_price"] = sell_price
                     state["last_sell_at"] = cycle_id
                     if order.get("buy_source") == "llm_target":
@@ -4896,6 +5127,105 @@ def main():
                         age_minutes = (
                             now - placed_at
                         ).total_seconds() / 60
+
+                    shadow_extension_map = state.setdefault(
+                        "last_sell_extension_shadow_at_by_txid",
+                        {},
+                    )
+                    last_shadow_extension_at = parse_iso8601(
+                        shadow_extension_map.get(txid)
+                    )
+                    shadow_extension_cooldown_elapsed = (
+                        last_shadow_extension_at is None
+                        or sell_extension_shadow_cooldown_minutes <= 0
+                    )
+                    if last_shadow_extension_at is not None:
+                        elapsed_minutes = (
+                            now - last_shadow_extension_at
+                        ).total_seconds() / 60
+                        shadow_extension_cooldown_elapsed = (
+                            elapsed_minutes
+                            >= sell_extension_shadow_cooldown_minutes
+                        )
+
+                    if shadow_extension_cooldown_elapsed:
+                        extension_decision = sell_extension_shadow_decision(
+                            order,
+                            price,
+                            now,
+                            risk_context,
+                            age_minutes,
+                        )
+                        if extension_decision.get("approved"):
+                            proposed_sell_price = extension_decision[
+                                "proposed_sell_price"
+                            ]
+                            actions.append("sell_extension_shadow")
+                            shadow_extension_map[txid] = cycle_id
+                            save_state(state)
+                            log_event(
+                                "SELL_EXTENSION_SHADOW_DECISION",
+                                cycle_id=cycle_id,
+                                txid=txid,
+                                trade_id=order.get("trade_id") or txid,
+                                level=order.get("level"),
+                                buy_price=buy_price,
+                                current_sell_price=current_sell_price,
+                                proposed_sell_price=proposed_sell_price,
+                                current_price=price,
+                                volume=order.get("volume"),
+                                buy_source=order.get("buy_source"),
+                                age_minutes=age_minutes,
+                                extension_pct=extension_decision.get(
+                                    "extension_pct"
+                                ),
+                                additional_gross_pnl=extension_decision.get(
+                                    "additional_gross_pnl"
+                                ),
+                                current_gross_pnl=extension_decision.get(
+                                    "current_gross_pnl"
+                                ),
+                                proposed_gross_pnl=extension_decision.get(
+                                    "proposed_gross_pnl"
+                                ),
+                                reason=extension_decision.get("reason"),
+                                sell_extension_shadow_cooldown_minutes=(
+                                    sell_extension_shadow_cooldown_minutes
+                                ),
+                                **sentiment_risk_fields,
+                            )
+                            log_trade_activity(
+                                "SELL_EXTENSION_SHADOW_DECISION",
+                                mode="shadow",
+                                cycle_id=cycle_id,
+                                txid=txid,
+                                trade_id=order.get("trade_id") or txid,
+                                level=order.get("level"),
+                                buy_price=buy_price,
+                                current_sell_price=current_sell_price,
+                                proposed_sell_price=proposed_sell_price,
+                                current_price=price,
+                                volume=order.get("volume"),
+                                buy_source=order.get("buy_source"),
+                                age_minutes=age_minutes,
+                                extension_pct=extension_decision.get(
+                                    "extension_pct"
+                                ),
+                                additional_gross_pnl=extension_decision.get(
+                                    "additional_gross_pnl"
+                                ),
+                                current_gross_pnl=extension_decision.get(
+                                    "current_gross_pnl"
+                                ),
+                                proposed_gross_pnl=extension_decision.get(
+                                    "proposed_gross_pnl"
+                                ),
+                                reason=extension_decision.get("reason"),
+                                sell_extension_shadow_cooldown_minutes=(
+                                    sell_extension_shadow_cooldown_minutes
+                                ),
+                                **sentiment_risk_fields,
+                            )
 
                     adjusted_profit_target = effective_sell_profit_target(
                         age_minutes=age_minutes,
@@ -4974,6 +5304,14 @@ def main():
                         "buy_source": order.get("buy_source"),
                         "trade_id": order.get("trade_id") or txid
                     }
+                    shadow_extension_map = state.setdefault(
+                        "last_sell_extension_shadow_at_by_txid",
+                        {},
+                    )
+                    if txid in shadow_extension_map:
+                        shadow_extension_map[new_txid] = shadow_extension_map.pop(
+                            txid
+                        )
                     del state["open_sell_orders"][txid]
                     save_state(state)
                     actions.append("sell_repriced")
@@ -5012,6 +5350,10 @@ def main():
                 if status in ("canceled", "expired"):
                     sell_level = order.get("level")
                     del state["open_sell_orders"][txid]
+                    state.setdefault(
+                        "last_sell_extension_shadow_at_by_txid",
+                        {},
+                    ).pop(txid, None)
                     save_state(state)
                     actions.append(f"sell_{status}")
 
