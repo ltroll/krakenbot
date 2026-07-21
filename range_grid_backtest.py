@@ -507,7 +507,61 @@ def allow_above_last_sell_for_candidate(config, buy_source, weather_report):
         return False
     if weather_leveling_blocks_high_band_bypass(config, weather_report):
         return False
-    return weather_high_anchor_tailwind(weather_report)
+    if not weather_high_anchor_tailwind(weather_report):
+        return False
+    if not strategy_bool(
+        config,
+        "high_band_breakout_bypass_quality_gate_enabled",
+        False,
+    ):
+        return True
+
+    risk_context = weather_report.get("_risk_context") or {}
+    market_opportunity = weather_market_opportunity(weather_report)
+    phase = str(market_opportunity.get("cycle_phase") or "").strip().lower()
+    breakout_score = safe_float(risk_context.get("breakout_score")) or 0.0
+    rebound_score = safe_float(risk_context.get("rebound_score")) or 0.0
+    exit_pressure_score = safe_float(
+        market_opportunity.get("exit_pressure_score")
+    )
+    hold_through_score = safe_float(
+        market_opportunity.get("hold_through_score")
+    )
+    exit_pressure_score = (
+        1.0 if exit_pressure_score is None else exit_pressure_score
+    )
+    hold_through_score = 0.0 if hold_through_score is None else hold_through_score
+
+    if exit_pressure_score > strategy_float(
+        config,
+        "high_band_breakout_bypass_max_exit_pressure_score",
+        0.60,
+    ):
+        return False
+    if hold_through_score < strategy_float(
+        config,
+        "high_band_breakout_bypass_min_hold_through_score",
+        0.50,
+    ):
+        return False
+    if phase == "momentum_ride" and hold_through_score < strategy_float(
+        config,
+        "high_band_breakout_bypass_momentum_min_hold_through_score",
+        0.58,
+    ):
+        return False
+    return (
+        breakout_score >= strategy_float(
+            config,
+            "high_band_breakout_bypass_min_breakout_score",
+            0.62,
+        )
+        or rebound_score >= strategy_float(
+            config,
+            "high_band_breakout_bypass_min_rebound_score",
+            0.68,
+        )
+    )
 
 
 def sentiment_risk_event_fields(signal):
@@ -3505,7 +3559,10 @@ def evaluate_candidate(snapshot, candidate, price):
         and not allow_above_last_sell_for_candidate(
             config,
             buy_source,
-            weather_report,
+            {
+                **weather_report,
+                "_risk_context": risk_context,
+            },
         )
         and last_sell_price is not None
         and buy_above_last_sell_guard_active(

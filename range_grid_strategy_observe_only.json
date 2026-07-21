@@ -39,6 +39,20 @@
   "prevent_buy_above_last_sell": true,
   "buy_after_sell_discount_pct": 0.001,
   "llm_buy_cooldown_minutes_after_sell": 30,
+  "buy_cooldown_after_sell_fill_minutes": 20,
+  "buy_cooldown_after_sell_fill_high_band_minutes": 45,
+  "buy_cooldown_after_sell_fill_low_bypass": true,
+  "buy_cooldown_after_sell_fill_weather_bypass": true,
+  "buy_cooldown_after_sell_fill_weather_min_rebound_confirmation": 0.55,
+  "buy_cooldown_after_sell_fill_weather_min_hold_through": 0.5,
+  "buy_cooldown_after_sell_fill_weather_max_exit_pressure": 0.4,
+  "buy_cooldown_after_sell_fill_minutes_by_source": {
+    "range_low": 0,
+    "range_mean": 20,
+    "range_median": 20,
+    "range_high_band": 45,
+    "llm_target": 20
+  },
   "sentiment_defensive_threshold": 0.03,
   "sentiment_risk_on_threshold": 0.12,
   "sentiment_defensive_size_multiplier": 0.65,
@@ -60,5 +74,11 @@
   "max_consecutive_private_api_failures": 5,
   "order_tracker_symbol": "BTCUSD",
   "order_tracker_timeout_seconds": 5,
-  "order_tracker_checkin_timeout_seconds": 3
+  "order_tracker_checkin_timeout_seconds": 3,
+  "high_band_breakout_bypass_quality_gate_enabled": true,
+  "high_band_breakout_bypass_min_breakout_score": 0.62,
+  "high_band_breakout_bypass_min_rebound_score": 0.68,
+  "high_band_breakout_bypass_max_exit_pressure_score": 0.6,
+  "high_band_breakout_bypass_min_hold_through_score": 0.5,
+  "high_band_breakout_bypass_momentum_min_hold_through_score": 0.58
 }
