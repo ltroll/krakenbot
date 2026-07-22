@@ -8,17 +8,13 @@ import os
 import socket
 import subprocess
 import time
-from datetime import timedelta
 from pathlib import Path
-
-import log_viewer
 
 WIDTH = 128
 HEIGHT = 32
 LABEL_Y = 0
 VALUE_Y = 16
 REFRESH_SECONDS = float(os.getenv("BOT_DISPLAY_REFRESH_SECONDS", "5"))
-ERROR_WINDOW_SECONDS = int(os.getenv("BOT_DISPLAY_ERROR_WINDOW_SECONDS", "3600"))
 
 
 def split_csv(value: str | None) -> list[str]:
@@ -48,41 +44,6 @@ def getenv(name: str, default: str = "") -> str:
     return os.getenv(name) or LOCAL_ENV.get(name, default)
 
 
-def log_file_candidates() -> list[Path]:
-    configured = split_csv(getenv("BOT_DISPLAY_LOG_FILES"))
-    if configured:
-        return [Path(path) for path in configured]
-
-    env_names = (
-        "STATS_TREND_TRADE_LOG_FILE",
-        "RANGE_GRID_TRADE_LOG_FILE",
-        "SENTIMENT_TRADE_LOG_FILE",
-        "TRADE_LOG_FILE",
-    )
-    paths = [Path(value) for name in env_names if (value := getenv(name))]
-    paths.extend(Path(".").glob("*trade_log*.jsonl"))
-    paths.extend(Path(".").glob("trade_log.jsonl"))
-
-    seen = set()
-    unique_paths = []
-    for path in paths:
-        if path in seen:
-            continue
-        seen.add(path)
-        unique_paths.append(path)
-    return unique_paths
-
-
-def load_logs_for_display() -> list[dict[str, object]]:
-    logs = []
-    for path in log_file_candidates():
-        try:
-            logs.extend(log_viewer.load_logs(log_file=str(path)))
-        except FileNotFoundError:
-            continue
-    return logs
-
-
 def service_state(service: str) -> str:
     try:
         result = subprocess.run(
@@ -104,6 +65,10 @@ def service_status_text() -> str:
     return "up" if all(service_state(service) == "active" for service in services) else "down"
 
 
+def hostname_text() -> str:
+    return socket.gethostname().split(".", 1)[0] or "unknown"
+
+
 def ip_address_text() -> str:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -122,47 +87,6 @@ def ip_address_text() -> str:
             return "unknown"
         parts = result.stdout.split()
         return parts[0] if parts else "unknown"
-
-
-def bot_name_text() -> str:
-    user_agent = getenv("ORDER_TRACKER_USER_AGENT")
-    if not user_agent:
-        return "unknown"
-    return user_agent.split("/", 1)[0]
-
-
-def uptime_text() -> str:
-    try:
-        uptime_seconds = float(Path("/proc/uptime").read_text(encoding="utf-8").split()[0])
-    except Exception:
-        return "unknown"
-
-    days, remainder = divmod(int(uptime_seconds), 86400)
-    hours, remainder = divmod(remainder, 3600)
-    minutes = remainder // 60
-    if days:
-        return f"{days}d {hours}h"
-    if hours:
-        return f"{hours}h {minutes}m"
-    return f"{minutes} minutes"
-
-
-def health_summary() -> dict[str, object]:
-    return log_viewer.summarize_health(
-        load_logs_for_display(),
-        error_window=timedelta(seconds=ERROR_WINDOW_SECONDS),
-    )
-
-
-def last_event_age_text(summary: dict[str, object]) -> str:
-    age_minutes = summary.get("last_event_minutes")
-    if age_minutes is None:
-        return "none"
-    return f"{age_minutes} minutes"
-
-
-def recent_error_count_text(summary: dict[str, object]) -> str:
-    return str(summary.get("errors", 0))
 
 
 def text_width(font, text: str) -> float:
@@ -207,17 +131,13 @@ def load_font(image_font):
 
 
 def screen_lines(page_index: int) -> list[str]:
-    summary = health_summary()
     pages = [
-        ("status:", service_status_text()),
-        ("last event:", last_event_age_text(summary)),
-        ("errors:", recent_error_count_text(summary)),
-        ("IP Address:", ip_address_text()),
-        ("Bot Name:", bot_name_text()),
-        ("Uptime:", uptime_text()),
+        ("Hostname:", hostname_text),
+        ("IP Address:", ip_address_text),
+        ("Bot Status:", service_status_text),
     ]
-    label, value = pages[page_index % len(pages)]
-    return [label, value]
+    label, value_provider = pages[page_index % len(pages)]
+    return [label, value_provider()]
 
 
 def render_stdout(once: bool, page_index: int = 0) -> None:

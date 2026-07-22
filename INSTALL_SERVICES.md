@@ -380,7 +380,6 @@ Group=<user>
 WorkingDirectory=/home/<user>/tradingbot/krakenbot
 EnvironmentFile=/home/<user>/tradingbot/krakenbot/.env
 Environment=BOT_DISPLAY_SERVICES=kraken-range-grid.service,kraken-sentiment.service,kraken-llm-target.service
-Environment=BOT_DISPLAY_LOG_FILES=trade_log.jsonl,sentiment_trade_log.jsonl,llm_target_trade_log.jsonl,stats_trend_trade_log.jsonl
 ExecStart=/home/<user>/tradingbot/krakenbot/.venv/bin/python /home/<user>/tradingbot/krakenbot/bot_status_display.py
 Restart=always
 RestartSec=10
@@ -402,18 +401,8 @@ sudo systemctl start kraken-status-display.service
 The display rotates through simple screens:
 
 ```text
-status:
-up
-```
-
-```text
-last event:
-12 minutes
-```
-
-```text
-errors:
-0
+Hostname:
+kraken-host
 ```
 
 ```text
@@ -422,19 +411,12 @@ IP Address:
 ```
 
 ```text
-Bot Name:
-range-grid-bot
+Bot Status:
+up
 ```
 
-```text
-Uptime:
-3d 4h
-```
-
-`status` is `up` only when every service listed in `BOT_DISPLAY_SERVICES` is
-active. `last event` is the age of the newest JSONL log timestamp. `errors` is
-the number of error events in the last hour. `Bot Name` is read from the
-`ORDER_TRACKER_USER_AGENT` environment variable.
+`Bot Status` is `up` only when every service listed in `BOT_DISPLAY_SERVICES`
+is active. The status display does not read trade logs.
 
 ## 7. Common Operations
 
