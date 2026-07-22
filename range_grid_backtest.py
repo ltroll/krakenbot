@@ -16,7 +16,10 @@ from dotenv import load_dotenv
 from signal_normalizer import normalize_signal_payload
 
 
-ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+ENV_FILE = (
+    os.getenv("RANGE_GRID_ENV_FILE")
+    or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+)
 load_dotenv(dotenv_path=ENV_FILE, override=True)
 
 SNAPSHOT_LOG_FILE = os.getenv(

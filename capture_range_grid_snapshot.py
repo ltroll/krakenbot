@@ -16,7 +16,10 @@ from dotenv import load_dotenv
 from signal_normalizer import normalize_signal_payload
 
 
-ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+ENV_FILE = (
+    os.getenv("RANGE_GRID_ENV_FILE")
+    or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+)
 load_dotenv(dotenv_path=ENV_FILE, override=True)
 
 CONFIG_FILE = (
@@ -47,6 +50,16 @@ KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
 KRAKEN_ORDERBOOK_URL = os.getenv("KRAKEN_ORDERBOOK_URL")
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
 SIGNAL_FILE = os.getenv("SIGNAL_FILE")
+SIGNAL_ASSET_ID = (
+    os.getenv("SIGNAL_ASSET_ID")
+    or os.getenv("ASSET_ID")
+    or ""
+).upper()
+ASSET_BALANCE_KEYS = [
+    key.strip()
+    for key in os.getenv("RANGE_GRID_ASSET_BALANCE_KEYS", "").split(",")
+    if key.strip()
+]
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
 
 SNAPSHOT_LOG_FILE = os.getenv(
@@ -271,6 +284,63 @@ def safe_float(value):
         return float(value)
     except Exception:
         return None
+
+
+def infer_asset_id_from_pair(pair):
+    normalized = str(pair or "").upper()
+    if "ETH" in normalized or "XETH" in normalized:
+        return "ETH"
+    if "SOL" in normalized:
+        return "SOL"
+    if "XBT" in normalized or "BTC" in normalized:
+        return "BTC"
+    return normalized
+
+
+def configured_asset_id():
+    return SIGNAL_ASSET_ID or infer_asset_id_from_pair(KRAKEN_PAIR)
+
+
+def default_balance_keys_for_asset(asset_id):
+    asset_id = str(asset_id or "").upper()
+    if asset_id == "BTC":
+        return ["XXBT", "XBT", "BTC"]
+    if asset_id == "ETH":
+        return ["XETH", "ETH"]
+    if asset_id == "SOL":
+        return ["SOL"]
+    return [asset_id] if asset_id else []
+
+
+def asset_balance_keys():
+    return ASSET_BALANCE_KEYS or default_balance_keys_for_asset(
+        configured_asset_id()
+    )
+
+
+def normalized_kraken_pair(value):
+    return (
+        str(value or "")
+        .upper()
+        .replace("/", "")
+        .replace("-", "")
+    )
+
+
+def kraken_pair_matches(pair):
+    normalized_pair = normalized_kraken_pair(pair)
+    configured_pair = normalized_kraken_pair(KRAKEN_PAIR)
+    if normalized_pair == configured_pair:
+        return True
+
+    asset_id = configured_asset_id()
+    if asset_id == "BTC":
+        return (
+            ("XBT" in normalized_pair or "BTC" in normalized_pair)
+            and "USD" in normalized_pair
+        )
+
+    return asset_id and asset_id in normalized_pair and "USD" in normalized_pair
 
 
 def parse_strategy_modes(raw_value):
@@ -540,23 +610,27 @@ def private_balance_snapshot():
         else {}
     )
     usd_balance = None
-    btc_balance = None
+    asset_balance = None
+    balance_keys = asset_balance_keys()
     if isinstance(balance_result, dict):
         for key in ("ZUSD", "USD"):
             usd_balance = safe_float(balance_result.get(key))
             if usd_balance is not None:
                 break
-        for key in ("XXBT", "XBT", "BTC"):
-            btc_balance = safe_float(balance_result.get(key))
-            if btc_balance is not None:
+        for key in balance_keys:
+            asset_balance = safe_float(balance_result.get(key))
+            if asset_balance is not None:
                 break
 
     return {
         "source": f"{KRAKEN_API_URL.rstrip('/')}/0/private/Balance",
         "ok": result["ok"],
         "error": result["error"],
+        "asset_id": configured_asset_id(),
+        "asset_balance_keys": balance_keys,
         "usd_balance": usd_balance,
-        "btc_balance": btc_balance,
+        "asset_balance": asset_balance,
+        "btc_balance": asset_balance if configured_asset_id() == "BTC" else None,
         "payload": result["payload"],
     }
 
@@ -573,7 +647,8 @@ def private_open_orders_snapshot():
     )
     open_orders = open_orders_result.get("open", {}) if isinstance(open_orders_result, dict) else {}
     open_order_count = 0
-    reserved_sell_volume_btc = 0.0
+    pair_open_order_count = 0
+    reserved_sell_volume_asset = 0.0
     reserved_buy_notional_usd = 0.0
 
     if isinstance(open_orders, dict):
@@ -583,10 +658,15 @@ def private_open_orders_snapshot():
                 continue
             descr = order.get("descr", {})
             order_type = descr.get("type")
+            pair = descr.get("pair")
+            if pair and not kraken_pair_matches(pair):
+                continue
+
+            pair_open_order_count += 1
             volume = safe_float(order.get("vol"))
             price = safe_float(descr.get("price"))
             if order_type == "sell" and volume is not None:
-                reserved_sell_volume_btc += volume
+                reserved_sell_volume_asset += volume
             if order_type == "buy" and volume is not None and price is not None:
                 reserved_buy_notional_usd += volume * price
 
@@ -595,7 +675,14 @@ def private_open_orders_snapshot():
         "ok": result["ok"],
         "error": result["error"],
         "open_order_count": open_order_count,
-        "reserved_sell_volume_btc": round(reserved_sell_volume_btc, 8),
+        "pair_open_order_count": pair_open_order_count,
+        "asset_id": configured_asset_id(),
+        "reserved_sell_volume_asset": round(reserved_sell_volume_asset, 8),
+        "reserved_sell_volume_btc": (
+            round(reserved_sell_volume_asset, 8)
+            if configured_asset_id() == "BTC"
+            else 0.0
+        ),
         "reserved_buy_notional_usd": round(reserved_buy_notional_usd, 8),
         "payload": result["payload"],
     }
@@ -709,6 +796,7 @@ def build_snapshot():
         "captured_at": captured_at,
         "hostname": socket.gethostname(),
         "pair": KRAKEN_PAIR,
+        "asset_id": configured_asset_id(),
         "snapshot_kind": "range_grid_backtest_input",
         "sources": {
             "signal_source": signal_source,
@@ -763,7 +851,10 @@ def build_snapshot():
         "private_balance": {
             "ok": private_balance["ok"],
             "error": private_balance["error"],
+            "asset_id": private_balance["asset_id"],
+            "asset_balance_keys": private_balance["asset_balance_keys"],
             "usd_balance": private_balance["usd_balance"],
+            "asset_balance": private_balance["asset_balance"],
             "btc_balance": private_balance["btc_balance"],
             "payload": private_balance["payload"],
         },
@@ -771,6 +862,13 @@ def build_snapshot():
             "ok": private_open_orders["ok"],
             "error": private_open_orders["error"],
             "open_order_count": private_open_orders["open_order_count"],
+            "pair_open_order_count": (
+                private_open_orders["pair_open_order_count"]
+            ),
+            "asset_id": private_open_orders["asset_id"],
+            "reserved_sell_volume_asset": (
+                private_open_orders["reserved_sell_volume_asset"]
+            ),
             "reserved_sell_volume_btc": (
                 private_open_orders["reserved_sell_volume_btc"]
             ),

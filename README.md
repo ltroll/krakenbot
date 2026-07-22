@@ -469,6 +469,49 @@ RANGE_GRID_ACTIVITY_LOG_FILE=http://pibot.local/bot/range_grid_activity.jsonl
 RANGE_GRID_ACTIVITY_LOG_ROTATE_DAILY=false
 ```
 
+## ETH/SOL Range-Grid Data Collection
+
+The range-grid snapshot collector can be pointed at a non-BTC asset before the
+live trading bot is generalized. This is intended for isolated backtest
+directories, with separate state/log/output files per asset.
+
+Example ETH collection:
+
+```bash
+RANGE_GRID_ENV_FILE=env.range-grid-eth-backtest python capture_range_grid_snapshot.py
+```
+
+Example SOL collection:
+
+```bash
+RANGE_GRID_ENV_FILE=env.range-grid-sol-backtest python capture_range_grid_snapshot.py
+```
+
+The asset-specific env files set:
+
+- `SIGNAL_ASSET_ID`
+- `KRAKEN_PAIR`
+- `RANGE_GRID_ASSET_BALANCE_KEYS`
+- asset-scoped snapshot, output, ranked CSV, and anchor-winner files
+
+The collector now emits asset-neutral private fields:
+
+- `private_balance.asset_balance`
+- `private_balance.asset_balance_keys`
+- `private_open_orders.reserved_sell_volume_asset`
+- `private_open_orders.pair_open_order_count`
+
+BTC compatibility fields such as `btc_balance` and
+`reserved_sell_volume_btc` remain for existing BTC reports.
+
+After a day of collection, run the corresponding backtest with the same env
+file:
+
+```bash
+RANGE_GRID_ENV_FILE=env.range-grid-eth-backtest python range_grid_backtest.py
+RANGE_GRID_ENV_FILE=env.range-grid-sol-backtest python range_grid_backtest.py
+```
+
 ## Viewing logs
 
 [`log_viewer.py`](/C:/Users/bgert/krakenbot/log_viewer.py) is a simple JSONL log inspector.
