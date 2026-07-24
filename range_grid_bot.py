@@ -768,6 +768,18 @@ risk_context_high_band_min_rebound_score = profile_float(
     "risk_context_high_band_min_rebound_score",
     0.50
 )
+risk_context_high_band_neutral_phase_guard_enabled = profile_bool(
+    "risk_context_high_band_neutral_phase_guard_enabled",
+    False
+)
+risk_context_high_band_neutral_min_breakout_score = profile_float(
+    "risk_context_high_band_neutral_min_breakout_score",
+    0.65
+)
+risk_context_high_band_neutral_min_rebound_score = profile_float(
+    "risk_context_high_band_neutral_min_rebound_score",
+    0.70
+)
 risk_context_high_band_max_market_risk_score = profile_float(
     "risk_context_high_band_max_market_risk_score",
     0.35
@@ -3925,7 +3937,8 @@ def optional_float(value):
 def risk_context_high_band_guard(
     config,
     risk_context,
-    fallback_config=None
+    fallback_config=None,
+    weather_report=None
 ):
     if not strategy_bool_with_fallback(
         config,
@@ -3946,6 +3959,12 @@ def risk_context_high_band_guard(
     buy_aggression = optional_float(risk_context.get("buy_aggression_score"))
     rebound = optional_float(risk_context.get("rebound_score"))
     breakout = optional_float(risk_context.get("breakout_score"))
+    if not isinstance(weather_report, dict):
+        weather_report = weather_report_payload(risk_context)
+    market_opportunity = weather_report.get("market_opportunity")
+    if not isinstance(market_opportunity, dict):
+        market_opportunity = {}
+    opportunity_phase = market_opportunity.get("cycle_phase")
 
     max_market_risk = strategy_float_with_fallback(
         config,
@@ -3971,17 +3990,43 @@ def risk_context_high_band_guard(
         "risk_context_high_band_min_breakout_score",
         0.45
     )
+    neutral_phase_guard_enabled = strategy_bool_with_fallback(
+        config,
+        fallback_config,
+        "risk_context_high_band_neutral_phase_guard_enabled",
+        False
+    )
+    neutral_min_breakout = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "risk_context_high_band_neutral_min_breakout_score",
+        0.65
+    )
+    neutral_min_rebound = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "risk_context_high_band_neutral_min_rebound_score",
+        0.70
+    )
 
     details = {
         "risk_context_high_band_max_market_risk_score": max_market_risk,
         "risk_context_high_band_min_buy_aggression_score": min_buy_aggression,
         "risk_context_high_band_min_rebound_score": min_rebound,
         "risk_context_high_band_min_breakout_score": min_breakout,
+        "risk_context_high_band_neutral_phase_guard_enabled": (
+            neutral_phase_guard_enabled
+        ),
+        "risk_context_high_band_neutral_min_rebound_score": neutral_min_rebound,
+        "risk_context_high_band_neutral_min_breakout_score": (
+            neutral_min_breakout
+        ),
         "sentiment_market_risk_score": market_risk,
         "sentiment_buy_aggression_score": buy_aggression,
         "sentiment_rebound_score": rebound,
         "sentiment_breakout_score": breakout,
         "sentiment_hard_safety_flags": flags,
+        "weather_opportunity_phase": opportunity_phase,
     }
 
     if flags:
@@ -4010,6 +4055,17 @@ def risk_context_high_band_guard(
         return {
             "allowed": False,
             "reason": "risk_context_high_band_confirmation_low",
+            **details,
+        }
+    if (
+        neutral_phase_guard_enabled
+        and opportunity_phase == "neutral"
+        and (rebound is None or rebound < neutral_min_rebound)
+        and (breakout is None or breakout < neutral_min_breakout)
+    ):
+        return {
+            "allowed": False,
+            "reason": "risk_context_high_band_neutral_confirmation_low",
             **details,
         }
 
@@ -4921,6 +4977,15 @@ def main():
         ),
         risk_context_high_band_min_rebound_score=(
             risk_context_high_band_min_rebound_score
+        ),
+        risk_context_high_band_neutral_phase_guard_enabled=(
+            risk_context_high_band_neutral_phase_guard_enabled
+        ),
+        risk_context_high_band_neutral_min_breakout_score=(
+            risk_context_high_band_neutral_min_breakout_score
+        ),
+        risk_context_high_band_neutral_min_rebound_score=(
+            risk_context_high_band_neutral_min_rebound_score
         ),
         risk_context_high_band_max_market_risk_score=(
             risk_context_high_band_max_market_risk_score
@@ -6670,7 +6735,8 @@ def main():
                         high_band_guard = risk_context_high_band_guard(
                             route_config,
                             sentiment_payload.get("risk_context"),
-                            strategy_config
+                            strategy_config,
+                            weather_report
                         )
                         if not high_band_guard["allowed"]:
                             skip_reason = high_band_guard["reason"]
@@ -6831,6 +6897,21 @@ def main():
                             risk_context_high_band_min_breakout_score=(
                                 high_band_guard.get(
                                     "risk_context_high_band_min_breakout_score"
+                                )
+                            ),
+                            risk_context_high_band_neutral_phase_guard_enabled=(
+                                high_band_guard.get(
+                                    "risk_context_high_band_neutral_phase_guard_enabled"
+                                )
+                            ),
+                            risk_context_high_band_neutral_min_rebound_score=(
+                                high_band_guard.get(
+                                    "risk_context_high_band_neutral_min_rebound_score"
+                                )
+                            ),
+                            risk_context_high_band_neutral_min_breakout_score=(
+                                high_band_guard.get(
+                                    "risk_context_high_band_neutral_min_breakout_score"
                                 )
                             ),
                             operating_mode=operating_mode,

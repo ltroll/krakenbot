@@ -141,6 +141,8 @@ def validate_strategy_config(strategy_config):
         "risk_context_high_band_min_buy_aggression_score",
         "risk_context_high_band_min_breakout_score",
         "risk_context_high_band_min_rebound_score",
+        "risk_context_high_band_neutral_min_breakout_score",
+        "risk_context_high_band_neutral_min_rebound_score",
         "risk_context_high_band_max_market_risk_score",
         "risk_context_position_size_min_multiplier",
         "risk_context_position_size_max_multiplier",

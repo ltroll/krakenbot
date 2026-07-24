@@ -3073,12 +3073,18 @@ def flow_adjustment(config, flow_pressure, buy_source):
     return {"size_multiplier": 1.0, "block_buy": False, "reason": None}
 
 
-def risk_context_high_band_guard(config, risk_context):
+def risk_context_high_band_guard(config, risk_context, weather_report=None):
     if not strategy_bool(config, "risk_context_high_band_guard_enabled", False):
         return {"allowed": True, "reason": None}
 
     if not isinstance(risk_context, dict):
         risk_context = {}
+    if not isinstance(weather_report, dict):
+        weather_report = weather_report_payload(risk_context)
+    market_opportunity = weather_report.get("market_opportunity")
+    if not isinstance(market_opportunity, dict):
+        market_opportunity = {}
+    opportunity_phase = market_opportunity.get("cycle_phase")
 
     flags = risk_context.get("hard_safety_flags")
     if not isinstance(flags, list):
@@ -3109,6 +3115,21 @@ def risk_context_high_band_guard(config, risk_context):
         "risk_context_high_band_min_breakout_score",
         0.50,
     )
+    neutral_phase_guard_enabled = strategy_bool(
+        config,
+        "risk_context_high_band_neutral_phase_guard_enabled",
+        False,
+    )
+    neutral_min_breakout = strategy_float(
+        config,
+        "risk_context_high_band_neutral_min_breakout_score",
+        0.65,
+    )
+    neutral_min_rebound = strategy_float(
+        config,
+        "risk_context_high_band_neutral_min_rebound_score",
+        0.70,
+    )
 
     if flags:
         return {
@@ -3133,6 +3154,16 @@ def risk_context_high_band_guard(config, risk_context):
         return {
             "allowed": False,
             "reason": "risk_context_high_band_confirmation_low",
+        }
+    if (
+        neutral_phase_guard_enabled
+        and opportunity_phase == "neutral"
+        and (rebound is None or rebound < neutral_min_rebound)
+        and (breakout is None or breakout < neutral_min_breakout)
+    ):
+        return {
+            "allowed": False,
+            "reason": "risk_context_high_band_neutral_confirmation_low",
         }
 
     return {"allowed": True, "reason": None}
@@ -3649,6 +3680,7 @@ def evaluate_candidate(snapshot, candidate, price):
         high_band_guard = risk_context_high_band_guard(
             config,
             risk_context,
+            weather_report,
         )
         if not high_band_guard["allowed"]:
             return False, high_band_guard["reason"]
