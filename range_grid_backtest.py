@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import bisect
 import copy
 import csv
 import glob
@@ -60,6 +61,10 @@ BACKTEST_RECENT_LIMIT = int(os.getenv("RANGE_GRID_BACKTEST_RECENT_LIMIT", "25"))
 BACKTEST_POTENTIAL_MAX_HOLD_HOURS = float(
     os.getenv("RANGE_GRID_BACKTEST_POTENTIAL_MAX_HOLD_HOURS", "24")
 )
+BACKTEST_INCLUDE_STRATEGY_DETAILS = os.getenv(
+    "RANGE_GRID_BACKTEST_INCLUDE_STRATEGY_DETAILS",
+    "true"
+).strip().lower() in ("1", "true", "yes", "on")
 BACKTEST_STRATEGY_SET_FILE = os.getenv(
     "RANGE_GRID_BACKTEST_STRATEGY_SET_FILE",
     ""
@@ -113,6 +118,19 @@ def parse_args(argv=None):
         type=float,
         default=None,
         help="Override the backtest lookback window in hours.",
+    )
+    parser.add_argument(
+        "--strategy-summary-only",
+        action="store_true",
+        help=(
+            "Write strategy CSV/ranked output without bulky per-strategy "
+            "details in the JSON report."
+        ),
+    )
+    parser.add_argument(
+        "--include-strategy-details",
+        action="store_true",
+        help="Force full per-strategy details in the JSON report.",
     )
     return parser.parse_args(argv)
 
@@ -346,7 +364,7 @@ def strategy_modes_from_payload(payload):
 
 
 def snapshot_with_strategy(snapshot, strategy_label, strategy_path, strategy_payload):
-    cloned = copy.deepcopy(snapshot)
+    cloned = dict(snapshot)
     cloned["strategy_profile"] = {
         "path": strategy_path,
         "label": strategy_label,
@@ -355,6 +373,8 @@ def snapshot_with_strategy(snapshot, strategy_label, strategy_path, strategy_pay
     context = cloned.get("strategy_context")
     if not isinstance(context, dict):
         context = {}
+    else:
+        context = dict(context)
     context["grid_anchor"] = strategy_payload.get("grid_anchor")
     context["strategy_modes"] = strategy_modes_from_payload(strategy_payload)
     cloned["strategy_context"] = context
@@ -1976,7 +1996,22 @@ def infer_live_only_blockers(snapshot, event):
     return list(dict.fromkeys(blockers))
 
 
-def simulate_missed_opportunity(snapshot, event, snapshots):
+def build_snapshot_price_index(snapshots):
+    indexed = []
+    for snapshot in snapshots or []:
+        ts = snapshot_timestamp(snapshot)
+        price = snapshot_price(snapshot)
+        if ts is None or price is None:
+            continue
+        indexed.append((ts, price))
+    indexed.sort(key=lambda item: item[0])
+    return {
+        "times": [item[0] for item in indexed],
+        "prices": [item[1] for item in indexed],
+    }
+
+
+def simulate_missed_opportunity(snapshot, event, snapshots, snapshot_price_index=None):
     entry_time = parse_iso8601(event.get("captured_at"))
     entry_price = safe_float(event.get("level")) or safe_float(event.get("price"))
     if entry_time is None or entry_price is None or entry_price <= 0:
@@ -1990,15 +2025,16 @@ def simulate_missed_opportunity(snapshot, event, snapshots):
     end_return_pct = None
     take_profit_reached_at = None
 
-    for future_snapshot in snapshots:
-        future_time = snapshot_timestamp(future_snapshot)
-        if future_time is None or future_time <= entry_time:
-            continue
-        if future_time > hold_end:
-            break
-        future_price = snapshot_price(future_snapshot)
-        if future_price is None:
-            continue
+    if snapshot_price_index is None:
+        snapshot_price_index = build_snapshot_price_index(snapshots)
+    times = snapshot_price_index.get("times") or []
+    prices = snapshot_price_index.get("prices") or []
+    start_idx = bisect.bisect_right(times, entry_time)
+    end_idx = bisect.bisect_right(times, hold_end)
+
+    for idx in range(start_idx, end_idx):
+        future_time = times[idx]
+        future_price = prices[idx]
         return_pct = ((future_price - entry_price) / entry_price) * 100.0
         max_runup_pct = max(max_runup_pct, return_pct)
         max_drawdown_pct = min(max_drawdown_pct, return_pct)
@@ -2023,6 +2059,7 @@ def summarize_potential_from_approved_events(replay, snapshots):
         captured_at = snapshot.get("captured_at")
         if captured_at:
             snapshot_by_timestamp[captured_at] = snapshot
+    snapshot_price_index = build_snapshot_price_index(snapshots)
 
     potential_results = []
     potential_results_by_phase = defaultdict(list)
@@ -2035,7 +2072,12 @@ def summarize_potential_from_approved_events(replay, snapshots):
         snapshot = snapshot_by_timestamp.get(event.get("captured_at"))
         if not snapshot:
             continue
-        potential = simulate_missed_opportunity(snapshot, event, snapshots or [])
+        potential = simulate_missed_opportunity(
+            snapshot,
+            event,
+            snapshots or [],
+            snapshot_price_index,
+        )
         if potential:
             event_time = parse_iso8601(event.get("captured_at"))
             config = strategy_payload(snapshot)
@@ -2322,7 +2364,11 @@ def summarize_potential_from_approved_events(replay, snapshots):
     }
 
 
-def build_strategy_comparison_rows(snapshots, strategy_set_file):
+def build_strategy_comparison_rows(
+    snapshots,
+    strategy_set_file,
+    include_details=BACKTEST_INCLUDE_STRATEGY_DETAILS,
+):
     entries = [
         parsed
         for parsed in (
@@ -2558,15 +2604,19 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
             ),
         }
         rows.append(row)
-        detailed.append({
-            "strategy_label": entry["label"],
-            "strategy_file": strategy_path,
-            "strategy_payload": strategy_payload,
-            "replay_summary": summary,
-            "potential_summary": potential,
-            "recent_replay_events": replay.get("recent_replay_events", []),
-            "recent_approved_events": replay.get("recent_approved_events", []),
-        })
+        if include_details:
+            detailed.append({
+                "strategy_label": entry["label"],
+                "strategy_file": strategy_path,
+                "strategy_payload": strategy_payload,
+                "replay_summary": summary,
+                "potential_summary": potential,
+                "recent_replay_events": replay.get("recent_replay_events", []),
+                "recent_approved_events": replay.get(
+                    "recent_approved_events",
+                    [],
+                ),
+            })
 
     rows.sort(
         key=lambda row: (
@@ -2581,6 +2631,7 @@ def build_strategy_comparison_rows(snapshots, strategy_set_file):
         "count": len(rows),
         "rows": rows,
         "details": detailed,
+        "details_included": bool(include_details),
     }
 
 
@@ -4943,6 +4994,7 @@ def summarize_missed_approved_opportunities(replay, actual, snapshots=None):
         captured_at = snapshot.get("captured_at")
         if captured_at:
             snapshot_by_timestamp[captured_at] = snapshot
+    snapshot_price_index = build_snapshot_price_index(snapshots)
     approved_events = replay.get("approved_events") or []
     blocker_counter = Counter()
     potential_results = []
@@ -4956,7 +5008,12 @@ def summarize_missed_approved_opportunities(replay, actual, snapshots=None):
         for blocker in blockers:
             blocker_counter[blocker] += 1
         potential = (
-            simulate_missed_opportunity(snapshot, event, snapshots or [])
+            simulate_missed_opportunity(
+                snapshot,
+                event,
+                snapshots or [],
+                snapshot_price_index,
+            )
             if snapshot
             else None
         )
@@ -4986,7 +5043,12 @@ def summarize_missed_approved_opportunities(replay, actual, snapshots=None):
         snapshot = snapshot_by_timestamp.get(event.get("captured_at"))
         blockers = infer_live_only_blockers(snapshot, event) if snapshot else []
         potential = (
-            simulate_missed_opportunity(snapshot, event, snapshots or [])
+            simulate_missed_opportunity(
+                snapshot,
+                event,
+                snapshots or [],
+                snapshot_price_index,
+            )
             if snapshot
             else None
         )
@@ -5084,7 +5146,9 @@ def summarize_missed_approved_opportunities(replay, actual, snapshots=None):
     }
 
 
-def build_report(window_hours=None):
+def build_report(window_hours=None, include_strategy_details=None):
+    if include_strategy_details is None:
+        include_strategy_details = BACKTEST_INCLUDE_STRATEGY_DETAILS
     now = now_utc()
     effective_window_hours = (
         BACKTEST_WINDOW_HOURS
@@ -5124,6 +5188,7 @@ def build_report(window_hours=None):
         strategy_comparison = build_strategy_comparison_rows(
             snapshots,
             BACKTEST_STRATEGY_SET_FILE,
+            include_details=include_strategy_details,
         )
 
     report = {
@@ -5204,7 +5269,15 @@ def write_report(report):
 
 def main():
     args = parse_args()
-    report = build_report(window_hours=args.window_hours)
+    include_strategy_details = BACKTEST_INCLUDE_STRATEGY_DETAILS
+    if args.strategy_summary_only:
+        include_strategy_details = False
+    if args.include_strategy_details:
+        include_strategy_details = True
+    report = build_report(
+        window_hours=args.window_hours,
+        include_strategy_details=include_strategy_details,
+    )
     (
         archive_file,
         comparison_csv_file,
