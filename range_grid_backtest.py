@@ -2753,6 +2753,11 @@ def build_anchor_winners(
 ):
     ranked_rows = build_ranked_strategy_rows(comparison)
     details_by_file = strategy_detail_by_file(comparison)
+    payload_by_file = {
+        strategy_file: detail.get("strategy_payload")
+        for strategy_file, detail in details_by_file.items()
+        if detail.get("strategy_payload") is not None
+    }
     criteria = {
         "min_anchor_approved": max(0, int(min_anchor_approved)),
         "min_avg_end_return_pct": float(min_avg_end_return_pct),
@@ -2772,7 +2777,16 @@ def build_anchor_winners(
                 source_strategy_file,
                 strategy_dir,
             )
-            detail = details_by_file.get(source_strategy_file, {})
+            strategy_payload = payload_by_file.get(source_strategy_file)
+            strategy_payload_load_error = None
+            if strategy_payload is None and source_strategy_file:
+                try:
+                    _, strategy_payload = load_strategy_profile_from_file(
+                        source_strategy_file
+                    )
+                    payload_by_file[source_strategy_file] = strategy_payload
+                except Exception as exc:
+                    strategy_payload_load_error = str(exc)
             candidates.append({
                 "strategy_label": row.get("strategy_label"),
                 "strategy_file": strategy_file,
@@ -2800,7 +2814,8 @@ def build_anchor_winners(
                 "sentiment_control_mode": row.get("sentiment_control_mode"),
                 "eligible": not reasons,
                 "rejection_reasons": reasons,
-                "strategy_payload": detail.get("strategy_payload"),
+                "strategy_payload": strategy_payload,
+                "strategy_payload_load_error": strategy_payload_load_error,
             })
 
         selected = next((candidate for candidate in candidates if candidate["eligible"]), None)
