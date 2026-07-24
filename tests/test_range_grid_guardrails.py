@@ -36,6 +36,14 @@ class RangeGridGuardrailsTests(unittest.TestCase):
         })
         self.assertFalse(errors)
 
+    def test_validate_strategy_config_allows_zero_high_anchor_cap(self):
+        errors = guardrails.validate_strategy_config({
+            "grid_anchor": "low,high",
+            "operating_mode": "range_only",
+            "max_open_high_anchor_orders": 0,
+        })
+        self.assertFalse(errors)
+
     def test_validate_strategy_config_rejects_out_of_bounds_execution_threshold(self):
         errors = guardrails.validate_strategy_config({
             "grid_anchor": "low,high",

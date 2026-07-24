@@ -1449,6 +1449,36 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertTrue(approved)
         self.assertIsNone(reason)
 
+    def test_high_band_zero_open_order_cap_disables_cap(self):
+        open_sell_orders = [
+            {
+                "level": str(90.0 - index),
+                "buy_source": "range_high_band",
+                "placed_at": "2026-06-13T11:30:00+00:00",
+            }
+            for index in range(8)
+        ]
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            104.5,
+            action_recommendation="bullish_allowed",
+            strategy_modes=["high"],
+            strategy_overrides={
+                "prevent_buy_above_last_sell": False,
+                "max_open_high_anchor_orders": 0,
+            },
+            open_sell_orders=open_sell_orders,
+        )
+        candidate = {
+            "buy_source": "range_high_band",
+            "level": 104.5,
+        }
+
+        approved, reason = backtest.evaluate_candidate(snapshot, candidate, 104.5)
+
+        self.assertTrue(approved)
+        self.assertIsNone(reason)
+
     def test_momentum_entry_tolerance_can_fall_back_to_base_config(self):
         route_config = {}
         base_config = {"momentum_entry_tolerance_pct": 0.002}

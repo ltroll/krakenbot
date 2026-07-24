@@ -34,7 +34,7 @@
   "aging_profit_reduction_pct": 0.001,
   "min_profit_target_pct": 0.0045,
   "high_anchor_buy_cooldown_minutes": 15,
-  "max_open_high_anchor_orders": 3,
+  "max_open_high_anchor_orders": 0,
   "high_anchor_profit_target_pct": 0.006,
   "prevent_buy_above_last_sell": true,
   "buy_after_sell_discount_pct": 0.001,
@@ -80,5 +80,8 @@
   "high_band_breakout_bypass_min_rebound_score": 0.68,
   "high_band_breakout_bypass_max_exit_pressure_score": 0.6,
   "high_band_breakout_bypass_min_hold_through_score": 0.5,
-  "high_band_breakout_bypass_momentum_min_hold_through_score": 0.58
+  "high_band_breakout_bypass_momentum_min_hold_through_score": 0.58,
+  "risk_context_high_band_neutral_phase_guard_enabled": true,
+  "risk_context_high_band_neutral_min_breakout_score": 0.65,
+  "risk_context_high_band_neutral_min_rebound_score": 0.7
 }

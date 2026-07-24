@@ -84,7 +84,6 @@ def validate_strategy_config(strategy_config):
         "max_inventory_usd",
         "aging_step_minutes",
         "high_anchor_buy_cooldown_minutes",
-        "max_open_high_anchor_orders",
     )
     for field in positive_numeric_fields:
         value = strategy_config.get(field)
@@ -103,6 +102,7 @@ def validate_strategy_config(strategy_config):
         "momentum_entry_tolerance_pct",
         "aging_profit_reduction_pct",
         "min_profit_target_pct",
+        "max_open_high_anchor_orders",
         "buy_after_sell_discount_pct",
         "llm_buy_cooldown_minutes_after_sell",
         "buy_cooldown_after_sell_fill_minutes",

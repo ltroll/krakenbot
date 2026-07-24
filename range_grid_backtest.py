@@ -3661,7 +3661,7 @@ def evaluate_candidate(snapshot, candidate, price):
     flow_pressure = safe_float(signal.get("flow_pressure"))
     llm_buy_cooldown_minutes_after_sell = int(config.get("llm_buy_cooldown_minutes_after_sell", 30))
     high_anchor_buy_cooldown_minutes = int(config.get("high_anchor_buy_cooldown_minutes", 15))
-    max_open_high_anchor_orders = int(config.get("max_open_high_anchor_orders", 3))
+    max_open_high_anchor_orders = int(config.get("max_open_high_anchor_orders", 0))
     high_anchor_backlog_soft_release_minutes = safe_float(
         config.get("high_anchor_backlog_soft_release_minutes")
     ) or 0.0
@@ -3783,6 +3783,7 @@ def evaluate_candidate(snapshot, candidate, price):
     )
     if (
         buy_source == "range_high_band"
+        and max_open_high_anchor_orders > 0
         and high_anchor_exposure["effective_count"] >= max_open_high_anchor_orders
     ):
         return False, "max_open_high_anchor_orders"

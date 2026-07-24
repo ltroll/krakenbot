@@ -639,7 +639,7 @@ buy_cooldown_after_sell_fill_minutes_by_source = normalized_source_config_map(
     strategy_config,
     "buy_cooldown_after_sell_fill_minutes_by_source",
 )
-max_open_high_anchor_orders = profile_int("max_open_high_anchor_orders", 3)
+max_open_high_anchor_orders = profile_int("max_open_high_anchor_orders", 0)
 high_anchor_backlog_soft_release_minutes = profile_int(
     "high_anchor_backlog_soft_release_minutes",
     0
@@ -6754,6 +6754,7 @@ def main():
                         skip_reason = "high_anchor_cooldown"
                     elif (
                         buy_source == "range_high_band"
+                        and candidate_max_open_high_anchor_orders > 0
                         and high_anchor_effective_order_count >= (
                             candidate_max_open_high_anchor_orders
                         )
