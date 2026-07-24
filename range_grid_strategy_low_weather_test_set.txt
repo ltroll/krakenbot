@@ -2,6 +2,7 @@
 # Use with RANGE_GRID_BACKTEST_STRATEGY_SET_FILE=range_grid_strategy_low_weather_test_set.txt.
 # Keep this separate from range_grid_strategy_test_set.txt so prod router candidates stay clean.
 
+range_grid_strategy_low_weather_no_reanchor_baseline.json
 range_grid_strategy_low_weather_accumulator_conservative.json
 range_grid_strategy_low_weather_accumulator_flat_chop.json
 range_grid_strategy_low_weather_reanchor_flexible.json
