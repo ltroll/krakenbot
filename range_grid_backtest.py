@@ -21,7 +21,7 @@ ENV_FILE = (
     os.getenv("RANGE_GRID_ENV_FILE")
     or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 )
-load_dotenv(dotenv_path=ENV_FILE, override=True)
+load_dotenv(dotenv_path=ENV_FILE, override=False)
 
 SNAPSHOT_LOG_FILE = os.getenv(
     "RANGE_GRID_BACKTEST_SNAPSHOT_FILE",
