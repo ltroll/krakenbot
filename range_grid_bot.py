@@ -780,6 +780,26 @@ risk_context_high_band_neutral_min_rebound_score = profile_float(
     "risk_context_high_band_neutral_min_rebound_score",
     0.70
 )
+risk_context_high_band_distribution_guard_enabled = profile_bool(
+    "risk_context_high_band_distribution_guard_enabled",
+    False
+)
+risk_context_high_band_distribution_min_rebound_confirmation_score = profile_float(
+    "risk_context_high_band_distribution_min_rebound_confirmation_score",
+    0.55
+)
+risk_context_high_band_distribution_min_breakout_score = profile_float(
+    "risk_context_high_band_distribution_min_breakout_score",
+    0.55
+)
+risk_context_high_band_distribution_max_exit_pressure_score = profile_float(
+    "risk_context_high_band_distribution_max_exit_pressure_score",
+    0.40
+)
+risk_context_high_band_distribution_min_hold_through_score = profile_float(
+    "risk_context_high_band_distribution_min_hold_through_score",
+    0.50
+)
 risk_context_high_band_max_market_risk_score = profile_float(
     "risk_context_high_band_max_market_risk_score",
     0.35
@@ -3964,7 +3984,9 @@ def risk_context_high_band_guard(
     market_opportunity = weather_report.get("market_opportunity")
     if not isinstance(market_opportunity, dict):
         market_opportunity = {}
-    opportunity_phase = market_opportunity.get("cycle_phase")
+    opportunity_phase = str(
+        market_opportunity.get("cycle_phase") or ""
+    ).strip().lower()
 
     max_market_risk = strategy_float_with_fallback(
         config,
@@ -4008,6 +4030,45 @@ def risk_context_high_band_guard(
         "risk_context_high_band_neutral_min_rebound_score",
         0.70
     )
+    distribution_guard_enabled = strategy_bool_with_fallback(
+        config,
+        fallback_config,
+        "risk_context_high_band_distribution_guard_enabled",
+        False
+    )
+    distribution_min_rebound_confirmation = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "risk_context_high_band_distribution_min_rebound_confirmation_score",
+        0.55
+    )
+    distribution_min_breakout = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "risk_context_high_band_distribution_min_breakout_score",
+        0.55
+    )
+    distribution_max_exit_pressure = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "risk_context_high_band_distribution_max_exit_pressure_score",
+        0.40
+    )
+    distribution_min_hold_through = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "risk_context_high_band_distribution_min_hold_through_score",
+        0.50
+    )
+    distribution_rebound_confirmation = optional_float(
+        market_opportunity.get("rebound_confirmation_score")
+    )
+    distribution_exit_pressure = optional_float(
+        market_opportunity.get("exit_pressure_score")
+    )
+    distribution_hold_through = optional_float(
+        market_opportunity.get("hold_through_score")
+    )
 
     details = {
         "risk_context_high_band_max_market_risk_score": max_market_risk,
@@ -4021,12 +4082,30 @@ def risk_context_high_band_guard(
         "risk_context_high_band_neutral_min_breakout_score": (
             neutral_min_breakout
         ),
+        "risk_context_high_band_distribution_guard_enabled": (
+            distribution_guard_enabled
+        ),
+        "risk_context_high_band_distribution_min_rebound_confirmation_score": (
+            distribution_min_rebound_confirmation
+        ),
+        "risk_context_high_band_distribution_min_breakout_score": (
+            distribution_min_breakout
+        ),
+        "risk_context_high_band_distribution_max_exit_pressure_score": (
+            distribution_max_exit_pressure
+        ),
+        "risk_context_high_band_distribution_min_hold_through_score": (
+            distribution_min_hold_through
+        ),
         "sentiment_market_risk_score": market_risk,
         "sentiment_buy_aggression_score": buy_aggression,
         "sentiment_rebound_score": rebound,
         "sentiment_breakout_score": breakout,
         "sentiment_hard_safety_flags": flags,
         "weather_opportunity_phase": opportunity_phase,
+        "weather_rebound_confirmation_score": distribution_rebound_confirmation,
+        "weather_exit_pressure_score": distribution_exit_pressure,
+        "weather_hold_through_score": distribution_hold_through,
     }
 
     if flags:
@@ -4068,6 +4147,22 @@ def risk_context_high_band_guard(
             "reason": "risk_context_high_band_neutral_confirmation_low",
             **details,
         }
+    if distribution_guard_enabled and opportunity_phase == "range_chop_distribution":
+        if (
+            distribution_rebound_confirmation is None
+            or distribution_rebound_confirmation < distribution_min_rebound_confirmation
+            or breakout is None
+            or breakout < distribution_min_breakout
+            or distribution_exit_pressure is None
+            or distribution_exit_pressure > distribution_max_exit_pressure
+            or distribution_hold_through is None
+            or distribution_hold_through < distribution_min_hold_through
+        ):
+            return {
+                "allowed": False,
+                "reason": "risk_context_high_band_distribution_quality_low",
+                **details,
+            }
 
     return {"allowed": True, "reason": None, **details}
 
@@ -4986,6 +5081,21 @@ def main():
         ),
         risk_context_high_band_neutral_min_rebound_score=(
             risk_context_high_band_neutral_min_rebound_score
+        ),
+        risk_context_high_band_distribution_guard_enabled=(
+            risk_context_high_band_distribution_guard_enabled
+        ),
+        risk_context_high_band_distribution_min_rebound_confirmation_score=(
+            risk_context_high_band_distribution_min_rebound_confirmation_score
+        ),
+        risk_context_high_band_distribution_min_breakout_score=(
+            risk_context_high_band_distribution_min_breakout_score
+        ),
+        risk_context_high_band_distribution_max_exit_pressure_score=(
+            risk_context_high_band_distribution_max_exit_pressure_score
+        ),
+        risk_context_high_band_distribution_min_hold_through_score=(
+            risk_context_high_band_distribution_min_hold_through_score
         ),
         risk_context_high_band_max_market_risk_score=(
             risk_context_high_band_max_market_risk_score
@@ -6913,6 +7023,46 @@ def main():
                             risk_context_high_band_neutral_min_breakout_score=(
                                 high_band_guard.get(
                                     "risk_context_high_band_neutral_min_breakout_score"
+                                )
+                            ),
+                            risk_context_high_band_distribution_guard_enabled=(
+                                high_band_guard.get(
+                                    "risk_context_high_band_distribution_guard_enabled"
+                                )
+                            ),
+                            risk_context_high_band_distribution_min_rebound_confirmation_score=(
+                                high_band_guard.get(
+                                    "risk_context_high_band_distribution_min_rebound_confirmation_score"
+                                )
+                            ),
+                            risk_context_high_band_distribution_min_breakout_score=(
+                                high_band_guard.get(
+                                    "risk_context_high_band_distribution_min_breakout_score"
+                                )
+                            ),
+                            risk_context_high_band_distribution_max_exit_pressure_score=(
+                                high_band_guard.get(
+                                    "risk_context_high_band_distribution_max_exit_pressure_score"
+                                )
+                            ),
+                            risk_context_high_band_distribution_min_hold_through_score=(
+                                high_band_guard.get(
+                                    "risk_context_high_band_distribution_min_hold_through_score"
+                                )
+                            ),
+                            weather_rebound_confirmation_score=(
+                                high_band_guard.get(
+                                    "weather_rebound_confirmation_score"
+                                )
+                            ),
+                            weather_exit_pressure_score=(
+                                high_band_guard.get(
+                                    "weather_exit_pressure_score"
+                                )
+                            ),
+                            weather_hold_through_score=(
+                                high_band_guard.get(
+                                    "weather_hold_through_score"
                                 )
                             ),
                             operating_mode=operating_mode,

@@ -3150,7 +3150,9 @@ def risk_context_high_band_guard(config, risk_context, weather_report=None):
     market_opportunity = weather_report.get("market_opportunity")
     if not isinstance(market_opportunity, dict):
         market_opportunity = {}
-    opportunity_phase = market_opportunity.get("cycle_phase")
+    opportunity_phase = str(
+        market_opportunity.get("cycle_phase") or ""
+    ).strip().lower()
 
     flags = risk_context.get("hard_safety_flags")
     if not isinstance(flags, list):
@@ -3196,6 +3198,40 @@ def risk_context_high_band_guard(config, risk_context, weather_report=None):
         "risk_context_high_band_neutral_min_rebound_score",
         0.70,
     )
+    distribution_guard_enabled = strategy_bool(
+        config,
+        "risk_context_high_band_distribution_guard_enabled",
+        False,
+    )
+    distribution_min_rebound_confirmation = strategy_float(
+        config,
+        "risk_context_high_band_distribution_min_rebound_confirmation_score",
+        0.55,
+    )
+    distribution_min_breakout = strategy_float(
+        config,
+        "risk_context_high_band_distribution_min_breakout_score",
+        0.55,
+    )
+    distribution_max_exit_pressure = strategy_float(
+        config,
+        "risk_context_high_band_distribution_max_exit_pressure_score",
+        0.40,
+    )
+    distribution_min_hold_through = strategy_float(
+        config,
+        "risk_context_high_band_distribution_min_hold_through_score",
+        0.50,
+    )
+    distribution_rebound_confirmation = safe_float(
+        market_opportunity.get("rebound_confirmation_score")
+    )
+    distribution_exit_pressure = safe_float(
+        market_opportunity.get("exit_pressure_score")
+    )
+    distribution_hold_through = safe_float(
+        market_opportunity.get("hold_through_score")
+    )
 
     if flags:
         return {
@@ -3231,6 +3267,21 @@ def risk_context_high_band_guard(config, risk_context, weather_report=None):
             "allowed": False,
             "reason": "risk_context_high_band_neutral_confirmation_low",
         }
+    if distribution_guard_enabled and opportunity_phase == "range_chop_distribution":
+        if (
+            distribution_rebound_confirmation is None
+            or distribution_rebound_confirmation < distribution_min_rebound_confirmation
+            or breakout is None
+            or breakout < distribution_min_breakout
+            or distribution_exit_pressure is None
+            or distribution_exit_pressure > distribution_max_exit_pressure
+            or distribution_hold_through is None
+            or distribution_hold_through < distribution_min_hold_through
+        ):
+            return {
+                "allowed": False,
+                "reason": "risk_context_high_band_distribution_quality_low",
+            }
 
     return {"allowed": True, "reason": None}
 

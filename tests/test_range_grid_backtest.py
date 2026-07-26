@@ -754,6 +754,98 @@ class RangeGridBacktestTests(unittest.TestCase):
             {"range_high_band": 1},
         )
 
+    def test_high_band_distribution_guard_blocks_chasing(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                104.5,
+                action_recommendation="watch_only",
+                strategy_modes=["high"],
+                strategy_overrides={
+                    "risk_context_high_band_guard_enabled": True,
+                    "risk_context_high_band_min_buy_aggression_score": 0.5,
+                    "risk_context_high_band_min_breakout_score": 0.5,
+                    "risk_context_high_band_min_rebound_score": 0.5,
+                    "risk_context_high_band_max_market_risk_score": 0.35,
+                    "risk_context_high_band_distribution_guard_enabled": True,
+                    "risk_context_high_band_distribution_min_rebound_confirmation_score": 0.55,
+                    "risk_context_high_band_distribution_min_breakout_score": 0.55,
+                    "risk_context_high_band_distribution_max_exit_pressure_score": 0.40,
+                    "risk_context_high_band_distribution_min_hold_through_score": 0.50,
+                },
+                risk_context={
+                    "recommended_posture": "breakout_watch",
+                    "market_risk_score": 0.20,
+                    "buy_aggression_score": 0.51,
+                    "rebound_score": 0.53,
+                    "breakout_score": 0.51,
+                    "hard_safety_flags": [],
+                    "weather_report": {
+                        "market_opportunity": {
+                            "cycle_phase": "range_chop_distribution",
+                            "rebound_confirmation_score": 0.48,
+                            "exit_pressure_score": 0.47,
+                            "hold_through_score": 0.45,
+                        },
+                    },
+                },
+            )
+        ]
+
+        result = backtest.replay_from_snapshots(snapshots)
+
+        self.assertEqual(result["summary"]["approved_candidates"], 0)
+        self.assertEqual(
+            result["summary"]["blocked_reason_counts"],
+            {"risk_context_high_band_distribution_quality_low": 1},
+        )
+
+    def test_high_band_distribution_guard_allows_confirmed_strength(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                104.5,
+                action_recommendation="watch_only",
+                strategy_modes=["high"],
+                strategy_overrides={
+                    "risk_context_high_band_guard_enabled": True,
+                    "risk_context_high_band_min_buy_aggression_score": 0.5,
+                    "risk_context_high_band_min_breakout_score": 0.5,
+                    "risk_context_high_band_min_rebound_score": 0.5,
+                    "risk_context_high_band_max_market_risk_score": 0.35,
+                    "risk_context_high_band_distribution_guard_enabled": True,
+                    "risk_context_high_band_distribution_min_rebound_confirmation_score": 0.55,
+                    "risk_context_high_band_distribution_min_breakout_score": 0.55,
+                    "risk_context_high_band_distribution_max_exit_pressure_score": 0.40,
+                    "risk_context_high_band_distribution_min_hold_through_score": 0.50,
+                },
+                risk_context={
+                    "recommended_posture": "breakout_watch",
+                    "market_risk_score": 0.20,
+                    "buy_aggression_score": 0.51,
+                    "rebound_score": 0.53,
+                    "breakout_score": 0.56,
+                    "hard_safety_flags": [],
+                    "weather_report": {
+                        "market_opportunity": {
+                            "cycle_phase": "range_chop_distribution",
+                            "rebound_confirmation_score": 0.56,
+                            "exit_pressure_score": 0.39,
+                            "hold_through_score": 0.51,
+                        },
+                    },
+                },
+            )
+        ]
+
+        result = backtest.replay_from_snapshots(snapshots)
+
+        self.assertEqual(result["summary"]["approved_candidates"], 1)
+        self.assertEqual(
+            result["summary"]["approved_counts_by_source"],
+            {"range_high_band": 1},
+        )
+
     def test_high_band_risk_context_guard_does_not_block_low_anchor(self):
         snapshots = [
             make_snapshot(
