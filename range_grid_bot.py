@@ -23,6 +23,13 @@ import krakenex
 import requests
 from dotenv import load_dotenv
 from fee_config import effective_round_trip_fee_pct
+from range_grid_assets import (
+    asset_balance_from_kraken,
+    infer_asset_id_from_pair,
+    kraken_pair_matches as configured_kraken_pair_matches,
+    kraken_result_for_pair,
+    parse_asset_balance_keys,
+)
 from range_grid_guardrails import (
     runtime_buy_block_reason,
     summarize_sell_backlog,
@@ -114,6 +121,15 @@ LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL")
 PRICE_LOG_URL = os.getenv("PRICE_LOG_URL")
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
+SIGNAL_ASSET_ID = (
+    os.getenv("SIGNAL_ASSET_ID")
+    or infer_asset_id_from_pair(KRAKEN_PAIR)
+    or "BTC"
+).upper()
+ASSET_BALANCE_KEYS = parse_asset_balance_keys(
+    os.getenv("RANGE_GRID_ASSET_BALANCE_KEYS"),
+    SIGNAL_ASSET_ID,
+)
 KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY")
 KRAKEN_API_SECRET = os.getenv("KRAKEN_API_SECRET")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
@@ -505,7 +521,8 @@ order_owner_tag_source = (
     or socket.gethostname()
 )
 order_tracker_symbol = (
-    os.getenv("ORDER_TRACKER_SYMBOL")
+    os.getenv("RANGE_GRID_ORDER_TRACKER_SYMBOL")
+    or os.getenv("ORDER_TRACKER_SYMBOL")
     or profile_str("order_tracker_symbol", KRAKEN_PAIR)
 )
 order_tracker_timeout_seconds = profile_float("order_tracker_timeout_seconds", 5)
@@ -523,7 +540,11 @@ entry_step_pct = profile_float("entry_step_pct", profit_target_pct / 2)
 round_trip_fee_pct = effective_round_trip_fee_pct(strategy_config, 0.0032)
 position_size_pct = profile_float("position_size_pct", 0.10)
 min_buy_notional_usd = profile_float("min_buy_notional_usd", 8.0)
-min_buy_volume_btc = profile_float("min_buy_volume_btc", 0.00010)
+min_buy_volume_asset = profile_float(
+    "min_buy_volume_asset",
+    profile_float("min_buy_volume_btc", 0.00010),
+)
+min_buy_volume_btc = min_buy_volume_asset
 execution_signal_threshold = profile_float("execution_signal_threshold", 0.0)
 llm_target_proximity_pct = profile_float(
     "llm_target_proximity_pct",
@@ -1013,7 +1034,14 @@ api.uri = KRAKEN_API_URL
 api.key = os.getenv("KRAKEN_API_KEY")
 api.secret = os.getenv("KRAKEN_API_SECRET")
 
-pair_info = api.query_public("AssetPairs")["result"]["XXBTZUSD"]
+pair_info_result = api.query_public("AssetPairs").get("result", {})
+pair_info = kraken_result_for_pair(
+    pair_info_result,
+    KRAKEN_PAIR,
+    asset_id=SIGNAL_ASSET_ID,
+)
+if not pair_info:
+    raise RuntimeError(f"Kraken asset pair metadata missing for {KRAKEN_PAIR}")
 
 PRICE_DECIMALS = pair_info["pair_decimals"]
 VOLUME_DECIMALS = pair_info["lot_decimals"]
@@ -1857,6 +1885,9 @@ def runtime_identity():
         "lock_file": os.path.abspath(INSTANCE_LOCK_FILE),
         "log_file": os.path.abspath(LOG_FILE),
         "strategy_profile": STRATEGY_PROFILE,
+        "kraken_pair": KRAKEN_PAIR,
+        "asset_id": SIGNAL_ASSET_ID,
+        "asset_balance_keys": ASSET_BALANCE_KEYS,
         "api_key_fingerprint": key_fingerprint(KRAKEN_API_KEY),
         "order_owner_tag_source": order_owner_tag_source,
         "order_owner_userref": BOT_ORDER_USERREF,
@@ -2476,8 +2507,15 @@ def get_price():
                 pair = list(data["result"].keys())[0]
                 return float(data["result"][pair]["c"][0])
 
-        r = api.query_public("Ticker", {"pair": "XXBTZUSD"})
-        return float(r["result"]["XXBTZUSD"]["c"][0])
+        r = api.query_public("Ticker", {"pair": KRAKEN_PAIR})
+        ticker = kraken_result_for_pair(
+            r.get("result", {}),
+            KRAKEN_PAIR,
+            asset_id=SIGNAL_ASSET_ID,
+        )
+        if not ticker:
+            raise RuntimeError(f"Ticker result missing for {KRAKEN_PAIR}")
+        return float(ticker["c"][0])
     except Exception as e:
         log_event("PRICE_ERROR", message=str(e))
         return None
@@ -3329,7 +3367,7 @@ def buy_above_last_sell_guard_active(last_sell_at, now, guard_minutes):
 
 def place_buy(price, volume, client_order_id=None):
     payload = {
-        "pair": "XXBTZUSD",
+        "pair": KRAKEN_PAIR,
         "type": "buy",
         "ordertype": "limit",
         "price": str(round(price, PRICE_DECIMALS)),
@@ -3344,7 +3382,7 @@ def place_buy(price, volume, client_order_id=None):
 
 def place_sell(price, volume, client_order_id=None):
     payload = {
-        "pair": "XXBTZUSD",
+        "pair": KRAKEN_PAIR,
         "type": "sell",
         "ordertype": "limit",
         "price": str(round(price, PRICE_DECIMALS)),
@@ -4529,16 +4567,8 @@ def reserved_buy_capital_usd():
     )
 
 
-def kraken_btc_balance(balance_result):
-    if not isinstance(balance_result, dict):
-        return None
-
-    for key in ("XXBT", "XBT", "BTC"):
-        value = positive_float(balance_result.get(key))
-        if value is not None:
-            return value
-
-    return None
+def kraken_asset_balance(balance_result):
+    return asset_balance_from_kraken(balance_result, ASSET_BALANCE_KEYS)
 
 
 def kraken_reserved_sell_volume(open_orders_result):
@@ -4563,18 +4593,7 @@ def kraken_reserved_sell_volume(open_orders_result):
         if descr.get("type") != "sell":
             continue
 
-        pair = descr.get("pair")
-        normalized_pair = (
-            str(pair or "")
-            .upper()
-            .replace("/", "")
-            .replace("-", "")
-        )
-        if not (
-            normalized_pair == KRAKEN_PAIR.upper()
-            or ("XBT" in normalized_pair and "USD" in normalized_pair)
-            or ("XXBT" in normalized_pair and "ZUSD" in normalized_pair)
-        ):
+        if not kraken_pair_matches(descr.get("pair")):
             continue
 
         remaining = positive_float(order.get("vol")) or 0.0
@@ -4585,16 +4604,10 @@ def kraken_reserved_sell_volume(open_orders_result):
 
 
 def kraken_pair_matches(pair):
-    normalized_pair = (
-        str(pair or "")
-        .upper()
-        .replace("/", "")
-        .replace("-", "")
-    )
-    return (
-        normalized_pair == KRAKEN_PAIR.upper()
-        or ("XBT" in normalized_pair and "USD" in normalized_pair)
-        or ("XXBT" in normalized_pair and "ZUSD" in normalized_pair)
+    return configured_kraken_pair_matches(
+        pair,
+        KRAKEN_PAIR,
+        asset_id=SIGNAL_ASSET_ID,
     )
 
 
@@ -5126,25 +5139,28 @@ def startup_reconcile_state():
     )
 
 
-def reconcile_btc_inventory(cycle_id):
+def reconcile_asset_inventory(cycle_id):
     if not state["open_buy_orders"]:
         return []
 
     balance_resp = safe_kraken_private("BALANCE_RECONCILE", "/0/private/Balance")
     if not balance_resp or "result" not in balance_resp:
         log_event(
-            "BTC_RECONCILE_SKIPPED",
+            "ASSET_RECONCILE_SKIPPED",
             cycle_id=cycle_id,
+            asset_id=SIGNAL_ASSET_ID,
             reason="balance_fetch_failed"
         )
         return []
 
-    actual_btc = kraken_btc_balance(balance_resp["result"])
-    if actual_btc is None:
+    actual_asset_volume = kraken_asset_balance(balance_resp["result"])
+    if actual_asset_volume is None:
         log_event(
-            "BTC_RECONCILE_SKIPPED",
+            "ASSET_RECONCILE_SKIPPED",
             cycle_id=cycle_id,
-            reason="btc_balance_missing"
+            asset_id=SIGNAL_ASSET_ID,
+            balance_keys=ASSET_BALANCE_KEYS,
+            reason="asset_balance_missing"
         )
         return []
 
@@ -5154,8 +5170,9 @@ def reconcile_btc_inventory(cycle_id):
     )
     if not open_orders_resp or "result" not in open_orders_resp:
         log_event(
-            "BTC_RECONCILE_SKIPPED",
+            "ASSET_RECONCILE_SKIPPED",
             cycle_id=cycle_id,
+            asset_id=SIGNAL_ASSET_ID,
             reason="open_orders_fetch_failed"
         )
         return []
@@ -5163,8 +5180,9 @@ def reconcile_btc_inventory(cycle_id):
     kraken_reserved_sell = kraken_reserved_sell_volume(open_orders_resp["result"])
     if kraken_reserved_sell is None:
         log_event(
-            "BTC_RECONCILE_SKIPPED",
+            "ASSET_RECONCILE_SKIPPED",
             cycle_id=cycle_id,
+            asset_id=SIGNAL_ASSET_ID,
             reason="reserved_sell_volume_missing"
         )
         return []
@@ -5178,16 +5196,17 @@ def reconcile_btc_inventory(cycle_id):
         for order in state["open_buy_orders"].values()
     )
     tracked_total_volume = open_sell_volume + open_buy_volume
-    available_btc_for_new_sells = max(0.0, actual_btc - kraken_reserved_sell)
+    available_asset_for_new_sells = max(0.0, actual_asset_volume - kraken_reserved_sell)
     tolerance = max(10 ** (-VOLUME_DECIMALS), 0.00000002)
-    excess_volume = open_buy_volume - available_btc_for_new_sells
+    excess_volume = open_buy_volume - available_asset_for_new_sells
 
     log_event(
-        "BTC_RECONCILE_CHECK",
+        "ASSET_RECONCILE_CHECK",
         cycle_id=cycle_id,
-        actual_btc=round(actual_btc, 8),
+        asset_id=SIGNAL_ASSET_ID,
+        actual_asset_volume=round(actual_asset_volume, 8),
         kraken_reserved_sell_volume=round(kraken_reserved_sell, 8),
-        available_btc_for_new_sells=round(available_btc_for_new_sells, 8),
+        available_asset_for_new_sells=round(available_asset_for_new_sells, 8),
         tracked_open_buy_volume=round(open_buy_volume, 8),
         tracked_open_sell_volume=round(open_sell_volume, 8),
         tracked_total_volume=round(tracked_total_volume, 8),
@@ -5215,8 +5234,9 @@ def reconcile_btc_inventory(cycle_id):
         removed_volume += order_volume
         reconciled_levels.append(level)
         log_event(
-            "BTC_RECONCILE_DROP_BUY",
+            "ASSET_RECONCILE_DROP_BUY",
             cycle_id=cycle_id,
+            asset_id=SIGNAL_ASSET_ID,
             level=level,
             txid=order.get("txid"),
             volume=round(order_volume, VOLUME_DECIMALS),
@@ -5225,7 +5245,7 @@ def reconcile_btc_inventory(cycle_id):
                 PRICE_DECIMALS
             ),
             buy_source=order.get("buy_source"),
-            reason="tracked_volume_exceeds_actual_btc"
+            reason="tracked_volume_exceeds_actual_asset"
         )
 
     for level in reconciled_levels:
@@ -5234,27 +5254,29 @@ def reconcile_btc_inventory(cycle_id):
     if reconciled_levels:
         save_state(state)
         emit_alert(
-            "btc_reconciled",
+            "asset_reconciled",
             "critical",
-            "Tracked buy volume exceeded available BTC and was repaired",
+            f"Tracked buy volume exceeded available {SIGNAL_ASSET_ID} and was repaired",
             cycle_id=cycle_id,
+            asset_id=SIGNAL_ASSET_ID,
             removed_levels=reconciled_levels,
             removed_volume=round(removed_volume, 8),
-            actual_btc=round(actual_btc, 8),
-            available_btc_for_new_sells=round(available_btc_for_new_sells, 8),
+            actual_asset_volume=round(actual_asset_volume, 8),
+            available_asset_for_new_sells=round(available_asset_for_new_sells, 8),
         )
         log_and_console(
-            "BTC_RECONCILED",
+            "ASSET_RECONCILED",
             message=(
                 f"Removed {len(reconciled_levels)} stale filled buys after "
-                f"BTC inventory mismatch"
+                f"{SIGNAL_ASSET_ID} inventory mismatch"
             ),
             cycle_id=cycle_id,
+            asset_id=SIGNAL_ASSET_ID,
             removed_levels=reconciled_levels,
             removed_volume=round(removed_volume, 8),
-            actual_btc=round(actual_btc, 8),
+            actual_asset_volume=round(actual_asset_volume, 8),
             kraken_reserved_sell_volume=round(kraken_reserved_sell, 8),
-            available_btc_for_new_sells=round(available_btc_for_new_sells, 8),
+            available_asset_for_new_sells=round(available_asset_for_new_sells, 8),
             tracked_total_volume=round(tracked_total_volume, 8)
         )
 
@@ -5301,6 +5323,7 @@ def main():
         round_trip_fee_pct=round_trip_fee_pct,
         position_size_pct=position_size_pct,
         min_buy_notional_usd=min_buy_notional_usd,
+        min_buy_volume_asset=min_buy_volume_asset,
         min_buy_volume_btc=min_buy_volume_btc,
         execution_signal_threshold=execution_signal_threshold,
         llm_target_proximity_pct=llm_target_proximity_pct,
@@ -5983,9 +6006,9 @@ def main():
                 median
             )
 
-            reconciled_levels = reconcile_btc_inventory(cycle_id)
+            reconciled_levels = reconcile_asset_inventory(cycle_id)
             if reconciled_levels:
-                actions.append("btc_reconciled")
+                actions.append("asset_reconciled")
 
             order_details_map = get_order_details_batch(
                 list(state["open_sell_orders"].keys())
@@ -7487,8 +7510,12 @@ def main():
                     )
                     candidate_min_buy_volume_btc = strategy_float(
                         route_config,
-                        "min_buy_volume_btc",
-                        min_buy_volume_btc,
+                        "min_buy_volume_asset",
+                        strategy_float(
+                            route_config,
+                            "min_buy_volume_btc",
+                            min_buy_volume_btc,
+                        ),
                     )
                     candidate_max_open_high_anchor_orders = int(strategy_float(
                         route_config,

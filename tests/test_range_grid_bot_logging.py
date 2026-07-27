@@ -4,13 +4,16 @@ import unittest
 
 
 class RangeGridBotLoggingTests(unittest.TestCase):
-    def test_sentiment_risk_fields_are_not_passed_twice(self):
+    def _bot_tree(self):
         bot_path = os.path.join(
             os.path.dirname(os.path.dirname(__file__)),
             "range_grid_bot.py",
         )
         with open(bot_path, encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            return ast.parse(handle.read())
+
+    def test_sentiment_risk_fields_are_not_passed_twice(self):
+        tree = self._bot_tree()
 
         risk_function = next(
             node
@@ -46,6 +49,27 @@ class RangeGridBotLoggingTests(unittest.TestCase):
                 collisions.append((node.lineno, duplicate_keys))
 
         self.assertEqual(collisions, [])
+
+    def test_live_kraken_order_and_ticker_paths_use_configured_pair(self):
+        tree = self._bot_tree()
+        violations = []
+
+        for function_name in ("get_price", "place_buy", "place_sell"):
+            function = next(
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef)
+                and node.name == function_name
+            )
+            for node in ast.walk(function):
+                if (
+                    isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and node.value == "XXBTZUSD"
+                ):
+                    violations.append((function_name, node.lineno))
+
+        self.assertEqual(violations, [])
 
 
 if __name__ == "__main__":
