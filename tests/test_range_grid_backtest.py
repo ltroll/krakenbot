@@ -177,6 +177,59 @@ class RangeGridBacktestTests(unittest.TestCase):
         args = backtest.parse_args(["--window-hours", "48"])
         self.assertEqual(args.window_hours, 48.0)
 
+    def test_strategy_comparison_recomputes_ranges_per_strategy_window(self):
+        snapshots = [
+            make_snapshot("2026-06-13T08:00:00+00:00", 90.0),
+            make_snapshot("2026-06-13T10:00:00+00:00", 100.0),
+            make_snapshot("2026-06-13T12:00:00+00:00", 110.0),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            short_strategy = os.path.join(tmpdir, "short.json")
+            long_strategy = os.path.join(tmpdir, "long.json")
+            strategy_set = os.path.join(tmpdir, "strategy_set.txt")
+            base_strategy = {
+                "grid_anchor": "low",
+                "operating_mode": "range_only",
+                "dynamic_anchor_mode": False,
+                "entry_step_pct": 0.01,
+                "max_grid_size": 1,
+                "require_fresh_signal": True,
+                "min_signal_status": "fresh",
+                "allow_range_buy_on_confidence_block": True,
+                "prevent_buy_above_last_sell": False,
+                "max_open_sell_orders": 999,
+                "max_inventory_usd": 999,
+            }
+            with open(short_strategy, "w", encoding="utf-8") as f:
+                json.dump({**base_strategy, "range_window_hours": 2}, f)
+            with open(long_strategy, "w", encoding="utf-8") as f:
+                json.dump({**base_strategy, "range_window_hours": 6}, f)
+            with open(strategy_set, "w", encoding="utf-8") as f:
+                f.write(short_strategy + "\n")
+                f.write(long_strategy + "\n")
+
+            comparison = backtest.build_strategy_comparison_rows(
+                snapshots,
+                strategy_set,
+                include_details=True,
+            )
+
+        details = {
+            detail["strategy_payload"]["range_window_hours"]: detail
+            for detail in comparison["details"]
+        }
+        short_recent = details[2]["recent_replay_events"][-1]
+        long_recent = details[6]["recent_replay_events"][-1]
+        self.assertEqual(short_recent["level"], 99.0)
+        self.assertEqual(long_recent["level"], 89.1)
+        rows = {
+            row["range_window_hours"]: row
+            for row in comparison["rows"]
+        }
+        self.assertEqual(rows[2]["range_window_hours"], 2)
+        self.assertEqual(rows[6]["range_window_hours"], 6)
+
     def test_replay_blocks_when_sentiment_not_bullish(self):
         snapshots = [make_snapshot("2026-06-13T12:00:00+00:00", 100.0, action_recommendation="blocked")]
         snapshots[0]["signal"]["payload"]["action_policy"] = {

@@ -2011,6 +2011,104 @@ def build_snapshot_price_index(snapshots):
     }
 
 
+def rolling_range_values(snapshot, snapshot_price_index, window_hours):
+    ts = snapshot_timestamp(snapshot)
+    if (
+        ts is None
+        or not snapshot_price_index
+        or not snapshot_price_index.get("times")
+        or window_hours is None
+        or window_hours <= 0
+    ):
+        return None
+
+    times = snapshot_price_index["times"]
+    prices = snapshot_price_index["prices"]
+    start_ts = ts - timedelta(hours=window_hours)
+    start_idx = bisect.bisect_left(times, start_ts)
+    end_idx = bisect.bisect_right(times, ts)
+    window_prices = [
+        price
+        for price in prices[start_idx:end_idx]
+        if price is not None and price > 0
+    ]
+    if not window_prices:
+        return None
+    low = min(window_prices)
+    high = max(window_prices)
+    mean = sum(window_prices) / len(window_prices)
+    median = statistics.median(window_prices)
+    range_position = None
+    current_price = snapshot_price(snapshot)
+    if current_price is not None and high > low:
+        range_position = max(0.0, min(1.0, (current_price - low) / (high - low)))
+    return {
+        "low": low,
+        "high": high,
+        "mean": mean,
+        "median": median,
+        "range_position": range_position,
+        "samples": len(window_prices),
+        "window_hours": window_hours,
+    }
+
+
+def snapshot_with_range_values(snapshot, range_values):
+    if not range_values:
+        return snapshot
+
+    cloned = copy.deepcopy(snapshot)
+    signal = cloned.get("signal")
+    if not isinstance(signal, dict):
+        signal = {}
+        cloned["signal"] = signal
+    payload = signal.get("payload")
+    if not isinstance(payload, dict):
+        payload = signal.get("raw_payload")
+    if not isinstance(payload, dict):
+        payload = {}
+    else:
+        payload = copy.deepcopy(payload)
+    signal["payload"] = payload
+
+    price_regime = payload.get("price_regime")
+    if not isinstance(price_regime, dict):
+        price_regime = {}
+    else:
+        price_regime = dict(price_regime)
+    price_regime.update({
+        "price_low_24h": range_values["low"],
+        "price_high_24h": range_values["high"],
+        "price_mean_24h": range_values["mean"],
+        "price_median_24h": range_values["median"],
+        "range_window_hours": range_values["window_hours"],
+        "range_window_samples": range_values["samples"],
+    })
+    if range_values["range_position"] is not None:
+        price_regime["range_position_24h"] = range_values["range_position"]
+    payload["price_regime"] = price_regime
+
+    state = cloned.get("state")
+    if not isinstance(state, dict):
+        state = {}
+        cloned["state"] = state
+    summary = state.get("summary")
+    if not isinstance(summary, dict):
+        summary = {}
+    else:
+        summary = dict(summary)
+    summary.update({
+        "range_low": range_values["low"],
+        "range_high": range_values["high"],
+        "range_mean": range_values["mean"],
+        "range_median": range_values["median"],
+        "range_window_hours": range_values["window_hours"],
+        "range_window_samples": range_values["samples"],
+    })
+    state["summary"] = summary
+    return cloned
+
+
 def simulate_missed_opportunity(snapshot, event, snapshots, snapshot_price_index=None):
     entry_time = parse_iso8601(event.get("captured_at"))
     entry_price = safe_float(event.get("level")) or safe_float(event.get("price"))
@@ -2369,6 +2467,7 @@ def build_strategy_comparison_rows(
     strategy_set_file,
     include_details=BACKTEST_INCLUDE_STRATEGY_DETAILS,
 ):
+    snapshot_price_index = build_snapshot_price_index(snapshots)
     entries = [
         parsed
         for parsed in (
@@ -2382,9 +2481,19 @@ def build_strategy_comparison_rows(
 
     for entry in entries:
         strategy_path, strategy_payload = load_strategy_profile_from_file(entry["path"])
+        strategy_range_window_hours = safe_float(
+            strategy_payload.get("range_window_hours")
+        )
         variant_snapshots = [
             snapshot_with_strategy(
-                snapshot,
+                snapshot_with_range_values(
+                    snapshot,
+                    rolling_range_values(
+                        snapshot,
+                        snapshot_price_index,
+                        strategy_range_window_hours,
+                    ),
+                ),
                 entry["label"],
                 strategy_path,
                 strategy_payload,
@@ -2401,6 +2510,7 @@ def build_strategy_comparison_rows(
         row = {
             "strategy_label": entry["label"],
             "strategy_file": strategy_path,
+            "range_window_hours": strategy_payload.get("range_window_hours"),
             "grid_anchor": strategy_payload.get("grid_anchor"),
             "operating_mode": strategy_payload.get("operating_mode"),
             "sentiment_control_mode": strategy_payload.get("sentiment_control_mode"),
@@ -2859,6 +2969,7 @@ def write_strategy_comparison_csv(comparison, output_path):
     fieldnames = [
         "strategy_label",
         "strategy_file",
+        "range_window_hours",
         "grid_anchor",
         "operating_mode",
         "sentiment_control_mode",
@@ -2949,6 +3060,7 @@ def write_ranked_strategy_csv(comparison, output_path):
     fieldnames = [
         "strategy_label",
         "practical_score",
+        "range_window_hours",
         "approved_candidates",
         "candidate_efficiency",
         "approved_llm_target",
