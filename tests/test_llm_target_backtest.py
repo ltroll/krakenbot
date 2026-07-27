@@ -2,6 +2,8 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
+from unittest.mock import patch
 
 import llm_target_backtest as backtest
 
@@ -758,8 +760,13 @@ class LlmTargetBacktestTests(unittest.TestCase):
             backtest.BACKTEST_ENTRY_WAIT_HOURS = 4
             backtest.BACKTEST_MAX_HOLD_HOURS = 24
 
-            report = backtest.build_report()
-            archive_file = backtest.write_report(report)
+            with patch.object(
+                backtest,
+                "now_utc",
+                return_value=datetime(2026, 5, 30, 14, 0, tzinfo=timezone.utc),
+            ):
+                report = backtest.build_report()
+                archive_file = backtest.write_report(report)
 
             self.assertTrue(os.path.exists(output_file))
             self.assertTrue(os.path.exists(archive_file))

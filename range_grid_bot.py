@@ -15,6 +15,7 @@ import os
 import socket
 import statistics
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
@@ -26,6 +27,13 @@ from range_grid_guardrails import (
     runtime_buy_block_reason,
     summarize_sell_backlog,
     validate_strategy_config,
+)
+from range_grid_order_safety import (
+    allocate_position_costs,
+    atomic_write_json,
+    load_json_with_backup,
+    order_execution,
+    order_limit_price,
 )
 from signal_normalizer import normalize_signal_payload
 
@@ -49,6 +57,10 @@ STATE_FILE = (
     os.getenv("RANGE_GRID_STATE_FILE")
     or os.getenv("BOT_STATE_FILE")
     or "last_state.json"
+)
+STATE_BACKUP_FILE = (
+    os.getenv("RANGE_GRID_STATE_BACKUP_FILE")
+    or f"{STATE_FILE}.bak"
 )
 LOG_FILE = (
     os.getenv("RANGE_GRID_TRADE_LOG_FILE")
@@ -1827,6 +1839,14 @@ def kraken_userref_for_value(value):
 
 
 BOT_ORDER_USERREF = kraken_userref_for_value(order_owner_tag_source)
+BOT_CLIENT_ORDER_PREFIX = (
+    "rg" + hashlib.sha256(order_owner_tag_source.encode("utf-8")).hexdigest()[:4]
+)
+
+
+def new_client_order_id(side):
+    side_token = "b" if side == "buy" else "s"
+    return f"{BOT_CLIENT_ORDER_PREFIX}{side_token}{uuid.uuid4().hex[:11]}"
 
 
 def runtime_identity():
@@ -2210,6 +2230,7 @@ def load_state():
     default = {
         "open_buy_orders": {},
         "open_sell_orders": {},
+        "pending_order_intents": {},
         "processed_fills": {
             "buy": {},
             "sell": {}
@@ -2240,6 +2261,10 @@ def load_state():
             "buy_orders_filled": 0,
             "sell_orders_placed": 0,
             "sell_orders_filled": 0,
+            "buy_partial_fill_events": 0,
+            "sell_partial_fill_events": 0,
+            "buy_volume_filled": 0.0,
+            "sell_volume_filled": 0.0,
             "buy_order_rejections": 0,
             "realized_gross_pnl": 0.0,
             "realized_estimated_net_pnl": 0.0,
@@ -2251,11 +2276,21 @@ def load_state():
         }
     }
 
-    if not os.path.exists(STATE_FILE):
+    loaded_state, source, recovery_errors = load_json_with_backup(
+        STATE_FILE,
+        STATE_BACKUP_FILE,
+    )
+    if loaded_state is None:
         return default
 
-    with open(STATE_FILE, encoding="utf-8") as f:
-        state = json.load(f)
+    state = loaded_state
+    if source == "backup":
+        log_event(
+            "STATE_RECOVERED_FROM_BACKUP",
+            state_file=os.path.abspath(STATE_FILE),
+            backup_file=os.path.abspath(STATE_BACKUP_FILE),
+            recovery_errors=recovery_errors,
+        )
 
     for key in default:
         if key not in state:
@@ -2265,8 +2300,7 @@ def load_state():
 
 
 def save_state(state):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
+    atomic_write_json(STATE_FILE, state, STATE_BACKUP_FILE)
 
 
 def normalize_state(state):
@@ -2274,7 +2308,10 @@ def normalize_state(state):
     normalized_sell_orders = {}
     state.setdefault("stats", {})
     state.setdefault("processed_fills", {})
+    state.setdefault("pending_order_intents", {})
     state.setdefault("last_alerts", {})
+    if not isinstance(state["pending_order_intents"], dict):
+        state["pending_order_intents"] = {}
     if not isinstance(state["last_alerts"], dict):
         state["last_alerts"] = {}
     state["consecutive_loop_errors"] = int(state.get("consecutive_loop_errors", 0) or 0)
@@ -2294,6 +2331,10 @@ def normalize_state(state):
         "buy_orders_filled": 0,
         "sell_orders_placed": 0,
         "sell_orders_filled": 0,
+        "buy_partial_fill_events": 0,
+        "sell_partial_fill_events": 0,
+        "buy_volume_filled": 0.0,
+        "sell_volume_filled": 0.0,
         "buy_order_rejections": 0,
         "realized_gross_pnl": 0.0,
         "realized_estimated_net_pnl": 0.0,
@@ -2307,18 +2348,20 @@ def normalize_state(state):
 
     for level, order in state["open_buy_orders"].items():
         if isinstance(order, dict):
-            normalized_buy_orders[level] = {
-                "txid": order.get("txid"),
-                "volume": order.get("volume"),
-                "price": order.get("price", float(level)),
-                "placed_at": order.get("placed_at"),
-                "sell_pct_override": order.get("sell_pct_override"),
-                "buy_source": order.get("buy_source"),
-                "trade_id": order.get("trade_id") or order.get("txid"),
-                "filled_at": order.get("filled_at"),
-                "sell_retry_after": order.get("sell_retry_after"),
-                "sell_failure_reason": order.get("sell_failure_reason")
-            }
+            normalized = dict(order)
+            normalized.setdefault("txid", None)
+            normalized.setdefault("volume", None)
+            normalized.setdefault("price", float(level))
+            normalized.setdefault("placed_at", None)
+            normalized.setdefault("sell_pct_override", None)
+            normalized.setdefault("buy_source", None)
+            normalized["trade_id"] = (
+                normalized.get("trade_id") or normalized.get("txid")
+            )
+            normalized.setdefault("filled_at", None)
+            normalized.setdefault("sell_retry_after", None)
+            normalized.setdefault("sell_failure_reason", None)
+            normalized_buy_orders[level] = normalized
         else:
             normalized_buy_orders[level] = {
                 "txid": None,
@@ -2335,20 +2378,23 @@ def normalize_state(state):
 
     for txid, order in state["open_sell_orders"].items():
         if isinstance(order, dict) and "level" in order:
-            normalized_sell_orders[txid] = {
-                "level": order.get("level"),
-                "volume": order.get("volume"),
-                "buy_price": order.get("buy_price"),
-                "sell_price": order.get("sell_price"),
-                "placed_at": order.get("placed_at"),
-                "sell_pct_override": order.get("sell_pct_override"),
-                "buy_source": order.get("buy_source"),
-                "trade_id": order.get("trade_id") or order.get("buy_txid") or txid
-            }
+            normalized = dict(order)
+            normalized.setdefault("volume", None)
+            normalized.setdefault("buy_price", None)
+            normalized.setdefault("sell_price", None)
+            normalized.setdefault("placed_at", None)
+            normalized.setdefault("sell_pct_override", None)
+            normalized.setdefault("buy_source", None)
+            normalized["trade_id"] = (
+                normalized.get("trade_id")
+                or normalized.get("buy_txid")
+                or txid
+            )
+            normalized_sell_orders[txid] = normalized
         else:
             normalized_sell_orders[txid] = {
                 "level": None,
-                "volume": order.get("volume"),
+                "volume": order.get("volume") if isinstance(order, dict) else None,
                 "buy_price": None,
                 "sell_price": None,
                 "placed_at": None,
@@ -3281,30 +3327,49 @@ def buy_above_last_sell_guard_active(last_sell_at, now, guard_minutes):
 # ORDER HELPERS
 # ----------------------
 
-def place_buy(price, volume):
-    return safe_kraken_private("BUY", "/0/private/AddOrder", {
+def place_buy(price, volume, client_order_id=None):
+    payload = {
         "pair": "XXBTZUSD",
         "type": "buy",
         "ordertype": "limit",
         "price": str(round(price, PRICE_DECIMALS)),
         "volume": str(round(volume, VOLUME_DECIMALS)),
-        "userref": str(BOT_ORDER_USERREF),
-    })
+    }
+    if client_order_id:
+        payload["cl_ord_id"] = client_order_id
+    else:
+        payload["userref"] = str(BOT_ORDER_USERREF)
+    return safe_kraken_private("BUY", "/0/private/AddOrder", payload)
 
 
-def place_sell(price, volume):
-    return safe_kraken_private("SELL", "/0/private/AddOrder", {
+def place_sell(price, volume, client_order_id=None):
+    payload = {
         "pair": "XXBTZUSD",
         "type": "sell",
         "ordertype": "limit",
         "price": str(round(price, PRICE_DECIMALS)),
         "volume": str(round(volume, VOLUME_DECIMALS)),
-        "userref": str(BOT_ORDER_USERREF),
-    })
+    }
+    if client_order_id:
+        payload["cl_ord_id"] = client_order_id
+    else:
+        payload["userref"] = str(BOT_ORDER_USERREF)
+    return safe_kraken_private("SELL", "/0/private/AddOrder", payload)
 
 
 def cancel_order(txid):
     return safe_kraken_private("CANCEL_ORDER", "/0/private/CancelOrder", {"txid": txid})
+
+
+def amend_order(txid, price):
+    return safe_kraken_private(
+        "AMEND_ORDER",
+        "/0/private/AmendOrder",
+        {
+            "txid": txid,
+            "limit_price": str(round(price, PRICE_DECIMALS)),
+        },
+    )
 
 
 def order_filled(txid):
@@ -3319,6 +3384,11 @@ def order_filled(txid):
 
 
 def get_order_status(txid):
+    order = get_order_details(txid)
+    return order.get("status") if isinstance(order, dict) else None
+
+
+def get_order_details(txid):
     try:
         r = safe_kraken_private(
             "ORDER_STATUS",
@@ -3330,13 +3400,21 @@ def get_order_status(txid):
             log_event("ORDER_STATUS_ERROR", txid=txid, message="missing_result")
             return None
 
-        return r["result"][txid]["status"]
+        order = r["result"][txid]
+        return order if isinstance(order, dict) else None
     except Exception as e:
         log_event("ORDER_STATUS_ERROR", txid=txid, message=str(e))
         return None
 
 
 def get_order_statuses(txids):
+    return {
+        txid: order.get("status")
+        for txid, order in get_order_details_batch(txids).items()
+    }
+
+
+def get_order_details_batch(txids):
     unique_txids = [txid for txid in dict.fromkeys(txids) if txid]
     if not unique_txids:
         return {}
@@ -3349,15 +3427,15 @@ def get_order_statuses(txids):
     if not response or "result" not in response:
         return {}
 
-    status_map = {}
+    order_map = {}
     for txid in unique_txids:
         order = response["result"].get(txid)
         if not isinstance(order, dict):
             log_event("ORDER_STATUS_ERROR", txid=txid, message="missing_result")
             continue
-        status_map[txid] = order.get("status")
+        order_map[txid] = order
 
-    return status_map
+    return order_map
 
 
 def compute_sell_target_price(buy_price, profit_target_override=None):
@@ -4540,8 +4618,198 @@ def kraken_order_userref(order):
     return None
 
 
+def kraken_order_client_id(order):
+    if not isinstance(order, dict):
+        return None
+
+    description = order.get("descr")
+    candidates = [
+        order.get("cl_ord_id"),
+        order.get("cl_ordid"),
+        order.get("clOrdId"),
+    ]
+    if isinstance(description, dict):
+        candidates.extend([
+            description.get("cl_ord_id"),
+            description.get("cl_ordid"),
+            description.get("clOrdId"),
+        ])
+
+    for value in candidates:
+        normalized = str(value or "").strip()
+        if normalized:
+            return normalized
+    return None
+
+
 def kraken_order_belongs_to_this_bot(order):
+    client_order_id = kraken_order_client_id(order)
+    if client_order_id and client_order_id.startswith(BOT_CLIENT_ORDER_PREFIX):
+        return True
     return kraken_order_userref(order) == BOT_ORDER_USERREF
+
+
+def recover_order_by_client_id(client_order_id, created_at=None):
+    if not client_order_id:
+        return None, None, False
+
+    response = safe_kraken_private(
+        "OPEN_ORDERS_CLIENT_ID_RECOVERY",
+        "/0/private/OpenOrders",
+    )
+    open_orders = (
+        response.get("result", {}).get("open", {})
+        if isinstance(response, dict)
+        else {}
+    ) or {}
+    open_lookup_complete = isinstance(response, dict) and "result" in response
+    for txid, order in open_orders.items():
+        if kraken_order_client_id(order) == client_order_id:
+            return txid, order, True
+
+    closed_orders_data = None
+    created_at_dt = parse_iso8601(created_at)
+    if created_at_dt is not None:
+        closed_orders_data = {
+            "start": max(0, int(created_at_dt.timestamp()) - 60),
+        }
+    response = safe_kraken_private(
+        "CLOSED_ORDERS_CLIENT_ID_RECOVERY",
+        "/0/private/ClosedOrders",
+        closed_orders_data,
+    )
+    closed_orders = (
+        response.get("result", {}).get("closed", {})
+        if isinstance(response, dict)
+        else {}
+    ) or {}
+    closed_lookup_complete = isinstance(response, dict) and "result" in response
+    for txid, order in closed_orders.items():
+        if kraken_order_client_id(order) == client_order_id:
+            return txid, order, True
+    return None, None, open_lookup_complete and closed_lookup_complete
+
+
+def submit_limit_order(
+    side,
+    price,
+    volume,
+    client_order_id,
+    state_key=None,
+    order_state=None,
+    state_transition=None,
+):
+    pending_intents = state.setdefault("pending_order_intents", {})
+    for existing_client_id, intent in list(pending_intents.items()):
+        if existing_client_id == client_order_id or not isinstance(intent, dict):
+            continue
+        if intent.get("side") != side or intent.get("state_key") != state_key:
+            continue
+        recovered_txid, _, lookup_complete = recover_order_by_client_id(
+            existing_client_id,
+            intent.get("created_at"),
+        )
+        if recovered_txid:
+            log_event(
+                "ORDER_INTENT_RECOVERED_BEFORE_RESUBMIT",
+                side=side,
+                txid=recovered_txid,
+                client_order_id=existing_client_id,
+                state_key=state_key,
+            )
+            return {
+                "error": [],
+                "result": {
+                    "txid": [recovered_txid],
+                    "recovered_by_client_order_id": True,
+                    "intent_client_order_id": existing_client_id,
+                    "intent_order_state": dict(intent.get("order_state") or {}),
+                },
+            }, True
+        if lookup_complete:
+            pending_intents.pop(existing_client_id, None)
+            save_state(state)
+            log_event(
+                "ORDER_INTENT_CLEARED_NOT_FOUND",
+                side=side,
+                client_order_id=existing_client_id,
+                state_key=state_key,
+                created_at=intent.get("created_at"),
+            )
+            continue
+        log_event(
+            "ORDER_SUBMISSION_DEFERRED_PENDING_INTENT",
+            side=side,
+            client_order_id=existing_client_id,
+            state_key=state_key,
+            created_at=intent.get("created_at"),
+        )
+        return {
+            "error": ["ELocal:Unresolved pending order intent"],
+        }, False
+
+    pending_intents[client_order_id] = {
+        "side": side,
+        "price": price,
+        "volume": volume,
+        "state_key": state_key,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "order_state": dict(order_state or {}),
+        "state_transition": dict(state_transition or {}),
+    }
+    save_state(state)
+
+    place_fn = place_buy if side == "buy" else place_sell
+    response = kraken_call(
+        side.upper(),
+        place_fn,
+        price,
+        volume,
+        client_order_id,
+    )
+    if response and not response.get("error"):
+        return response, False
+
+    recovered_txid, recovered_order, lookup_complete = (
+        recover_order_by_client_id(
+            client_order_id,
+            pending_intents[client_order_id].get("created_at"),
+        )
+    )
+    if not recovered_txid:
+        if lookup_complete:
+            pending_intents.pop(client_order_id, None)
+            save_state(state)
+        return response, False
+
+    log_event(
+        "ORDER_SUBMISSION_RECOVERED",
+        side=side,
+        txid=recovered_txid,
+        client_order_id=client_order_id,
+        price=order_limit_price(recovered_order, price),
+        volume=(
+            order_execution(
+                recovered_order,
+                fallback_volume=volume,
+                fallback_price=price,
+            )["order_volume"]
+        ),
+    )
+    return {
+        "error": [],
+        "result": {
+            "txid": [recovered_txid],
+            "recovered_by_client_order_id": True,
+        },
+    }, True
+
+
+def complete_order_intent(*client_order_ids):
+    pending_intents = state.setdefault("pending_order_intents", {})
+    for client_order_id in client_order_ids:
+        if client_order_id:
+            pending_intents.pop(client_order_id, None)
 
 
 def startup_reconcile_state():
@@ -4569,6 +4837,125 @@ def startup_reconcile_state():
         )
         return
 
+    pending_intents = state.setdefault("pending_order_intents", {})
+    pending_client_ids = set(pending_intents)
+    pending_matches = {
+        kraken_order_client_id(order): (txid, order)
+        for txid, order in kraken_open_orders.items()
+        if kraken_order_client_id(order) in pending_client_ids
+    }
+    if pending_client_ids - set(pending_matches):
+        intent_datetimes = [
+            parse_iso8601(intent.get("created_at"))
+            for intent in pending_intents.values()
+            if isinstance(intent, dict)
+        ]
+        intent_datetimes = [value for value in intent_datetimes if value is not None]
+        closed_orders_data = (
+            {"start": max(0, int(min(intent_datetimes).timestamp()) - 60)}
+            if intent_datetimes
+            else None
+        )
+        closed_orders_resp = safe_kraken_private(
+            "CLOSED_ORDERS_STARTUP_RECONCILE",
+            "/0/private/ClosedOrders",
+            closed_orders_data,
+        )
+        closed_orders = (
+            closed_orders_resp.get("result", {}).get("closed", {})
+            if isinstance(closed_orders_resp, dict)
+            else {}
+        ) or {}
+        for txid, order in closed_orders.items():
+            client_order_id = kraken_order_client_id(order)
+            if (
+                client_order_id in pending_client_ids
+                and client_order_id not in pending_matches
+            ):
+                pending_matches[client_order_id] = (txid, order)
+
+    for client_order_id, intent in list(pending_intents.items()):
+        match = pending_matches.get(client_order_id)
+        if not match or not isinstance(intent, dict):
+            log_event(
+                "STARTUP_RECONCILE_PENDING_ORDER_INTENT",
+                client_order_id=client_order_id,
+                side=(intent.get("side") if isinstance(intent, dict) else None),
+                state_key=(
+                    intent.get("state_key") if isinstance(intent, dict) else None
+                ),
+                created_at=(
+                    intent.get("created_at") if isinstance(intent, dict) else None
+                ),
+                reason="kraken_order_not_found",
+            )
+            continue
+
+        txid, kraken_order = match
+        side = intent.get("side")
+        order_state = dict(intent.get("order_state") or {})
+        order_state.update({
+            "client_order_id": client_order_id,
+            "submission_recovered": True,
+        })
+        if side == "buy":
+            state_key = str(intent.get("state_key") or intent.get("price"))
+            order_state["txid"] = txid
+            order_state["trade_id"] = order_state.get("trade_id") or txid
+            state["open_buy_orders"][state_key] = order_state
+        elif side == "sell":
+            order_state["trade_id"] = order_state.get("trade_id") or txid
+            state["open_sell_orders"][txid] = order_state
+        else:
+            log_event(
+                "STARTUP_RECONCILE_PENDING_ORDER_INTENT",
+                client_order_id=client_order_id,
+                txid=txid,
+                side=side,
+                reason="invalid_side",
+            )
+            continue
+
+        state_transition = intent.get("state_transition") or {}
+        remove_buy_level = state_transition.get("remove_buy_level")
+        if remove_buy_level is not None:
+            state["open_buy_orders"].pop(str(remove_buy_level), None)
+        remove_sell_txid = state_transition.get("remove_sell_txid")
+        if remove_sell_txid and remove_sell_txid != txid:
+            state["open_sell_orders"].pop(remove_sell_txid, None)
+            state.setdefault(
+                "last_sell_extension_shadow_at_by_txid",
+                {},
+            ).pop(remove_sell_txid, None)
+        processed_sell_txid = state_transition.get("mark_sell_fill_processed")
+        if processed_sell_txid:
+            processed_at = datetime.now(timezone.utc).isoformat()
+            mark_fill_processed("sell", processed_sell_txid, processed_at)
+
+        pending_intents.pop(client_order_id, None)
+        state["stats"][f"{side}_orders_placed"] += 1
+        increment_source_stat(
+            state["stats"],
+            f"{side}_orders_placed_by_source",
+            order_state.get("buy_source"),
+        )
+        state_changed = True
+        log_event(
+            "STARTUP_RECONCILE_ORDER_INTENT_ADOPTED",
+            client_order_id=client_order_id,
+            txid=txid,
+            side=side,
+            status=kraken_order.get("status"),
+            state_key=intent.get("state_key"),
+            price=order_limit_price(kraken_order, intent.get("price")),
+            volume=order_execution(
+                kraken_order,
+                fallback_volume=intent.get("volume"),
+                fallback_price=intent.get("price"),
+            )["order_volume"],
+            buy_source=order_state.get("buy_source"),
+        )
+
     tracked_buy_txids = [
         order.get("txid")
         for order in state["open_buy_orders"].values()
@@ -4576,7 +4963,7 @@ def startup_reconcile_state():
     ]
     tracked_sell_txids = list(state["open_sell_orders"].keys())
     tracked_txids = tracked_sell_txids + tracked_buy_txids
-    status_map = get_order_statuses(tracked_txids)
+    order_details_map = get_order_details_batch(tracked_txids)
 
     for level, order in list(state["open_buy_orders"].items()):
         txid = order.get("txid")
@@ -4591,11 +4978,40 @@ def startup_reconcile_state():
             )
             continue
 
-        status = status_map.get(txid)
+        order_details = order_details_map.get(txid)
+        status = (
+            order_details.get("status")
+            if isinstance(order_details, dict)
+            else None
+        )
         if txid in open_order_txids:
             status = "open"
 
         if status in ("open", "closed", None):
+            continue
+
+        execution = order_execution(
+            order_details,
+            fallback_volume=order.get("volume"),
+            fallback_price=order.get("price", level),
+        )
+        if status in ("canceled", "expired") and execution["executed_volume"] > 0:
+            order["terminal_status"] = status
+            order["volume"] = execution["executed_volume"]
+            order["price"] = execution["average_price"] or order.get("price")
+            order["buy_cost"] = execution["cost"]
+            order["buy_fee"] = execution["fee"]
+            state_changed = True
+            log_event(
+                "STARTUP_RECONCILE_PARTIAL_BUY_PENDING_EXIT",
+                level=level,
+                txid=txid,
+                status=status,
+                executed_volume=execution["executed_volume"],
+                remaining_volume=execution["remaining_volume"],
+                average_price=execution["average_price"],
+                buy_source=order.get("buy_source"),
+            )
             continue
 
         if status in ("canceled", "expired"):
@@ -4610,7 +5026,12 @@ def startup_reconcile_state():
             )
 
     for txid, order in list(state["open_sell_orders"].items()):
-        status = status_map.get(txid)
+        order_details = order_details_map.get(txid)
+        status = (
+            order_details.get("status")
+            if isinstance(order_details, dict)
+            else None
+        )
         if txid in open_order_txids:
             status = "open"
 
@@ -4627,13 +5048,22 @@ def startup_reconcile_state():
             continue
 
         if status in ("canceled", "expired"):
-            state["open_sell_orders"].pop(txid, None)
+            execution = order_execution(
+                order_details,
+                fallback_volume=order.get("volume"),
+                fallback_price=order.get("sell_price"),
+            )
+            order["exit_recovery_required"] = True
+            order["terminal_status"] = status
+            order["remaining_volume"] = execution["remaining_volume"]
             state_changed = True
             log_event(
-                "STARTUP_RECONCILE_DROP_SELL",
+                "STARTUP_RECONCILE_SELL_PENDING_RECOVERY",
                 txid=txid,
                 level=order.get("level"),
-                reason=f"status_{status}",
+                status=status,
+                executed_volume=execution["executed_volume"],
+                remaining_volume=execution["remaining_volume"],
                 buy_source=order.get("buy_source")
             )
 
@@ -4884,6 +5314,9 @@ def main():
         kraken_lockout_cooldown_seconds=KRAKEN_LOCKOUT_COOLDOWN_SECONDS,
         min_signal_status=min_signal_status,
         require_fresh_signal=require_fresh_signal,
+        state_backup_file=os.path.abspath(STATE_BACKUP_FILE),
+        client_order_id_prefix=BOT_CLIENT_ORDER_PREFIX,
+        pending_order_intent_count=len(state.get("pending_order_intents", {})),
         status_file=os.path.abspath(STATUS_FILE),
         alert_log_file=os.path.abspath(ALERT_LOG_FILE),
         activity_log_file=os.path.abspath(ACTIVITY_LOG_FILE),
@@ -5554,7 +5987,7 @@ def main():
             if reconciled_levels:
                 actions.append("btc_reconciled")
 
-            order_status_map = get_order_statuses(
+            order_details_map = get_order_details_batch(
                 list(state["open_sell_orders"].keys())
                 + [
                     order.get("txid")
@@ -5564,10 +5997,21 @@ def main():
 
             # SELL EXIT CHECK
             for txid, order in list(state["open_sell_orders"].items()):
-                status = order_status_map.get(txid)
+                order_details = order_details_map.get(txid)
+                status = (
+                    order_details.get("status")
+                    if isinstance(order_details, dict)
+                    else None
+                )
 
                 if status is None:
                     continue
+
+                sell_execution = order_execution(
+                    order_details,
+                    fallback_volume=order.get("volume"),
+                    fallback_price=order.get("sell_price"),
+                )
 
                 if status == "closed":
                     if fill_already_processed("sell", txid):
@@ -5588,10 +6032,21 @@ def main():
                         continue
 
                     buy_price = order.get("buy_price")
-                    sell_price = order.get("sell_price")
-                    volume = order.get("volume", 0)
+                    sell_price = (
+                        sell_execution["average_price"]
+                        or order.get("sell_price")
+                    )
+                    volume = sell_execution["executed_volume"] or order.get(
+                        "volume",
+                        0,
+                    )
+                    buy_cost = numeric_or_default(order.get("buy_cost"), None)
+                    buy_fee = numeric_or_default(order.get("buy_fee"), 0.0)
+                    sell_cost = sell_execution["cost"]
+                    sell_fee = sell_execution["fee"]
                     gross_pnl = None
                     estimated_net_pnl = None
+                    realized_net_pnl = None
                     hold_minutes = None
 
                     if (
@@ -5603,6 +6058,16 @@ def main():
                         estimated_net_pnl = gross_pnl - (
                             volume * buy_price * round_trip_fee_pct
                         )
+                    if (
+                        buy_cost is not None
+                        and sell_cost is not None
+                        and volume > 0
+                    ):
+                        gross_pnl = sell_cost - buy_cost
+                        realized_net_pnl = (
+                            sell_cost - buy_cost - buy_fee - sell_fee
+                        )
+                        estimated_net_pnl = realized_net_pnl
 
                     placed_at = parse_iso8601(order.get("placed_at"))
                     if placed_at is not None:
@@ -5621,6 +6086,7 @@ def main():
                     if order.get("buy_source") == "llm_target":
                         state["last_llm_sell_at"] = cycle_id
                     state["stats"]["sell_orders_filled"] += 1
+                    state["stats"]["sell_volume_filled"] += volume
                     increment_source_stat(
                         state["stats"],
                         "sell_orders_filled_by_source",
@@ -5646,9 +6112,14 @@ def main():
                         volume=volume,
                         buy_price=buy_price,
                         sell_price=sell_price,
+                        buy_cost=buy_cost,
+                        buy_fee=buy_fee,
+                        sell_cost=sell_cost,
+                        sell_fee=sell_fee,
                         buy_source=order.get("buy_source"),
                         gross_pnl=gross_pnl,
                         estimated_net_pnl=estimated_net_pnl,
+                        realized_net_pnl=realized_net_pnl,
                         hold_minutes=hold_minutes
                     )
                     log_trade_activity(
@@ -5661,9 +6132,14 @@ def main():
                         volume=volume,
                         buy_price=buy_price,
                         sell_price=sell_price,
+                        buy_cost=buy_cost,
+                        buy_fee=buy_fee,
+                        sell_cost=sell_cost,
+                        sell_fee=sell_fee,
                         buy_source=order.get("buy_source"),
                         gross_pnl=gross_pnl,
                         estimated_net_pnl=estimated_net_pnl,
+                        realized_net_pnl=realized_net_pnl,
                         hold_minutes=hold_minutes
                     )
                     continue
@@ -5813,71 +6289,56 @@ def main():
                     ):
                         continue
 
-                    cancel_resp = kraken_call(
-                        "CANCEL_SELL",
-                        cancel_order,
-                        txid
-                    )
-
-                    if not cancel_resp or cancel_resp.get("error"):
-                        actions.append("sell_reprice_cancel_failed")
-                        log_event(
-                            "SELL_REPRICE_SKIPPED",
-                            cycle_id=cycle_id,
-                            txid=txid,
-                            level=order.get("level"),
-                            buy_price=buy_price,
-                            current_sell_price=current_sell_price,
-                            adjusted_sell_price=adjusted_sell_price,
-                            age_minutes=age_minutes,
-                            adjusted_profit_target_pct=adjusted_profit_target,
-                            reason="cancel_failed"
-                        )
-                        continue
-
-                    replace_resp = kraken_call(
-                        "REPRICE_SELL",
-                        place_sell,
+                    amend_resp = kraken_call(
+                        "AMEND_SELL",
+                        amend_order,
+                        txid,
                         adjusted_sell_price,
-                        order["volume"]
                     )
-
-                    if not replace_resp or replace_resp.get("error"):
-                        actions.append("sell_reprice_replace_failed")
-                        log_event(
-                            "SELL_REPRICE_SKIPPED",
-                            cycle_id=cycle_id,
-                            txid=txid,
-                            level=order.get("level"),
-                            buy_price=buy_price,
-                            current_sell_price=current_sell_price,
-                            adjusted_sell_price=adjusted_sell_price,
-                            age_minutes=age_minutes,
-                            adjusted_profit_target_pct=adjusted_profit_target,
-                            reason="replace_failed"
+                    amend_recovered_after_error = False
+                    if not amend_resp or amend_resp.get("error"):
+                        verified_order = get_order_details(txid)
+                        verified_price = order_limit_price(
+                            verified_order,
+                            current_sell_price,
                         )
-                        continue
+                        verified_status = (
+                            verified_order.get("status")
+                            if isinstance(verified_order, dict)
+                            else None
+                        )
+                        amend_recovered_after_error = (
+                            verified_status == "open"
+                            and verified_price is not None
+                            and round(verified_price, PRICE_DECIMALS)
+                            == round(adjusted_sell_price, PRICE_DECIMALS)
+                        )
+                        if not amend_recovered_after_error:
+                            actions.append("sell_reprice_amend_failed")
+                            log_event(
+                                "SELL_REPRICE_SKIPPED",
+                                cycle_id=cycle_id,
+                                txid=txid,
+                                level=order.get("level"),
+                                buy_price=buy_price,
+                                current_sell_price=current_sell_price,
+                                adjusted_sell_price=adjusted_sell_price,
+                                verified_sell_price=verified_price,
+                                verified_status=verified_status,
+                                age_minutes=age_minutes,
+                                adjusted_profit_target_pct=adjusted_profit_target,
+                                reason="amend_failed_original_exit_preserved",
+                            )
+                            continue
 
-                    new_txid = replace_resp["result"]["txid"][0]
-                    state["open_sell_orders"][new_txid] = {
-                        "level": order.get("level"),
-                        "volume": order["volume"],
-                        "buy_price": buy_price,
-                        "sell_price": adjusted_sell_price,
-                        "placed_at": order.get("placed_at"),
-                        "sell_pct_override": sell_pct_override,
-                        "buy_source": order.get("buy_source"),
-                        "trade_id": order.get("trade_id") or txid
-                    }
-                    shadow_extension_map = state.setdefault(
-                        "last_sell_extension_shadow_at_by_txid",
-                        {},
+                    amend_result = (
+                        amend_resp.get("result", {})
+                        if isinstance(amend_resp, dict)
+                        else {}
                     )
-                    if txid in shadow_extension_map:
-                        shadow_extension_map[new_txid] = shadow_extension_map.pop(
-                            txid
-                        )
-                    del state["open_sell_orders"][txid]
+                    order["sell_price"] = adjusted_sell_price
+                    order["last_amended_at"] = cycle_id
+                    order["last_amend_id"] = amend_result.get("amend_id")
                     save_state(state)
                     actions.append("sell_repriced")
 
@@ -5890,7 +6351,9 @@ def main():
                         ),
                         cycle_id=cycle_id,
                         old_txid=txid,
-                        txid=new_txid,
+                        txid=txid,
+                        amend_id=amend_result.get("amend_id"),
+                        amend_recovered_after_error=amend_recovered_after_error,
                         level=order.get("level"),
                         volume=order.get("volume"),
                         buy_price=buy_price,
@@ -5906,102 +6369,441 @@ def main():
                         side="sell",
                         price=round(adjusted_sell_price, PRICE_DECIMALS),
                         quantity=round(order["volume"], VOLUME_DECIMALS),
-                        order_id=new_txid,
+                        order_id=txid,
                         timestamp=cycle_id,
-                        notes="sell_reprice"
+                        notes="sell_amend"
                     )
                     continue
 
                 if status in ("canceled", "expired"):
                     sell_level = order.get("level")
+                    original_volume = max(
+                        0.0,
+                        numeric_or_default(order.get("volume"), 0.0),
+                    )
+                    executed_volume = sell_execution["executed_volume"]
+                    remaining_volume = sell_execution["remaining_volume"]
+                    volume_tolerance = max(
+                        10 ** (-VOLUME_DECIMALS),
+                        0.00000002,
+                    )
+                    total_buy_cost = numeric_or_default(
+                        order.get("buy_cost"),
+                        None,
+                    )
+                    total_buy_fee = numeric_or_default(
+                        order.get("buy_fee"),
+                        0.0,
+                    )
+                    cost_allocation = allocate_position_costs(
+                        original_volume,
+                        executed_volume,
+                        total_buy_cost,
+                        total_buy_fee,
+                    )
+                    executed_buy_cost = cost_allocation["executed_cost"]
+                    executed_buy_fee = cost_allocation["executed_fee"]
+                    remaining_buy_cost = cost_allocation["remaining_cost"]
+                    remaining_buy_fee = cost_allocation["remaining_fee"]
+                    if order.get("terminal_execution_accounted"):
+                        remaining_buy_cost = total_buy_cost
+                        remaining_buy_fee = total_buy_fee
+
+                    partial_gross_pnl = None
+                    partial_net_pnl = None
+                    if (
+                        executed_volume > 0
+                        and not order.get("terminal_execution_accounted")
+                    ):
+                        executed_sell_price = (
+                            sell_execution["average_price"]
+                            or order.get("sell_price")
+                        )
+                        executed_sell_cost = sell_execution["cost"]
+                        executed_sell_fee = sell_execution["fee"]
+                        buy_price = numeric_or_default(
+                            order.get("buy_price"),
+                            None,
+                        )
+                        if (
+                            executed_buy_cost is not None
+                            and executed_sell_cost is not None
+                        ):
+                            partial_gross_pnl = (
+                                executed_sell_cost - executed_buy_cost
+                            )
+                            partial_net_pnl = (
+                                executed_sell_cost
+                                - executed_buy_cost
+                                - executed_buy_fee
+                                - executed_sell_fee
+                            )
+                        elif (
+                            buy_price is not None
+                            and executed_sell_price is not None
+                        ):
+                            partial_gross_pnl = executed_volume * (
+                                executed_sell_price - buy_price
+                            )
+                            partial_net_pnl = partial_gross_pnl - (
+                                executed_volume
+                                * buy_price
+                                * round_trip_fee_pct
+                            )
+
+                        order["terminal_execution_accounted"] = True
+                        order["terminal_executed_volume"] = executed_volume
+                        order["terminal_sell_cost"] = executed_sell_cost
+                        order["terminal_sell_fee"] = executed_sell_fee
+                        terminal_fill_event = (
+                            "SELL_ORDER_PARTIALLY_FILLED"
+                            if remaining_volume > volume_tolerance
+                            else "SELL_ORDER_FILLED"
+                        )
+                        if remaining_volume > volume_tolerance:
+                            state["stats"]["sell_partial_fill_events"] += 1
+                        state["stats"]["sell_volume_filled"] += executed_volume
+                        if partial_gross_pnl is not None:
+                            state["stats"]["realized_gross_pnl"] += (
+                                partial_gross_pnl
+                            )
+                        if partial_net_pnl is not None:
+                            state["stats"]["realized_estimated_net_pnl"] += (
+                                partial_net_pnl
+                            )
+                        log_and_console(
+                            terminal_fill_event,
+                            message=(
+                                f"SELL terminal execution for level {sell_level}"
+                            ),
+                            cycle_id=cycle_id,
+                            txid=txid,
+                            trade_id=order.get("trade_id") or txid,
+                            terminal_status=status,
+                            level=sell_level,
+                            executed_volume=executed_volume,
+                            remaining_volume=remaining_volume,
+                            buy_price=buy_price,
+                            sell_price=executed_sell_price,
+                            sell_cost=executed_sell_cost,
+                            sell_fee=executed_sell_fee,
+                            buy_source=order.get("buy_source"),
+                            gross_pnl=partial_gross_pnl,
+                            realized_net_pnl=partial_net_pnl,
+                        )
+                        log_trade_activity(
+                            terminal_fill_event,
+                            mode="live",
+                            cycle_id=cycle_id,
+                            txid=txid,
+                            trade_id=order.get("trade_id") or txid,
+                            terminal_status=status,
+                            level=sell_level,
+                            executed_volume=executed_volume,
+                            remaining_volume=remaining_volume,
+                            buy_price=buy_price,
+                            sell_price=executed_sell_price,
+                            sell_cost=executed_sell_cost,
+                            sell_fee=executed_sell_fee,
+                            buy_source=order.get("buy_source"),
+                            gross_pnl=partial_gross_pnl,
+                            realized_net_pnl=partial_net_pnl,
+                        )
+
+                    if remaining_volume <= volume_tolerance:
+                        del state["open_sell_orders"][txid]
+                        state.setdefault(
+                            "last_sell_extension_shadow_at_by_txid",
+                            {},
+                        ).pop(txid, None)
+                        state["stats"]["sell_orders_filled"] += 1
+                        increment_source_stat(
+                            state["stats"],
+                            "sell_orders_filled_by_source",
+                            order.get("buy_source"),
+                        )
+                        state["last_sell_price"] = (
+                            sell_execution["average_price"]
+                            or order.get("sell_price")
+                        )
+                        state["last_sell_at"] = cycle_id
+                        if order.get("buy_source") == "llm_target":
+                            state["last_llm_sell_at"] = cycle_id
+                        mark_fill_processed("sell", txid, cycle_id)
+                        save_state(state)
+                        actions.append("sell_terminal_fill_completed")
+                        log_event(
+                            "SELL_TERMINAL_FILL_COMPLETED",
+                            cycle_id=cycle_id,
+                            txid=txid,
+                            terminal_status=status,
+                            level=sell_level,
+                            executed_volume=executed_volume,
+                            buy_source=order.get("buy_source"),
+                        )
+                        continue
+
+                    recovery_client_order_id = new_client_order_id("sell")
+                    recovery_sell_price = numeric_or_default(
+                        order.get("sell_price"),
+                        sell_execution["average_price"],
+                    )
+                    recovery_order_state = dict(order)
+                    recovery_order_state.update({
+                        "volume": remaining_volume,
+                        "sell_price": recovery_sell_price,
+                        "placed_at": cycle_id,
+                        "buy_cost": remaining_buy_cost,
+                        "buy_fee": remaining_buy_fee,
+                        "recovery_of_txid": txid,
+                        "recovery_terminal_status": status,
+                        "recovery_executed_volume": executed_volume,
+                    })
+                    for recovery_field in (
+                        "exit_recovery_required",
+                        "terminal_status",
+                        "remaining_volume",
+                        "recovery_last_attempt_at",
+                        "recovery_failure",
+                        "terminal_execution_accounted",
+                        "terminal_executed_volume",
+                        "terminal_sell_cost",
+                        "terminal_sell_fee",
+                    ):
+                        recovery_order_state.pop(recovery_field, None)
+                    recovery_resp, recovery_submission_recovered = (
+                        submit_limit_order(
+                            "sell",
+                            recovery_sell_price,
+                            remaining_volume,
+                            recovery_client_order_id,
+                            state_key=f"sell_recovery:{txid}",
+                            order_state=recovery_order_state,
+                            state_transition={
+                                "remove_sell_txid": txid,
+                                "mark_sell_fill_processed": txid,
+                            },
+                        )
+                    )
+                    if not recovery_resp or recovery_resp.get("error"):
+                        order["exit_recovery_required"] = True
+                        order["terminal_status"] = status
+                        order["remaining_volume"] = remaining_volume
+                        order["recovery_last_attempt_at"] = cycle_id
+                        order["recovery_failure"] = (
+                            recovery_resp.get("error")
+                            if isinstance(recovery_resp, dict)
+                            else "no_response"
+                        )
+                        if order.get("terminal_execution_accounted"):
+                            order["volume"] = remaining_volume
+                            order["buy_cost"] = remaining_buy_cost
+                            order["buy_fee"] = remaining_buy_fee
+                        save_state(state)
+                        actions.append("sell_exit_recovery_failed")
+                        emit_alert(
+                            "sell_exit_recovery_failed",
+                            "critical",
+                            "Canceled sell inventory could not be re-listed",
+                            cycle_id=cycle_id,
+                            txid=txid,
+                            terminal_status=status,
+                            level=sell_level,
+                            remaining_volume=remaining_volume,
+                            sell_price=recovery_sell_price,
+                            buy_source=order.get("buy_source"),
+                            error=order.get("recovery_failure"),
+                        )
+                        continue
+
+                    recovery_txid = recovery_resp["result"]["txid"][0]
+                    accepted_client_order_id = recovery_resp["result"].get(
+                        "intent_client_order_id",
+                        recovery_client_order_id,
+                    )
+                    recovered_order = dict(
+                        recovery_resp["result"].get("intent_order_state")
+                        or recovery_order_state
+                    )
+                    recovered_order.update({
+                        "client_order_id": accepted_client_order_id,
+                        "submission_recovered": recovery_submission_recovered,
+                    })
+                    state["open_sell_orders"][recovery_txid] = recovered_order
                     del state["open_sell_orders"][txid]
                     state.setdefault(
                         "last_sell_extension_shadow_at_by_txid",
                         {},
                     ).pop(txid, None)
+                    state["stats"]["sell_orders_placed"] += 1
+                    increment_source_stat(
+                        state["stats"],
+                        "sell_orders_placed_by_source",
+                        order.get("buy_source"),
+                    )
+                    mark_fill_processed("sell", txid, cycle_id)
+                    complete_order_intent(
+                        recovery_client_order_id,
+                        accepted_client_order_id,
+                    )
                     save_state(state)
-                    actions.append(f"sell_{status}")
-
+                    actions.append("sell_exit_recovered")
                     log_and_console(
-                        "ORDER_" + status.upper(),
-                        message=f"SELL order {status} for level {sell_level}",
+                        "SELL_EXIT_RECOVERED",
+                        message=(
+                            f"SELL exit recovered for level {sell_level}"
+                        ),
                         cycle_id=cycle_id,
-                        txid=txid,
-                        side="sell",
+                        old_txid=txid,
+                        txid=recovery_txid,
+                        trade_id=order.get("trade_id") or txid,
+                        terminal_status=status,
                         level=sell_level,
-                        volume=order.get("volume"),
-                        buy_price=order.get("buy_price"),
-                        sell_price=order.get("sell_price")
+                        executed_volume=executed_volume,
+                        remaining_volume=remaining_volume,
+                        sell_price=recovery_sell_price,
+                        client_order_id=accepted_client_order_id,
+                        submission_recovered=recovery_submission_recovered,
+                        buy_source=order.get("buy_source"),
                     )
                     log_trade_activity(
-                        "SELL_ORDER_" + status.upper(),
+                        "SELL_EXIT_RECOVERED",
                         mode="live",
                         cycle_id=cycle_id,
-                        txid=txid,
+                        old_txid=txid,
+                        txid=recovery_txid,
+                        trade_id=order.get("trade_id") or txid,
+                        terminal_status=status,
                         level=sell_level,
-                        volume=order.get("volume"),
-                        buy_price=order.get("buy_price"),
-                        sell_price=order.get("sell_price"),
-                        buy_source=order.get("buy_source")
+                        executed_volume=executed_volume,
+                        remaining_volume=remaining_volume,
+                        sell_price=recovery_sell_price,
+                        client_order_id=accepted_client_order_id,
+                        submission_recovered=recovery_submission_recovered,
+                        buy_source=order.get("buy_source"),
                     )
                     notify_order_tracker(
                         trade_id=order.get("trade_id") or txid,
                         side="sell",
-                        price=order.get("sell_price"),
-                        quantity=order.get("volume"),
-                        order_id=txid,
+                        price=recovery_sell_price,
+                        quantity=remaining_volume,
+                        order_id=recovery_txid,
                         timestamp=cycle_id,
-                        notes=f"order_status={status}",
-                        status=status
+                        notes=f"exit_recovery_of={txid}",
                     )
 
             # SELL CHECK
             for level, order in list(state["open_buy_orders"].items()):
                 txid = order["txid"]
-                status = order_status_map.get(txid)
+                order_details = order_details_map.get(txid)
+                status = (
+                    order_details.get("status")
+                    if isinstance(order_details, dict)
+                    else None
+                )
 
                 if status is None:
                     continue
 
-                if status in ("canceled", "expired"):
-                    del state["open_buy_orders"][level]
-                    save_state(state)
-                    actions.append(f"buy_{status}")
+                buy_execution = order_execution(
+                    order_details,
+                    fallback_volume=order.get("volume"),
+                    fallback_price=order.get("price", level),
+                )
 
-                    log_and_console(
-                        "ORDER_" + status.upper(),
-                        message=f"BUY order {status} for level {level}",
-                        cycle_id=cycle_id,
-                        txid=txid,
-                        side="buy",
-                        level=level,
-                        volume=order.get("volume"),
-                        price=order.get("price", float(level))
-                    )
-                    log_trade_activity(
-                        "BUY_ORDER_" + status.upper(),
-                        mode="live",
-                        cycle_id=cycle_id,
-                        txid=txid,
-                        level=level,
-                        volume=order.get("volume"),
-                        price=order.get("price", float(level)),
-                        buy_source=order.get("buy_source")
-                    )
-                    notify_order_tracker(
-                        trade_id=order.get("trade_id") or txid,
-                        side="buy",
-                        price=order.get("price", float(level)),
-                        quantity=order.get("volume"),
-                        order_id=txid,
-                        timestamp=cycle_id,
-                        notes=f"order_status={status}",
-                        status=status
-                    )
-                    continue
+                if status in ("canceled", "expired"):
+                    if buy_execution["executed_volume"] > 0:
+                        order["terminal_status"] = status
+                        order["volume"] = buy_execution["executed_volume"]
+                        order["price"] = (
+                            buy_execution["average_price"]
+                            or order.get("price", float(level))
+                        )
+                        order["buy_cost"] = buy_execution["cost"]
+                        order["buy_fee"] = buy_execution["fee"]
+                        status = "closed"
+                        if not order.get("partial_fill_logged"):
+                            order["partial_fill_logged"] = True
+                            state["stats"]["buy_partial_fill_events"] += 1
+                            log_and_console(
+                                "BUY_ORDER_PARTIALLY_FILLED",
+                                message=(
+                                    f"BUY partially filled @ "
+                                    f"{round(order['price'], PRICE_DECIMALS)}"
+                                ),
+                                cycle_id=cycle_id,
+                                txid=txid,
+                                level=level,
+                                terminal_status=order["terminal_status"],
+                                executed_volume=buy_execution["executed_volume"],
+                                canceled_volume=buy_execution["remaining_volume"],
+                                price=order["price"],
+                                buy_cost=order.get("buy_cost"),
+                                buy_fee=order.get("buy_fee"),
+                                buy_source=order.get("buy_source"),
+                            )
+                            log_trade_activity(
+                                "BUY_ORDER_PARTIALLY_FILLED",
+                                mode="live",
+                                cycle_id=cycle_id,
+                                txid=txid,
+                                level=level,
+                                terminal_status=order["terminal_status"],
+                                executed_volume=buy_execution["executed_volume"],
+                                canceled_volume=buy_execution["remaining_volume"],
+                                price=order["price"],
+                                buy_cost=order.get("buy_cost"),
+                                buy_fee=order.get("buy_fee"),
+                                buy_source=order.get("buy_source"),
+                            )
+                    else:
+                        del state["open_buy_orders"][level]
+                        save_state(state)
+                        actions.append(f"buy_{status}")
+
+                        log_and_console(
+                            "ORDER_" + status.upper(),
+                            message=f"BUY order {status} for level {level}",
+                            cycle_id=cycle_id,
+                            txid=txid,
+                            side="buy",
+                            level=level,
+                            volume=order.get("volume"),
+                            price=order.get("price", float(level))
+                        )
+                        log_trade_activity(
+                            "BUY_ORDER_" + status.upper(),
+                            mode="live",
+                            cycle_id=cycle_id,
+                            txid=txid,
+                            level=level,
+                            volume=order.get("volume"),
+                            price=order.get("price", float(level)),
+                            buy_source=order.get("buy_source")
+                        )
+                        notify_order_tracker(
+                            trade_id=order.get("trade_id") or txid,
+                            side="buy",
+                            price=order.get("price", float(level)),
+                            quantity=order.get("volume"),
+                            order_id=txid,
+                            timestamp=cycle_id,
+                            notes=f"order_status={status}",
+                            status=status
+                        )
+                        continue
 
                 if status != "closed":
                     continue
+
+                if buy_execution["executed_volume"] > 0:
+                    order["volume"] = buy_execution["executed_volume"]
+                    order["price"] = (
+                        buy_execution["average_price"]
+                        or order.get("price", float(level))
+                    )
+                    order["buy_cost"] = buy_execution["cost"]
+                    order["buy_fee"] = buy_execution["fee"]
 
                 sell_backoff_remaining = sell_backoff_remaining_seconds()
                 order_sell_retry_after = parse_iso8601(
@@ -6034,7 +6836,10 @@ def main():
                     )
                     continue
 
-                buy_price = float(level)
+                buy_price = numeric_or_default(
+                    order.get("price"),
+                    float(level),
+                )
                 sell_pct_override = order.get("sell_pct_override")
                 buy_source = order.get("buy_source")
                 target_profit_pct = effective_sell_profit_target(
@@ -6057,6 +6862,7 @@ def main():
                 first_buy_fill_processing = not fill_already_processed("buy", txid)
                 if first_buy_fill_processing:
                     state["stats"]["buy_orders_filled"] += 1
+                    state["stats"]["buy_volume_filled"] += order["volume"]
                     increment_source_stat(
                         state["stats"],
                         "buy_orders_filled_by_source",
@@ -6183,11 +6989,34 @@ def main():
                         )
                     continue
 
-                sell_resp = kraken_call(
-                    "SELL",
-                    place_sell,
+                sell_client_order_id = new_client_order_id("sell")
+                sell_order_state = {
+                    "level": level,
+                    "volume": order["volume"],
+                    "buy_price": buy_price,
+                    "sell_price": sell_price,
+                    "placed_at": cycle_id,
+                    "sell_pct_override": target_profit_pct,
+                    "buy_source": buy_source,
+                    "trade_id": order.get("trade_id") or order.get("txid"),
+                    "buy_cost": order.get("buy_cost"),
+                    "buy_fee": order.get("buy_fee"),
+                    "original_level": order.get("original_level"),
+                    "stale_level_reanchor_applied": bool(
+                        order.get("stale_level_reanchor_applied")
+                    ),
+                    "stale_level_reanchor_above_level_pct": (
+                        order.get("stale_level_reanchor_above_level_pct")
+                    ),
+                }
+                sell_resp, sell_submission_recovered = submit_limit_order(
+                    "sell",
                     sell_price,
-                    order["volume"]
+                    order["volume"],
+                    sell_client_order_id,
+                    state_key=f"sell_for_buy:{order.get('txid') or level}",
+                    order_state=sell_order_state,
+                    state_transition={"remove_buy_level": level},
                 )
 
                 if not sell_resp or sell_resp.get("error"):
@@ -6299,29 +7128,29 @@ def main():
                     continue
 
                 txid = sell_resp["result"]["txid"][0]
-                state["open_sell_orders"][txid] = {
-                    "level": level,
-                    "volume": order["volume"],
-                    "buy_price": buy_price,
-                    "sell_price": sell_price,
-                    "placed_at": cycle_id,
-                    "sell_pct_override": target_profit_pct,
-                    "buy_source": buy_source,
-                    "trade_id": order.get("trade_id") or order.get("txid"),
-                    "original_level": order.get("original_level"),
-                    "stale_level_reanchor_applied": bool(
-                        order.get("stale_level_reanchor_applied")
-                    ),
-                    "stale_level_reanchor_above_level_pct": (
-                        order.get("stale_level_reanchor_above_level_pct")
-                    )
-                }
+                accepted_client_order_id = sell_resp["result"].get(
+                    "intent_client_order_id",
+                    sell_client_order_id,
+                )
+                sell_order_state = dict(
+                    sell_resp["result"].get("intent_order_state")
+                    or sell_order_state
+                )
+                sell_order_state.update({
+                    "client_order_id": accepted_client_order_id,
+                    "submission_recovered": sell_submission_recovered,
+                })
+                state["open_sell_orders"][txid] = sell_order_state
                 del state["open_buy_orders"][level]
                 state["stats"]["sell_orders_placed"] += 1
                 increment_source_stat(
                     state["stats"],
                     "sell_orders_placed_by_source",
                     buy_source
+                )
+                complete_order_intent(
+                    sell_client_order_id,
+                    accepted_client_order_id,
                 )
                 save_state(state)
                 actions.append("sell_placed")
@@ -6332,6 +7161,8 @@ def main():
                     cycle_id=cycle_id,
                     txid=txid,
                     trade_id=order.get("trade_id") or order.get("txid"),
+                    client_order_id=accepted_client_order_id,
+                    submission_recovered=sell_submission_recovered,
                     volume=round(order["volume"], VOLUME_DECIMALS),
                     price=round(sell_price, PRICE_DECIMALS),
                     buy_price=round(buy_price, PRICE_DECIMALS),
@@ -6351,6 +7182,8 @@ def main():
                     cycle_id=cycle_id,
                     txid=txid,
                     trade_id=order.get("trade_id") or order.get("txid"),
+                    client_order_id=accepted_client_order_id,
+                    submission_recovered=sell_submission_recovered,
                     volume=round(order["volume"], VOLUME_DECIMALS),
                     price=round(sell_price, PRICE_DECIMALS),
                     buy_price=round(buy_price, PRICE_DECIMALS),
@@ -7737,11 +8570,37 @@ def main():
                         save_state(state)
                         continue
 
-                    buy_resp = kraken_call(
-                        "BUY",
-                        place_buy,
+                    buy_client_order_id = new_client_order_id("buy")
+                    buy_order_state = {
+                        "volume": volume,
+                        "price": level,
+                        "original_level": (
+                            original_level if original_level != level else None
+                        ),
+                        "stale_level_reanchor_applied": bool(
+                            stale_reanchor.get("allowed")
+                        ),
+                        "stale_level_reanchor_above_level_pct": (
+                            stale_reanchor.get("above_level_pct")
+                        ),
+                        "placed_at": cycle_id,
+                        "sell_pct_override": active_sell_pct_override,
+                        "buy_source": buy_source,
+                        "anchor_strategy_router_anchor": route_anchor,
+                        "anchor_strategy_router_strategy_label": (
+                            route.get("strategy_label") if route else None
+                        ),
+                        "anchor_strategy_router_strategy_file": (
+                            route.get("strategy_file") if route else None
+                        ),
+                    }
+                    buy_resp, buy_submission_recovered = submit_limit_order(
+                        "buy",
                         level,
-                        volume
+                        volume,
+                        buy_client_order_id,
+                        state_key=key,
+                        order_state=buy_order_state,
                     )
 
                     if not buy_resp or buy_resp.get("error"):
@@ -7818,31 +8677,21 @@ def main():
                         continue
 
                     txid = buy_resp["result"]["txid"][0]
-                    state["open_buy_orders"][key] = {
+                    accepted_client_order_id = buy_resp["result"].get(
+                        "intent_client_order_id",
+                        buy_client_order_id,
+                    )
+                    buy_order_state = dict(
+                        buy_resp["result"].get("intent_order_state")
+                        or buy_order_state
+                    )
+                    buy_order_state.update({
                         "txid": txid,
-                        "volume": volume,
-                        "price": level,
-                        "original_level": (
-                            original_level if original_level != level else None
-                        ),
-                        "stale_level_reanchor_applied": bool(
-                            stale_reanchor.get("allowed")
-                        ),
-                        "stale_level_reanchor_above_level_pct": (
-                            stale_reanchor.get("above_level_pct")
-                        ),
-                        "placed_at": cycle_id,
-                        "sell_pct_override": active_sell_pct_override,
-                        "buy_source": buy_source,
                         "trade_id": txid,
-                        "anchor_strategy_router_anchor": route_anchor,
-                        "anchor_strategy_router_strategy_label": (
-                            route.get("strategy_label") if route else None
-                        ),
-                        "anchor_strategy_router_strategy_file": (
-                            route.get("strategy_file") if route else None
-                        ),
-                    }
+                        "client_order_id": accepted_client_order_id,
+                        "submission_recovered": buy_submission_recovered,
+                    })
+                    state["open_buy_orders"][key] = buy_order_state
                     if buy_source == "range_high_band":
                         state["last_high_anchor_buy_at"] = cycle_id
                         high_anchor_order_count += 1
@@ -7864,6 +8713,10 @@ def main():
                         "buy_orders_placed_by_source",
                         buy_source
                     )
+                    complete_order_intent(
+                        buy_client_order_id,
+                        accepted_client_order_id,
+                    )
                     save_state(state)
                     actions.append("buy_placed")
                     deployed_inventory_usd = projected_inventory_usd
@@ -7879,6 +8732,8 @@ def main():
                         cycle_id=cycle_id,
                         txid=txid,
                         trade_id=txid,
+                        client_order_id=accepted_client_order_id,
+                        submission_recovered=buy_submission_recovered,
                         volume=round(volume, VOLUME_DECIMALS),
                         price=round(level, PRICE_DECIMALS),
                         original_level=(
@@ -7950,6 +8805,8 @@ def main():
                         cycle_id=cycle_id,
                         txid=txid,
                         trade_id=txid,
+                        client_order_id=accepted_client_order_id,
+                        submission_recovered=buy_submission_recovered,
                         volume=round(volume, VOLUME_DECIMALS),
                         price=round(level, PRICE_DECIMALS),
                         original_level=(
