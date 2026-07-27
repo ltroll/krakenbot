@@ -7883,21 +7883,6 @@ def main():
                                     "risk_context_high_band_distribution_min_hold_through_score"
                                 )
                             ),
-                            weather_rebound_confirmation_score=(
-                                high_band_guard.get(
-                                    "weather_rebound_confirmation_score"
-                                )
-                            ),
-                            weather_exit_pressure_score=(
-                                high_band_guard.get(
-                                    "weather_exit_pressure_score"
-                                )
-                            ),
-                            weather_hold_through_score=(
-                                high_band_guard.get(
-                                    "weather_hold_through_score"
-                                )
-                            ),
                             operating_mode=operating_mode,
                             sentiment_control_mode=sentiment_control_mode,
                             anchor_strategy_router_enabled=(
