@@ -150,6 +150,7 @@
   "stale_level_reanchor_profit_guard_low_dip_bypass_phases": "dip_leveling_entry",
   "stale_level_reanchor_profit_guard_low_dip_min_stabilization_score": 0.6,
   "stale_level_reanchor_profit_guard_low_dip_min_entry_opportunity_score": 0.6,
+  "stale_level_reanchor_profit_guard_low_dip_min_resistance_room_pct": 0.006,
   "stale_level_reanchor_profit_guard_low_dip_size_multiplier": 0.35,
   "stale_level_reanchor_profit_lookback_hours": 24,
   "stale_level_reanchor_profit_min_samples": 2,

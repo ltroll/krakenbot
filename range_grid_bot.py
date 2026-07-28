@@ -1683,6 +1683,14 @@ def low_dip_leveling_profit_guard_bypass(
         "stale_level_reanchor_profit_guard_low_dip_size_multiplier",
         0.35,
     )
+    min_resistance_room_pct = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_profit_guard_low_dip_min_resistance_room_pct",
+        0.0,
+    )
+    resistance_room = weather_actionable_resistance(weather_report)
+    resistance_room_pct = resistance_room.get("distance_pct")
 
     if falling_tape:
         return {"allowed": False, "reason": "falling_tape"}
@@ -1690,6 +1698,19 @@ def low_dip_leveling_profit_guard_bypass(
         return {"allowed": False, "reason": "stabilization_score_low"}
     if entry_score is None or entry_score < min_entry:
         return {"allowed": False, "reason": "entry_score_low"}
+    if (
+        min_resistance_room_pct > 0
+        and (
+            resistance_room_pct is None
+            or resistance_room_pct < min_resistance_room_pct * 100
+        )
+    ):
+        return {
+            "allowed": False,
+            "reason": "resistance_room_low",
+            "actionable_resistance": resistance_room,
+            "min_resistance_room_pct": min_resistance_room_pct,
+        }
 
     return {
         "allowed": True,
@@ -1699,6 +1720,8 @@ def low_dip_leveling_profit_guard_bypass(
         "entry_opportunity_score": entry_score,
         "min_stabilization_score": min_stabilization,
         "min_entry_opportunity_score": min_entry,
+        "actionable_resistance": resistance_room,
+        "min_resistance_room_pct": min_resistance_room_pct,
         "size_multiplier": max(0.0, min(size_multiplier, 1.0)),
     }
 
@@ -2703,6 +2726,7 @@ def sentiment_risk_log_fields(risk_context):
     market_stability = weather_market_stability(weather)
     trend_pressure = weather_trend_pressure(weather)
     market_opportunity = weather_market_opportunity(weather)
+    actionable_resistance = weather_actionable_resistance(weather)
 
     return {
         "sentiment_risk_posture": risk_context.get("recommended_posture"),
@@ -2776,6 +2800,24 @@ def sentiment_risk_log_fields(risk_context):
         "weather_pattern_tags": weather_list(
             market_opportunity.get("pattern_tags")
         ),
+        "weather_actionable_resistance_price": actionable_resistance.get("price"),
+        "weather_actionable_resistance_type": actionable_resistance.get("type"),
+        "weather_actionable_resistance_label": actionable_resistance.get("label"),
+        "weather_actionable_resistance_distance_pct": (
+            actionable_resistance.get("distance_pct")
+        ),
+        "weather_room_to_median_reclaim_pct": weather_resistance_room_by_type(
+            weather,
+            "median_reclaim",
+        ),
+        "weather_room_to_range_mean_pct": weather_resistance_room_by_type(
+            weather,
+            "range_mean",
+        ),
+        "weather_room_to_recent_high_pct": weather_resistance_room_by_type(
+            weather,
+            "recent_high",
+        ),
         "sentiment_market_risk_score": risk_context.get("market_risk_score"),
         "sentiment_buy_aggression_score": risk_context.get("buy_aggression_score"),
         "sentiment_downside_risk_score": risk_context.get("downside_risk_score"),
@@ -2807,10 +2849,97 @@ def weather_market_location(weather_report):
     return location if isinstance(location, dict) else {}
 
 
+def weather_actionable_resistance(weather_report):
+    location = weather_market_location(weather_report)
+    current_price = optional_float(location.get("current_price"))
+    bands = location.get("resistance_bands")
+    if not isinstance(bands, list):
+        bands = []
+
+    candidates = []
+    for band in bands:
+        if not isinstance(band, dict):
+            continue
+        price = optional_float(band.get("price"))
+        if price is None or price <= 0:
+            continue
+        if current_price is not None and price <= current_price:
+            continue
+        distance_pct = optional_float(band.get("distance_pct"))
+        if distance_pct is None and current_price and current_price > 0:
+            distance_pct = ((price / current_price) - 1) * 100
+        if distance_pct is None or distance_pct <= 0:
+            continue
+        candidates.append({
+            "price": price,
+            "type": band.get("type"),
+            "label": band.get("label"),
+            "source": band.get("source"),
+            "distance_pct": distance_pct,
+        })
+
+    if candidates:
+        return min(candidates, key=lambda item: item["distance_pct"])
+    nearest = location.get("nearest_resistance")
+    if isinstance(nearest, dict):
+        price = optional_float(nearest.get("price"))
+        distance_pct = optional_float(nearest.get("distance_pct"))
+        if distance_pct is None:
+            distance_pct = optional_float(
+                location.get("room_to_nearest_resistance_pct")
+            )
+        if (
+            price is not None
+            and price > 0
+            and (current_price is None or price > current_price)
+            and distance_pct is not None
+            and distance_pct > 0
+        ):
+            return {
+                "price": price,
+                "type": nearest.get("type"),
+                "label": nearest.get("label"),
+                "source": nearest.get("source"),
+                "distance_pct": distance_pct,
+            }
+    return {
+        "price": None,
+        "type": None,
+        "label": None,
+        "source": None,
+        "distance_pct": None,
+    }
+
+
+def weather_resistance_room_by_type(weather_report, band_type):
+    location = weather_market_location(weather_report)
+    current_price = optional_float(location.get("current_price"))
+    bands = location.get("resistance_bands")
+    if not isinstance(bands, list):
+        return None
+    target_type = str(band_type or "").strip().lower()
+    distances = []
+    for band in bands:
+        if not isinstance(band, dict):
+            continue
+        if str(band.get("type") or "").strip().lower() != target_type:
+            continue
+        price = optional_float(band.get("price"))
+        if price is None or price <= 0:
+            continue
+        distance_pct = optional_float(band.get("distance_pct"))
+        if distance_pct is None and current_price and current_price > 0:
+            distance_pct = ((price / current_price) - 1) * 100
+        if distance_pct is not None:
+            distances.append(distance_pct)
+    return min(distances) if distances else None
+
+
 def weather_status_fields(risk_context):
     fields = sentiment_risk_log_fields(risk_context)
     weather = weather_report_payload(risk_context)
     location = weather_market_location(weather)
+    actionable_resistance = weather_actionable_resistance(weather)
     fields.update({
         "weather_report_available": bool(weather),
         "weather_market_current_price": optional_float(
@@ -2837,6 +2966,24 @@ def weather_status_fields(risk_context):
         ),
         "weather_market_price_return_4h_pct": optional_float(
             location.get("price_return_4h_pct")
+        ),
+        "weather_actionable_resistance_price": actionable_resistance.get("price"),
+        "weather_actionable_resistance_type": actionable_resistance.get("type"),
+        "weather_actionable_resistance_label": actionable_resistance.get("label"),
+        "weather_actionable_resistance_distance_pct": (
+            actionable_resistance.get("distance_pct")
+        ),
+        "weather_room_to_median_reclaim_pct": weather_resistance_room_by_type(
+            weather,
+            "median_reclaim",
+        ),
+        "weather_room_to_range_mean_pct": weather_resistance_room_by_type(
+            weather,
+            "range_mean",
+        ),
+        "weather_room_to_recent_high_pct": weather_resistance_room_by_type(
+            weather,
+            "recent_high",
         ),
     })
     return fields
@@ -4166,6 +4313,18 @@ def stale_reanchor_profit_guard_log_fields(stale_reanchor):
         ),
         "stale_level_reanchor_profit_guard_bypass_entry_opportunity_score": (
             bypass.get("entry_opportunity_score")
+        ),
+        "stale_level_reanchor_profit_guard_bypass_resistance_price": (
+            (bypass.get("actionable_resistance") or {}).get("price")
+        ),
+        "stale_level_reanchor_profit_guard_bypass_resistance_type": (
+            (bypass.get("actionable_resistance") or {}).get("type")
+        ),
+        "stale_level_reanchor_profit_guard_bypass_resistance_distance_pct": (
+            (bypass.get("actionable_resistance") or {}).get("distance_pct")
+        ),
+        "stale_level_reanchor_profit_guard_bypass_min_resistance_room_pct": (
+            bypass.get("min_resistance_room_pct")
         ),
     }
 

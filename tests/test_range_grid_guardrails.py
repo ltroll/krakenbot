@@ -65,6 +65,7 @@ class RangeGridGuardrailsTests(unittest.TestCase):
             "stale_level_reanchor_max_exit_pressure_score": -0.1,
             "stale_level_reanchor_profit_guard_low_dip_min_stabilization_score": 1.5,
             "stale_level_reanchor_profit_guard_low_dip_min_entry_opportunity_score": -0.1,
+            "stale_level_reanchor_profit_guard_low_dip_min_resistance_room_pct": 1.5,
             "stale_level_reanchor_profit_guard_low_dip_size_multiplier": 1.5,
             "stale_level_reanchor_profit_lookback_hours": -1,
             "stale_level_reanchor_profit_min_samples": -1,
@@ -128,6 +129,13 @@ class RangeGridGuardrailsTests(unittest.TestCase):
         self.assertTrue(
             any(
                 "stale_level_reanchor_profit_guard_low_dip_size_multiplier"
+                in error
+                for error in errors
+            )
+        )
+        self.assertTrue(
+            any(
+                "stale_level_reanchor_profit_guard_low_dip_min_resistance_room_pct"
                 in error
                 for error in errors
             )

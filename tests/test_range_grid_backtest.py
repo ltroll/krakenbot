@@ -184,6 +184,17 @@ class RangeGridBacktestTests(unittest.TestCase):
             "trade_permission": "bot_decides",
             "alert_level": "watch",
             "emergency_bell": False,
+            "market_location": {
+                "current_price": 100.0,
+                "resistance_bands": [
+                    {"price": 100.0, "type": "recent_low", "distance_pct": 0.0},
+                    {
+                        "price": 101.0,
+                        "type": "median_reclaim",
+                        "distance_pct": 1.0,
+                    },
+                ],
+            },
             "market_stability": {"stabilization_score": 0.77},
             "trend_pressure": {"falling_tape": False},
             "market_opportunity": {
@@ -200,6 +211,7 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertTrue(allowed["allowed"])
         self.assertEqual(allowed["reason"], "low_dip_leveling_cold_start_bypass")
         self.assertEqual(allowed["size_multiplier"], 0.35)
+        self.assertEqual(allowed["actionable_resistance"]["type"], "median_reclaim")
 
         blocked_high = backtest.low_dip_leveling_profit_guard_bypass(
             {},
@@ -219,6 +231,16 @@ class RangeGridBacktestTests(unittest.TestCase):
         )
         self.assertFalse(blocked_falling["allowed"])
         self.assertEqual(blocked_falling["reason"], "falling_tape")
+
+        blocked_room = backtest.low_dip_leveling_profit_guard_bypass(
+            {
+                "stale_level_reanchor_profit_guard_low_dip_min_resistance_room_pct": 0.015,
+            },
+            "range_low",
+            weather,
+        )
+        self.assertFalse(blocked_room["allowed"])
+        self.assertEqual(blocked_room["reason"], "resistance_room_low")
 
     def test_strategy_comparison_recomputes_ranges_per_strategy_window(self):
         snapshots = [
