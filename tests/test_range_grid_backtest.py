@@ -186,6 +186,11 @@ class RangeGridBacktestTests(unittest.TestCase):
             "emergency_bell": False,
             "market_location": {
                 "current_price": 100.0,
+                "nearest_support": {
+                    "price": 99.5,
+                    "type": "recent_low",
+                    "distance_pct": 0.5,
+                },
                 "resistance_bands": [
                     {"price": 100.0, "type": "recent_low", "distance_pct": 0.0},
                     {
@@ -194,6 +199,11 @@ class RangeGridBacktestTests(unittest.TestCase):
                         "distance_pct": 1.0,
                     },
                 ],
+            },
+            "bottom_signals": {
+                "bottom_readiness": "forming",
+                "bottom_readiness_score": 0.68,
+                "falling_tape": False,
             },
             "market_stability": {"stabilization_score": 0.77},
             "trend_pressure": {"falling_tape": False},
@@ -212,6 +222,8 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(allowed["reason"], "low_dip_leveling_cold_start_bypass")
         self.assertEqual(allowed["size_multiplier"], 0.35)
         self.assertEqual(allowed["actionable_resistance"]["type"], "median_reclaim")
+        self.assertEqual(allowed["bottom_readiness"], "forming")
+        self.assertEqual(allowed["nearest_support"]["type"], "recent_low")
 
         blocked_high = backtest.low_dip_leveling_profit_guard_bypass(
             {},
@@ -241,6 +253,22 @@ class RangeGridBacktestTests(unittest.TestCase):
         )
         self.assertFalse(blocked_room["allowed"])
         self.assertEqual(blocked_room["reason"], "resistance_room_low")
+
+        not_ready_weather = {
+            **weather,
+            "bottom_signals": {
+                "bottom_readiness": "not_ready_falling_tape",
+                "bottom_readiness_score": 0.08,
+                "falling_tape": True,
+            },
+        }
+        blocked_bottom = backtest.low_dip_leveling_profit_guard_bypass(
+            {},
+            "range_low",
+            not_ready_weather,
+        )
+        self.assertFalse(blocked_bottom["allowed"])
+        self.assertEqual(blocked_bottom["reason"], "bottom_falling_tape")
 
     def test_strategy_comparison_recomputes_ranges_per_strategy_window(self):
         snapshots = [

@@ -33,6 +33,8 @@
   "stale_level_reanchor_profit_guard_low_dip_min_stabilization_score": 0.6,
   "stale_level_reanchor_profit_guard_low_dip_min_entry_opportunity_score": 0.6,
   "stale_level_reanchor_profit_guard_low_dip_min_resistance_room_pct": 0.006,
+  "stale_level_reanchor_profit_guard_low_dip_min_bottom_readiness_score": 0.55,
+  "stale_level_reanchor_profit_guard_low_dip_max_support_distance_pct": 0.01,
   "stale_level_reanchor_profit_guard_low_dip_size_multiplier": 0.35,
   "volatility_adaptive_entry_step_enabled": true,
   "volatility_reference_pct": 0.027,

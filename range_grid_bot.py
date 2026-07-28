@@ -1691,13 +1691,63 @@ def low_dip_leveling_profit_guard_bypass(
     )
     resistance_room = weather_actionable_resistance(weather_report)
     resistance_room_pct = resistance_room.get("distance_pct")
+    bottom_signals = weather_bottom_signals(weather_report)
+    bottom_readiness_score = optional_float(
+        bottom_signals.get("bottom_readiness_score")
+    )
+    bottom_falling_tape = (
+        bool(bottom_signals.get("falling_tape"))
+        if "falling_tape" in bottom_signals
+        else False
+    )
+    min_bottom_readiness = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_profit_guard_low_dip_min_bottom_readiness_score",
+        0.55,
+    )
+    max_support_distance_pct = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_profit_guard_low_dip_max_support_distance_pct",
+        0.0,
+    )
+    nearest_support = weather_nearest_support(weather_report)
+    nearest_support_distance_pct = nearest_support.get("distance_pct")
 
     if falling_tape:
         return {"allowed": False, "reason": "falling_tape"}
+    if bottom_falling_tape:
+        return {"allowed": False, "reason": "bottom_falling_tape"}
     if stabilization_score is None or stabilization_score < min_stabilization:
         return {"allowed": False, "reason": "stabilization_score_low"}
     if entry_score is None or entry_score < min_entry:
         return {"allowed": False, "reason": "entry_score_low"}
+    if (
+        bottom_signals
+        and min_bottom_readiness > 0
+        and (
+            bottom_readiness_score is None
+            or bottom_readiness_score < min_bottom_readiness
+        )
+    ):
+        return {
+            "allowed": False,
+            "reason": "bottom_readiness_low",
+            "bottom_signals": bottom_signals,
+            "min_bottom_readiness_score": min_bottom_readiness,
+        }
+    if (
+        max_support_distance_pct > 0
+        and nearest_support_distance_pct is not None
+        and nearest_support_distance_pct > max_support_distance_pct * 100
+    ):
+        return {
+            "allowed": False,
+            "reason": "support_distance_high",
+            "nearest_support": nearest_support,
+            "max_support_distance_pct": max_support_distance_pct,
+        }
     if (
         min_resistance_room_pct > 0
         and (
@@ -1720,6 +1770,11 @@ def low_dip_leveling_profit_guard_bypass(
         "entry_opportunity_score": entry_score,
         "min_stabilization_score": min_stabilization,
         "min_entry_opportunity_score": min_entry,
+        "bottom_readiness": bottom_signals.get("bottom_readiness"),
+        "bottom_readiness_score": bottom_readiness_score,
+        "min_bottom_readiness_score": min_bottom_readiness,
+        "nearest_support": nearest_support,
+        "max_support_distance_pct": max_support_distance_pct,
         "actionable_resistance": resistance_room,
         "min_resistance_room_pct": min_resistance_room_pct,
         "size_multiplier": max(0.0, min(size_multiplier, 1.0)),
@@ -2726,6 +2781,8 @@ def sentiment_risk_log_fields(risk_context):
     market_stability = weather_market_stability(weather)
     trend_pressure = weather_trend_pressure(weather)
     market_opportunity = weather_market_opportunity(weather)
+    bottom_signals = weather_bottom_signals(weather)
+    nearest_support = weather_nearest_support(weather)
     actionable_resistance = weather_actionable_resistance(weather)
 
     return {
@@ -2800,6 +2857,35 @@ def sentiment_risk_log_fields(risk_context):
         "weather_pattern_tags": weather_list(
             market_opportunity.get("pattern_tags")
         ),
+        "weather_bottom_readiness": bottom_signals.get("bottom_readiness"),
+        "weather_bottom_bot_hint": bottom_signals.get("bot_hint"),
+        "weather_bottom_readiness_score": optional_float(
+            bottom_signals.get("bottom_readiness_score")
+        ),
+        "weather_bottoming_score": optional_float(
+            bottom_signals.get("bottoming_score")
+        ),
+        "weather_support_proximity_score": optional_float(
+            bottom_signals.get("support_proximity_score")
+        ),
+        "weather_bottom_failed_rebound_risk": optional_float(
+            bottom_signals.get("failed_rebound_risk")
+        ),
+        "weather_bottom_long_entry_noise_risk": optional_float(
+            bottom_signals.get("long_entry_noise_risk")
+        ),
+        "weather_bottom_falling_tape": (
+            bool(bottom_signals.get("falling_tape"))
+            if "falling_tape" in bottom_signals
+            else None
+        ),
+        "weather_bottom_zone": bottom_signals.get("bottom_zone"),
+        "weather_nearest_support_price": nearest_support.get("price"),
+        "weather_nearest_support_type": nearest_support.get("type"),
+        "weather_nearest_support_label": nearest_support.get("label"),
+        "weather_nearest_support_distance_pct": nearest_support.get(
+            "distance_pct"
+        ),
         "weather_actionable_resistance_price": actionable_resistance.get("price"),
         "weather_actionable_resistance_type": actionable_resistance.get("type"),
         "weather_actionable_resistance_label": actionable_resistance.get("label"),
@@ -2847,6 +2933,72 @@ def weather_market_location(weather_report):
         else {}
     )
     return location if isinstance(location, dict) else {}
+
+
+def weather_bottom_signals(weather_report):
+    signals = (
+        weather_report.get("bottom_signals")
+        if isinstance(weather_report, dict)
+        else {}
+    )
+    return signals if isinstance(signals, dict) else {}
+
+
+def weather_nearest_support(weather_report):
+    location = weather_market_location(weather_report)
+    nearest = location.get("nearest_support")
+    if isinstance(nearest, dict):
+        price = optional_float(nearest.get("price"))
+        distance_pct = optional_float(nearest.get("distance_pct"))
+        if distance_pct is None:
+            distance_pct = optional_float(
+                location.get("distance_to_nearest_support_pct")
+            )
+        return {
+            "price": price,
+            "type": nearest.get("type"),
+            "label": nearest.get("label"),
+            "source": nearest.get("source"),
+            "distance_pct": distance_pct,
+        }
+
+    bands = location.get("support_bands")
+    if not isinstance(bands, list):
+        return {
+            "price": None,
+            "type": None,
+            "label": None,
+            "source": None,
+            "distance_pct": optional_float(
+                location.get("distance_to_nearest_support_pct")
+            ),
+        }
+    candidates = []
+    for band in bands:
+        if not isinstance(band, dict):
+            continue
+        price = optional_float(band.get("price"))
+        distance_pct = optional_float(band.get("distance_pct"))
+        if price is None or price <= 0 or distance_pct is None:
+            continue
+        candidates.append({
+            "price": price,
+            "type": band.get("type"),
+            "label": band.get("label"),
+            "source": band.get("source"),
+            "distance_pct": distance_pct,
+        })
+    if candidates:
+        return min(candidates, key=lambda item: item["distance_pct"])
+    return {
+        "price": None,
+        "type": None,
+        "label": None,
+        "source": None,
+        "distance_pct": optional_float(
+            location.get("distance_to_nearest_support_pct")
+        ),
+    }
 
 
 def weather_actionable_resistance(weather_report):
@@ -4313,6 +4465,24 @@ def stale_reanchor_profit_guard_log_fields(stale_reanchor):
         ),
         "stale_level_reanchor_profit_guard_bypass_entry_opportunity_score": (
             bypass.get("entry_opportunity_score")
+        ),
+        "stale_level_reanchor_profit_guard_bypass_bottom_readiness": (
+            bypass.get("bottom_readiness")
+        ),
+        "stale_level_reanchor_profit_guard_bypass_bottom_readiness_score": (
+            bypass.get("bottom_readiness_score")
+        ),
+        "stale_level_reanchor_profit_guard_bypass_min_bottom_readiness_score": (
+            bypass.get("min_bottom_readiness_score")
+        ),
+        "stale_level_reanchor_profit_guard_bypass_support_price": (
+            (bypass.get("nearest_support") or {}).get("price")
+        ),
+        "stale_level_reanchor_profit_guard_bypass_support_distance_pct": (
+            (bypass.get("nearest_support") or {}).get("distance_pct")
+        ),
+        "stale_level_reanchor_profit_guard_bypass_max_support_distance_pct": (
+            bypass.get("max_support_distance_pct")
         ),
         "stale_level_reanchor_profit_guard_bypass_resistance_price": (
             (bypass.get("actionable_resistance") or {}).get("price")

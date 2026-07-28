@@ -471,6 +471,72 @@ def weather_market_location(weather_report):
     return location if isinstance(location, dict) else {}
 
 
+def weather_bottom_signals(weather_report):
+    signals = (
+        weather_report.get("bottom_signals")
+        if isinstance(weather_report, dict)
+        else {}
+    )
+    return signals if isinstance(signals, dict) else {}
+
+
+def weather_nearest_support(weather_report):
+    location = weather_market_location(weather_report)
+    nearest = location.get("nearest_support")
+    if isinstance(nearest, dict):
+        price = safe_float(nearest.get("price"))
+        distance_pct = safe_float(nearest.get("distance_pct"))
+        if distance_pct is None:
+            distance_pct = safe_float(
+                location.get("distance_to_nearest_support_pct")
+            )
+        return {
+            "price": price,
+            "type": nearest.get("type"),
+            "label": nearest.get("label"),
+            "source": nearest.get("source"),
+            "distance_pct": distance_pct,
+        }
+
+    bands = location.get("support_bands")
+    if not isinstance(bands, list):
+        return {
+            "price": None,
+            "type": None,
+            "label": None,
+            "source": None,
+            "distance_pct": safe_float(
+                location.get("distance_to_nearest_support_pct")
+            ),
+        }
+    candidates = []
+    for band in bands:
+        if not isinstance(band, dict):
+            continue
+        price = safe_float(band.get("price"))
+        distance_pct = safe_float(band.get("distance_pct"))
+        if price is None or price <= 0 or distance_pct is None:
+            continue
+        candidates.append({
+            "price": price,
+            "type": band.get("type"),
+            "label": band.get("label"),
+            "source": band.get("source"),
+            "distance_pct": distance_pct,
+        })
+    if candidates:
+        return min(candidates, key=lambda item: item["distance_pct"])
+    return {
+        "price": None,
+        "type": None,
+        "label": None,
+        "source": None,
+        "distance_pct": safe_float(
+            location.get("distance_to_nearest_support_pct")
+        ),
+    }
+
+
 def weather_actionable_resistance(weather_report):
     location = weather_market_location(weather_report)
     current_price = safe_float(location.get("current_price"))
@@ -651,13 +717,61 @@ def low_dip_leveling_profit_guard_bypass(
     )
     resistance_room = weather_actionable_resistance(weather_report)
     resistance_room_pct = resistance_room.get("distance_pct")
+    bottom_signals = weather_bottom_signals(weather_report)
+    bottom_readiness_score = safe_float(
+        bottom_signals.get("bottom_readiness_score")
+    )
+    bottom_falling_tape = (
+        bool(bottom_signals.get("falling_tape"))
+        if "falling_tape" in bottom_signals
+        else False
+    )
+    min_bottom_readiness = strategy_float(
+        config,
+        "stale_level_reanchor_profit_guard_low_dip_min_bottom_readiness_score",
+        0.55,
+    )
+    max_support_distance_pct = strategy_float(
+        config,
+        "stale_level_reanchor_profit_guard_low_dip_max_support_distance_pct",
+        0.0,
+    )
+    nearest_support = weather_nearest_support(weather_report)
+    nearest_support_distance_pct = nearest_support.get("distance_pct")
 
     if bool(trend_pressure.get("falling_tape")):
         return {"allowed": False, "reason": "falling_tape"}
+    if bottom_falling_tape:
+        return {"allowed": False, "reason": "bottom_falling_tape"}
     if stabilization_score is None or stabilization_score < min_stabilization:
         return {"allowed": False, "reason": "stabilization_score_low"}
     if entry_score is None or entry_score < min_entry:
         return {"allowed": False, "reason": "entry_score_low"}
+    if (
+        bottom_signals
+        and min_bottom_readiness > 0
+        and (
+            bottom_readiness_score is None
+            or bottom_readiness_score < min_bottom_readiness
+        )
+    ):
+        return {
+            "allowed": False,
+            "reason": "bottom_readiness_low",
+            "bottom_signals": bottom_signals,
+            "min_bottom_readiness_score": min_bottom_readiness,
+        }
+    if (
+        max_support_distance_pct > 0
+        and nearest_support_distance_pct is not None
+        and nearest_support_distance_pct > max_support_distance_pct * 100
+    ):
+        return {
+            "allowed": False,
+            "reason": "support_distance_high",
+            "nearest_support": nearest_support,
+            "max_support_distance_pct": max_support_distance_pct,
+        }
     if (
         min_resistance_room_pct > 0
         and (
@@ -675,6 +789,11 @@ def low_dip_leveling_profit_guard_bypass(
         "allowed": True,
         "reason": "low_dip_leveling_cold_start_bypass",
         "size_multiplier": max(0.0, min(size_multiplier, 1.0)),
+        "bottom_readiness": bottom_signals.get("bottom_readiness"),
+        "bottom_readiness_score": bottom_readiness_score,
+        "min_bottom_readiness_score": min_bottom_readiness,
+        "nearest_support": nearest_support,
+        "max_support_distance_pct": max_support_distance_pct,
         "actionable_resistance": resistance_room,
         "min_resistance_room_pct": min_resistance_room_pct,
     }
@@ -811,6 +930,8 @@ def sentiment_risk_event_fields(signal):
     market_stability = weather_market_stability(weather)
     trend_pressure = weather_trend_pressure(weather)
     market_opportunity = weather_market_opportunity(weather)
+    bottom_signals = weather_bottom_signals(weather)
+    nearest_support = weather_nearest_support(weather)
     actionable_resistance = weather_actionable_resistance(weather)
     fields = {
         "sentiment_risk_posture": risk_context.get("recommended_posture"),
@@ -883,6 +1004,35 @@ def sentiment_risk_event_fields(signal):
         "weather_pattern_tags": weather_list(
             market_opportunity.get("pattern_tags")
         ),
+        "weather_bottom_readiness": bottom_signals.get("bottom_readiness"),
+        "weather_bottom_bot_hint": bottom_signals.get("bot_hint"),
+        "weather_bottom_readiness_score": safe_float(
+            bottom_signals.get("bottom_readiness_score")
+        ),
+        "weather_bottoming_score": safe_float(
+            bottom_signals.get("bottoming_score")
+        ),
+        "weather_support_proximity_score": safe_float(
+            bottom_signals.get("support_proximity_score")
+        ),
+        "weather_bottom_failed_rebound_risk": safe_float(
+            bottom_signals.get("failed_rebound_risk")
+        ),
+        "weather_bottom_long_entry_noise_risk": safe_float(
+            bottom_signals.get("long_entry_noise_risk")
+        ),
+        "weather_bottom_falling_tape": (
+            bool(bottom_signals.get("falling_tape"))
+            if "falling_tape" in bottom_signals
+            else None
+        ),
+        "weather_bottom_zone": bottom_signals.get("bottom_zone"),
+        "weather_nearest_support_price": nearest_support.get("price"),
+        "weather_nearest_support_type": nearest_support.get("type"),
+        "weather_nearest_support_label": nearest_support.get("label"),
+        "weather_nearest_support_distance_pct": nearest_support.get(
+            "distance_pct"
+        ),
         "weather_actionable_resistance_price": actionable_resistance.get("price"),
         "weather_actionable_resistance_type": actionable_resistance.get("type"),
         "weather_actionable_resistance_label": actionable_resistance.get("label"),
@@ -917,6 +1067,9 @@ def summarize_sentiment_risk_events(events):
     opportunity_phase_counts = Counter()
     opportunity_bot_hint_counts = Counter()
     opportunity_pattern_tag_counts = Counter()
+    bottom_readiness_counts = Counter()
+    bottom_bot_hint_counts = Counter()
+    bottom_falling_tape_counts = Counter()
     hard_safety_flag_counts = Counter()
     samples = 0
 
@@ -958,6 +1111,14 @@ def summarize_sentiment_risk_events(events):
             or safe_float(event.get("weather_room_to_range_mean_pct")) is not None
             or safe_float(event.get("weather_room_to_recent_high_pct")) is not None
         )
+        has_weather_bottom = (
+            bool(event.get("weather_bottom_readiness"))
+            or bool(event.get("weather_bottom_bot_hint"))
+            or event.get("weather_bottom_falling_tape") is not None
+            or safe_float(event.get("weather_bottom_readiness_score")) is not None
+            or safe_float(event.get("weather_nearest_support_distance_pct"))
+            is not None
+        )
         has_risk_value = (
             bool(posture)
             or bool(flags)
@@ -966,6 +1127,7 @@ def summarize_sentiment_risk_events(events):
             or has_weather_trend
             or has_weather_opportunity
             or has_weather_resistance
+            or has_weather_bottom
         )
         if not has_risk_value:
             continue
@@ -986,6 +1148,15 @@ def summarize_sentiment_risk_events(events):
         opportunity_bot_hint = event.get("weather_opportunity_bot_hint")
         if opportunity_bot_hint:
             opportunity_bot_hint_counts[str(opportunity_bot_hint)] += 1
+        bottom_readiness = event.get("weather_bottom_readiness")
+        if bottom_readiness:
+            bottom_readiness_counts[str(bottom_readiness)] += 1
+        bottom_bot_hint = event.get("weather_bottom_bot_hint")
+        if bottom_bot_hint:
+            bottom_bot_hint_counts[str(bottom_bot_hint)] += 1
+        bottom_falling_tape = event.get("weather_bottom_falling_tape")
+        if bottom_falling_tape is not None:
+            bottom_falling_tape_counts[str(bool(bottom_falling_tape)).lower()] += 1
         pattern_tags = event.get("weather_pattern_tags")
         if not isinstance(pattern_tags, list):
             pattern_tags = []
@@ -1022,6 +1193,12 @@ def summarize_sentiment_risk_events(events):
             "weather_room_to_median_reclaim_pct",
             "weather_room_to_range_mean_pct",
             "weather_room_to_recent_high_pct",
+            "weather_bottom_readiness_score",
+            "weather_bottoming_score",
+            "weather_support_proximity_score",
+            "weather_bottom_failed_rebound_risk",
+            "weather_bottom_long_entry_noise_risk",
+            "weather_nearest_support_distance_pct",
         ):
             value = safe_float(event.get(output_key))
             if value is None:
@@ -1061,6 +1238,15 @@ def summarize_sentiment_risk_events(events):
         ),
         "weather_pattern_tag_counts": dict(
             opportunity_pattern_tag_counts.most_common()
+        ),
+        "weather_bottom_readiness_counts": dict(
+            bottom_readiness_counts.most_common()
+        ),
+        "weather_bottom_bot_hint_counts": dict(
+            bottom_bot_hint_counts.most_common()
+        ),
+        "weather_bottom_falling_tape_counts": dict(
+            bottom_falling_tape_counts.most_common()
         ),
         "sentiment_hard_safety_flag_counts": dict(
             hard_safety_flag_counts.most_common()
@@ -1120,6 +1306,12 @@ def summarize_sentiment_risk_events(events):
         "weather_room_to_median_reclaim_pct",
         "weather_room_to_range_mean_pct",
         "weather_room_to_recent_high_pct",
+        "weather_bottom_readiness_score",
+        "weather_bottoming_score",
+        "weather_support_proximity_score",
+        "weather_bottom_failed_rebound_risk",
+        "weather_bottom_long_entry_noise_risk",
+        "weather_nearest_support_distance_pct",
     ):
         if numeric_counts[output_key]:
             summary[f"avg_{output_key}"] = round(
@@ -2880,6 +3072,36 @@ def build_strategy_comparison_rows(
             "approved_avg_weather_room_to_recent_high_pct": (
                 risk_summary.get("avg_weather_room_to_recent_high_pct")
             ),
+            "approved_weather_bottom_readiness": json.dumps(
+                risk_summary.get("weather_bottom_readiness_counts") or {},
+                sort_keys=True,
+            ),
+            "approved_weather_bottom_bot_hints": json.dumps(
+                risk_summary.get("weather_bottom_bot_hint_counts") or {},
+                sort_keys=True,
+            ),
+            "approved_weather_bottom_falling_tape_counts": json.dumps(
+                risk_summary.get("weather_bottom_falling_tape_counts") or {},
+                sort_keys=True,
+            ),
+            "approved_avg_weather_bottom_readiness_score": risk_summary.get(
+                "avg_weather_bottom_readiness_score"
+            ),
+            "approved_avg_weather_bottoming_score": risk_summary.get(
+                "avg_weather_bottoming_score"
+            ),
+            "approved_avg_weather_support_proximity_score": risk_summary.get(
+                "avg_weather_support_proximity_score"
+            ),
+            "approved_avg_weather_bottom_failed_rebound_risk": risk_summary.get(
+                "avg_weather_bottom_failed_rebound_risk"
+            ),
+            "approved_avg_weather_bottom_long_entry_noise_risk": risk_summary.get(
+                "avg_weather_bottom_long_entry_noise_risk"
+            ),
+            "approved_avg_weather_nearest_support_distance_pct": risk_summary.get(
+                "avg_weather_nearest_support_distance_pct"
+            ),
             "approved_weather_pattern_tags": json.dumps(
                 risk_summary.get("weather_pattern_tag_counts") or {},
                 sort_keys=True,
@@ -3295,6 +3517,15 @@ def write_strategy_comparison_csv(comparison, output_path):
         "approved_avg_weather_room_to_median_reclaim_pct",
         "approved_avg_weather_room_to_range_mean_pct",
         "approved_avg_weather_room_to_recent_high_pct",
+        "approved_weather_bottom_readiness",
+        "approved_weather_bottom_bot_hints",
+        "approved_weather_bottom_falling_tape_counts",
+        "approved_avg_weather_bottom_readiness_score",
+        "approved_avg_weather_bottoming_score",
+        "approved_avg_weather_support_proximity_score",
+        "approved_avg_weather_bottom_failed_rebound_risk",
+        "approved_avg_weather_bottom_long_entry_noise_risk",
+        "approved_avg_weather_nearest_support_distance_pct",
         "approved_weather_pattern_tags",
         "potential_by_weather_opportunity_phase",
         "approved_stale_level_reanchor_count",
@@ -3379,6 +3610,15 @@ def write_ranked_strategy_csv(comparison, output_path):
         "approved_avg_weather_room_to_median_reclaim_pct",
         "approved_avg_weather_room_to_range_mean_pct",
         "approved_avg_weather_room_to_recent_high_pct",
+        "approved_weather_bottom_readiness",
+        "approved_weather_bottom_bot_hints",
+        "approved_weather_bottom_falling_tape_counts",
+        "approved_avg_weather_bottom_readiness_score",
+        "approved_avg_weather_bottoming_score",
+        "approved_avg_weather_support_proximity_score",
+        "approved_avg_weather_bottom_failed_rebound_risk",
+        "approved_avg_weather_bottom_long_entry_noise_risk",
+        "approved_avg_weather_nearest_support_distance_pct",
         "approved_weather_pattern_tags",
         "potential_by_weather_opportunity_phase",
         "approved_stale_level_reanchor_count",
