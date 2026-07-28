@@ -359,6 +359,19 @@ def load_strategy_profile_from_file(path):
     return resolved, payload
 
 
+def safe_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
 def strategy_modes_from_payload(payload):
     return parse_strategy_modes(payload.get("grid_anchor"))
 
@@ -487,6 +500,67 @@ def weather_leveling_score(weather_report):
     state = str(stability.get("leveling_state") or "").strip().lower()
     score = safe_float(stability.get("leveling_score"))
     return state, score
+
+
+def low_dip_leveling_profit_guard_bypass(
+    config,
+    buy_source,
+    weather_report,
+):
+    if buy_source != "range_low":
+        return {"allowed": False, "reason": "unsupported_source"}
+    if not strategy_bool(
+        config,
+        "stale_level_reanchor_profit_guard_low_dip_bypass_enabled",
+        True,
+    ):
+        return {"allowed": False, "reason": "disabled"}
+    if not weather_bot_decides(weather_report):
+        return {"allowed": False, "reason": "weather_unavailable"}
+    if weather_report.get("emergency_bell") or weather_report.get("alert_level") == "danger":
+        return {"allowed": False, "reason": "weather_danger"}
+
+    opportunity = weather_market_opportunity(weather_report)
+    phase = str(opportunity.get("cycle_phase") or "").strip().lower()
+    allowed_phases = config_token_set(
+        config,
+        "stale_level_reanchor_profit_guard_low_dip_bypass_phases",
+        "dip_leveling_entry",
+    )
+    if phase not in allowed_phases:
+        return {"allowed": False, "reason": "phase_not_enabled"}
+
+    stability = weather_market_stability(weather_report)
+    trend_pressure = weather_trend_pressure(weather_report)
+    stabilization_score = safe_float(stability.get("stabilization_score"))
+    entry_score = safe_float(opportunity.get("entry_opportunity_score"))
+    min_stabilization = strategy_float(
+        config,
+        "stale_level_reanchor_profit_guard_low_dip_min_stabilization_score",
+        0.60,
+    )
+    min_entry = strategy_float(
+        config,
+        "stale_level_reanchor_profit_guard_low_dip_min_entry_opportunity_score",
+        0.60,
+    )
+    size_multiplier = strategy_float(
+        config,
+        "stale_level_reanchor_profit_guard_low_dip_size_multiplier",
+        0.35,
+    )
+
+    if bool(trend_pressure.get("falling_tape")):
+        return {"allowed": False, "reason": "falling_tape"}
+    if stabilization_score is None or stabilization_score < min_stabilization:
+        return {"allowed": False, "reason": "stabilization_score_low"}
+    if entry_score is None or entry_score < min_entry:
+        return {"allowed": False, "reason": "entry_score_low"}
+    return {
+        "allowed": True,
+        "reason": "low_dip_leveling_cold_start_bypass",
+        "size_multiplier": max(0.0, min(size_multiplier, 1.0)),
+    }
 
 
 def config_token_set(config, key, default=""):
@@ -2250,6 +2324,45 @@ def summarize_potential_from_approved_events(replay, snapshots):
                     allowed = not fail_closed
                     reason = "insufficient_modeled_profit_samples"
                     projected_avg = None
+                    weather_report = {
+                        "mode": "weather_report",
+                        "bot_decision_authority": "bot",
+                        "trade_permission": "bot_decides",
+                        "alert_level": event.get("weather_alert_level"),
+                        "emergency_bell": safe_bool(
+                            event.get("weather_emergency_bell")
+                        ),
+                        "market_stability": {
+                            "stabilization_score": event.get(
+                                "weather_stabilization_score"
+                            ),
+                        },
+                        "trend_pressure": {
+                            "falling_tape": safe_bool(
+                                event.get("weather_falling_tape")
+                            ),
+                        },
+                        "market_opportunity": {
+                            "cycle_phase": event.get(
+                                "weather_opportunity_phase"
+                            ),
+                            "entry_opportunity_score": event.get(
+                                "weather_entry_opportunity_score"
+                            ),
+                        },
+                    }
+                    bypass = low_dip_leveling_profit_guard_bypass(
+                        config,
+                        event.get("buy_source"),
+                        weather_report,
+                    )
+                    if not allowed and bypass.get("allowed"):
+                        allowed = True
+                        reason = bypass.get("reason")
+                        size_multiplier *= bypass.get("size_multiplier") or 1.0
+                        potential[
+                            "risk_context_position_size_effective_multiplier"
+                        ] = size_multiplier
                 else:
                     projected_avg = (
                         (avg_return * sample_count) + assumed_return

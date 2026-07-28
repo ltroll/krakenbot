@@ -1624,6 +1624,85 @@ def stale_level_reanchor_profit_guard(config, now):
     }
 
 
+def low_dip_leveling_profit_guard_bypass(
+    config,
+    fallback_config,
+    buy_source,
+    weather_report,
+    profit_guard,
+):
+    if not isinstance(profit_guard, dict) or profit_guard.get("allowed", True):
+        return {"allowed": False, "reason": "profit_guard_allowed"}
+    if profit_guard.get("reason") != "insufficient_recent_profit_samples":
+        return {"allowed": False, "reason": "unsupported_profit_guard_reason"}
+    if buy_source != "range_low":
+        return {"allowed": False, "reason": "unsupported_source"}
+    if not strategy_bool_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_profit_guard_low_dip_bypass_enabled",
+        True,
+    ):
+        return {"allowed": False, "reason": "disabled"}
+    if not weather_bot_decides(weather_report):
+        return {"allowed": False, "reason": "weather_unavailable"}
+    if weather_report.get("emergency_bell") or weather_report.get("alert_level") == "danger":
+        return {"allowed": False, "reason": "weather_danger"}
+
+    opportunity = weather_market_opportunity(weather_report)
+    phase = str(opportunity.get("cycle_phase") or "").strip().lower()
+    allowed_phases = config_token_set_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_profit_guard_low_dip_bypass_phases",
+        "dip_leveling_entry",
+    )
+    if phase not in allowed_phases:
+        return {"allowed": False, "reason": "phase_not_enabled"}
+
+    stability = weather_market_stability(weather_report)
+    trend_pressure = weather_trend_pressure(weather_report)
+    stabilization_score = optional_float(stability.get("stabilization_score"))
+    entry_score = optional_float(opportunity.get("entry_opportunity_score"))
+    falling_tape = bool(trend_pressure.get("falling_tape"))
+    min_stabilization = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_profit_guard_low_dip_min_stabilization_score",
+        0.60,
+    )
+    min_entry = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_profit_guard_low_dip_min_entry_opportunity_score",
+        0.60,
+    )
+    size_multiplier = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_profit_guard_low_dip_size_multiplier",
+        0.35,
+    )
+
+    if falling_tape:
+        return {"allowed": False, "reason": "falling_tape"}
+    if stabilization_score is None or stabilization_score < min_stabilization:
+        return {"allowed": False, "reason": "stabilization_score_low"}
+    if entry_score is None or entry_score < min_entry:
+        return {"allowed": False, "reason": "entry_score_low"}
+
+    return {
+        "allowed": True,
+        "reason": "low_dip_leveling_cold_start_bypass",
+        "phase": phase,
+        "stabilization_score": stabilization_score,
+        "entry_opportunity_score": entry_score,
+        "min_stabilization_score": min_stabilization,
+        "min_entry_opportunity_score": min_entry,
+        "size_multiplier": max(0.0, min(size_multiplier, 1.0)),
+    }
+
+
 def write_status_snapshot(payload):
     try:
         write_json_file(STATUS_FILE, payload)
@@ -3982,6 +4061,32 @@ def stale_level_reanchor_entry(
         return {"allowed": False, "reason": "exit_pressure_high"}
 
     if profit_guard and not profit_guard.get("allowed", True):
+        profit_guard_bypass = low_dip_leveling_profit_guard_bypass(
+            config,
+            fallback_config,
+            buy_source,
+            weather_report,
+            profit_guard,
+        )
+        if profit_guard_bypass.get("allowed"):
+            profit_guard = {
+                **profit_guard,
+                "allowed": True,
+                "original_allowed": False,
+                "reason": profit_guard_bypass["reason"],
+                "bypassed_reason": profit_guard.get("reason"),
+                "bypass": profit_guard_bypass,
+                "size_multiplier": profit_guard_bypass.get(
+                    "size_multiplier",
+                    1.0,
+                ),
+            }
+        else:
+            profit_guard = {
+                **profit_guard,
+                "bypass": profit_guard_bypass,
+            }
+    if profit_guard and not profit_guard.get("allowed", True):
         return {
             "allowed": False,
             "reason": "profit_guard_" + str(
@@ -4012,6 +4117,11 @@ def stale_reanchor_profit_guard_log_fields(stale_reanchor):
     )
     if not isinstance(profit_guard, dict):
         profit_guard = {"enabled": False}
+    bypass = (
+        profit_guard.get("bypass")
+        if isinstance(profit_guard.get("bypass"), dict)
+        else {}
+    )
     return {
         "stale_level_reanchor_profit_guard_enabled": bool(
             profit_guard.get("enabled")
@@ -4043,6 +4153,19 @@ def stale_reanchor_profit_guard_log_fields(stale_reanchor):
             round(profit_guard.get("projected_avg_net_return_pct"), 6)
             if profit_guard.get("projected_avg_net_return_pct") is not None
             else None
+        ),
+        "stale_level_reanchor_profit_guard_bypassed_reason": (
+            profit_guard.get("bypassed_reason")
+        ),
+        "stale_level_reanchor_profit_guard_bypass_reason": bypass.get("reason"),
+        "stale_level_reanchor_profit_guard_bypass_size_multiplier": (
+            bypass.get("size_multiplier")
+        ),
+        "stale_level_reanchor_profit_guard_bypass_stabilization_score": (
+            bypass.get("stabilization_score")
+        ),
+        "stale_level_reanchor_profit_guard_bypass_entry_opportunity_score": (
+            bypass.get("entry_opportunity_score")
         ),
     }
 
@@ -7640,6 +7763,20 @@ def main():
                             level = stale_reanchor["reanchor_price"]
                             key = str(level)
                             momentum_entry_max_price = level
+                            stale_profit_guard = (
+                                stale_reanchor.get("profit_guard")
+                                if isinstance(stale_reanchor, dict)
+                                else {}
+                            )
+                            if isinstance(stale_profit_guard, dict):
+                                candidate_effective_position_size_pct *= (
+                                    optional_float(
+                                        stale_profit_guard.get(
+                                            "size_multiplier"
+                                        )
+                                    )
+                                    or 1.0
+                                )
                             if key in state["open_buy_orders"]:
                                 skip_reason = "open_buy_order"
                             elif key in reserved_sell_levels:

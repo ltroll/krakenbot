@@ -177,6 +177,49 @@ class RangeGridBacktestTests(unittest.TestCase):
         args = backtest.parse_args(["--window-hours", "48"])
         self.assertEqual(args.window_hours, 48.0)
 
+    def test_low_dip_leveling_profit_guard_bypass_requires_safe_low_setup(self):
+        weather = {
+            "mode": "weather_report",
+            "bot_decision_authority": "bot",
+            "trade_permission": "bot_decides",
+            "alert_level": "watch",
+            "emergency_bell": False,
+            "market_stability": {"stabilization_score": 0.77},
+            "trend_pressure": {"falling_tape": False},
+            "market_opportunity": {
+                "cycle_phase": "dip_leveling_entry",
+                "entry_opportunity_score": 0.65,
+            },
+        }
+
+        allowed = backtest.low_dip_leveling_profit_guard_bypass(
+            {},
+            "range_low",
+            weather,
+        )
+        self.assertTrue(allowed["allowed"])
+        self.assertEqual(allowed["reason"], "low_dip_leveling_cold_start_bypass")
+        self.assertEqual(allowed["size_multiplier"], 0.35)
+
+        blocked_high = backtest.low_dip_leveling_profit_guard_bypass(
+            {},
+            "range_high_band",
+            weather,
+        )
+        self.assertFalse(blocked_high["allowed"])
+
+        falling_weather = {
+            **weather,
+            "trend_pressure": {"falling_tape": True},
+        }
+        blocked_falling = backtest.low_dip_leveling_profit_guard_bypass(
+            {},
+            "range_low",
+            falling_weather,
+        )
+        self.assertFalse(blocked_falling["allowed"])
+        self.assertEqual(blocked_falling["reason"], "falling_tape")
+
     def test_strategy_comparison_recomputes_ranges_per_strategy_window(self):
         snapshots = [
             make_snapshot("2026-06-13T08:00:00+00:00", 90.0),

@@ -150,5 +150,10 @@
   "stale_level_reanchor_profit_min_samples": 2,
   "stale_level_reanchor_assumed_net_return_pct": -0.25,
   "stale_level_reanchor_min_projected_avg_net_return_pct": 0.1,
-  "momentum_entry_tolerance_pct": 0.0015
+  "momentum_entry_tolerance_pct": 0.0015,
+  "risk_context_high_band_distribution_guard_enabled": true,
+  "risk_context_high_band_distribution_min_rebound_confirmation_score": 0.55,
+  "risk_context_high_band_distribution_min_breakout_score": 0.55,
+  "risk_context_high_band_distribution_max_exit_pressure_score": 0.4,
+  "risk_context_high_band_distribution_min_hold_through_score": 0.5
 }
