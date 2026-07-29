@@ -3926,6 +3926,29 @@ def risk_context_high_band_guard(config, risk_context, weather_report=None):
     return {"allowed": True, "reason": None}
 
 
+def high_band_resistance_room_guard(config, weather_report):
+    min_room_pct = strategy_float(
+        config,
+        "high_band_min_actionable_resistance_room_pct",
+        0.0,
+    )
+    resistance = weather_actionable_resistance(weather_report)
+    resistance_room_pct = resistance.get("distance_pct")
+    if min_room_pct <= 0:
+        return {"allowed": True, "reason": None}
+    if resistance_room_pct is None:
+        return {
+            "allowed": False,
+            "reason": "high_band_missing_resistance_room",
+        }
+    if resistance_room_pct < min_room_pct * 100:
+        return {
+            "allowed": False,
+            "reason": "high_band_resistance_room_low",
+        }
+    return {"allowed": True, "reason": None}
+
+
 def risk_context_position_size_adjustment(config, risk_context):
     if not strategy_bool(config, "risk_context_position_sizing_enabled", False):
         return {
@@ -4441,6 +4464,12 @@ def evaluate_candidate(snapshot, candidate, price):
         )
         if not high_band_guard["allowed"]:
             return False, high_band_guard["reason"]
+        resistance_room_guard = high_band_resistance_room_guard(
+            config,
+            weather_report,
+        )
+        if not resistance_room_guard["allowed"]:
+            return False, resistance_room_guard["reason"]
 
     flow_control = flow_adjustment(config, flow_pressure, buy_source)
     if flow_control["block_buy"]:

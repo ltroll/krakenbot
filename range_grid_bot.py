@@ -1781,6 +1781,164 @@ def low_dip_leveling_profit_guard_bypass(
     }
 
 
+def high_band_resistance_room_guard(config, fallback_config, weather_report):
+    min_room_pct = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "high_band_min_actionable_resistance_room_pct",
+        0.0,
+    )
+    resistance = weather_actionable_resistance(weather_report)
+    resistance_room_pct = resistance.get("distance_pct")
+    details = {
+        "high_band_min_actionable_resistance_room_pct": min_room_pct,
+        "high_band_actionable_resistance_price": resistance.get("price"),
+        "high_band_actionable_resistance_type": resistance.get("type"),
+        "high_band_actionable_resistance_label": resistance.get("label"),
+        "high_band_actionable_resistance_distance_pct": resistance_room_pct,
+    }
+    if min_room_pct <= 0:
+        return {"allowed": True, "reason": None, **details}
+    if resistance_room_pct is None:
+        return {
+            "allowed": False,
+            "reason": "high_band_missing_resistance_room",
+            **details,
+        }
+    if resistance_room_pct < min_room_pct * 100:
+        return {
+            "allowed": False,
+            "reason": "high_band_resistance_room_low",
+            **details,
+        }
+    return {"allowed": True, "reason": None, **details}
+
+
+def low_support_opportunity_shadow(config, fallback_config, buy_source, weather_report):
+    if buy_source not in {"range_low", "range_median"}:
+        return {"opportunity": False, "reason": "unsupported_source"}
+    if not strategy_bool_with_fallback(
+        config,
+        fallback_config,
+        "low_support_opportunity_shadow_enabled",
+        True,
+    ):
+        return {"opportunity": False, "reason": "disabled"}
+    if not weather_bot_decides(weather_report):
+        return {"opportunity": False, "reason": "weather_unavailable"}
+    if weather_report.get("emergency_bell") or weather_report.get("alert_level") == "danger":
+        return {"opportunity": False, "reason": "weather_danger"}
+
+    opportunity = weather_market_opportunity(weather_report)
+    stability = weather_market_stability(weather_report)
+    trend_pressure = weather_trend_pressure(weather_report)
+    bottom_signals = weather_bottom_signals(weather_report)
+    nearest_support = weather_nearest_support(weather_report)
+    resistance = weather_actionable_resistance(weather_report)
+
+    phase = str(opportunity.get("cycle_phase") or "").strip().lower()
+    allowed_phases = config_token_set_with_fallback(
+        config,
+        fallback_config,
+        "low_support_opportunity_shadow_phases",
+        "dip_leveling_entry,bottoming_setup,range_chop_accumulation,early_rebound",
+    )
+    stabilization_score = optional_float(stability.get("stabilization_score"))
+    entry_score = optional_float(opportunity.get("entry_opportunity_score"))
+    bottom_readiness_score = optional_float(
+        bottom_signals.get("bottom_readiness_score")
+    )
+    support_distance_pct = nearest_support.get("distance_pct")
+    resistance_room_pct = resistance.get("distance_pct")
+    falling_tape = bool(trend_pressure.get("falling_tape")) or bool(
+        bottom_signals.get("falling_tape")
+    )
+
+    min_stabilization = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "low_support_opportunity_shadow_min_stabilization_score",
+        0.50,
+    )
+    min_entry = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "low_support_opportunity_shadow_min_entry_opportunity_score",
+        0.45,
+    )
+    min_bottom_readiness = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "low_support_opportunity_shadow_min_bottom_readiness_score",
+        0.45,
+    )
+    max_support_distance_pct = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "low_support_opportunity_shadow_max_support_distance_pct",
+        0.012,
+    )
+    min_resistance_room_pct = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "low_support_opportunity_shadow_min_resistance_room_pct",
+        0.003,
+    )
+    details = {
+        "low_support_opportunity_phase": phase,
+        "low_support_opportunity_min_stabilization_score": min_stabilization,
+        "low_support_opportunity_min_entry_opportunity_score": min_entry,
+        "low_support_opportunity_min_bottom_readiness_score": min_bottom_readiness,
+        "low_support_opportunity_max_support_distance_pct": max_support_distance_pct,
+        "low_support_opportunity_min_resistance_room_pct": min_resistance_room_pct,
+        "low_support_opportunity_stabilization_score": stabilization_score,
+        "low_support_opportunity_entry_opportunity_score": entry_score,
+        "low_support_opportunity_bottom_readiness": bottom_signals.get(
+            "bottom_readiness"
+        ),
+        "low_support_opportunity_bottom_readiness_score": bottom_readiness_score,
+        "low_support_opportunity_falling_tape": falling_tape,
+        "low_support_opportunity_support_price": nearest_support.get("price"),
+        "low_support_opportunity_support_type": nearest_support.get("type"),
+        "low_support_opportunity_support_distance_pct": support_distance_pct,
+        "low_support_opportunity_resistance_price": resistance.get("price"),
+        "low_support_opportunity_resistance_type": resistance.get("type"),
+        "low_support_opportunity_resistance_distance_pct": resistance_room_pct,
+    }
+
+    if phase not in allowed_phases:
+        return {"opportunity": False, "reason": "phase_not_enabled", **details}
+    if falling_tape:
+        return {"opportunity": False, "reason": "falling_tape", **details}
+    if stabilization_score is None or stabilization_score < min_stabilization:
+        return {"opportunity": False, "reason": "stabilization_score_low", **details}
+    if entry_score is None or entry_score < min_entry:
+        return {"opportunity": False, "reason": "entry_score_low", **details}
+    if (
+        bottom_signals
+        and (
+            bottom_readiness_score is None
+            or bottom_readiness_score < min_bottom_readiness
+        )
+    ):
+        return {"opportunity": False, "reason": "bottom_readiness_low", **details}
+    if (
+        max_support_distance_pct > 0
+        and support_distance_pct is not None
+        and support_distance_pct > max_support_distance_pct * 100
+    ):
+        return {"opportunity": False, "reason": "support_distance_high", **details}
+    if (
+        min_resistance_room_pct > 0
+        and (
+            resistance_room_pct is None
+            or resistance_room_pct < min_resistance_room_pct * 100
+        )
+    ):
+        return {"opportunity": False, "reason": "resistance_room_low", **details}
+    return {"opportunity": True, "reason": "playable_low_support_setup", **details}
+
+
 def write_status_snapshot(payload):
     try:
         write_json_file(STATUS_FILE, payload)
@@ -8021,6 +8179,10 @@ def main():
                     key = str(level)
                     skip_reason = None
                     high_band_guard = {"allowed": True, "reason": None}
+                    low_support_shadow = {
+                        "opportunity": False,
+                        "reason": "not_evaluated",
+                    }
                     weather_report_for_bypass = dict(weather_report)
                     weather_report_for_bypass["_risk_context"] = (
                         sentiment_payload.get("risk_context") or {}
@@ -8176,6 +8338,17 @@ def main():
                         )
                         if not high_band_guard["allowed"]:
                             skip_reason = high_band_guard["reason"]
+                        else:
+                            high_band_guard = {
+                                **high_band_guard,
+                                **high_band_resistance_room_guard(
+                                    route_config,
+                                    strategy_config,
+                                    weather_report,
+                                ),
+                            }
+                            if not high_band_guard["allowed"]:
+                                skip_reason = high_band_guard["reason"]
                     elif flow_control["block_buy"]:
                         skip_reason = flow_control["reason"]
                     elif (
@@ -8260,6 +8433,12 @@ def main():
                     }
 
                     if skip_reason is not None:
+                        low_support_shadow = low_support_opportunity_shadow(
+                            route_config,
+                            strategy_config,
+                            buy_source,
+                            weather_report,
+                        )
                         log_event(
                             "BUY_CANDIDATE_SKIPPED",
                             cycle_id=cycle_id,
@@ -8374,6 +8553,31 @@ def main():
                             risk_context_high_band_distribution_min_hold_through_score=(
                                 high_band_guard.get(
                                     "risk_context_high_band_distribution_min_hold_through_score"
+                                )
+                            ),
+                            high_band_min_actionable_resistance_room_pct=(
+                                high_band_guard.get(
+                                    "high_band_min_actionable_resistance_room_pct"
+                                )
+                            ),
+                            high_band_actionable_resistance_price=(
+                                high_band_guard.get(
+                                    "high_band_actionable_resistance_price"
+                                )
+                            ),
+                            high_band_actionable_resistance_type=(
+                                high_band_guard.get(
+                                    "high_band_actionable_resistance_type"
+                                )
+                            ),
+                            high_band_actionable_resistance_label=(
+                                high_band_guard.get(
+                                    "high_band_actionable_resistance_label"
+                                )
+                            ),
+                            high_band_actionable_resistance_distance_pct=(
+                                high_band_guard.get(
+                                    "high_band_actionable_resistance_distance_pct"
                                 )
                             ),
                             operating_mode=operating_mode,
@@ -8685,6 +8889,27 @@ def main():
                             ),
                             reason=skip_reason
                         )
+                        if low_support_shadow.get("opportunity"):
+                            log_event(
+                                "LOW_SUPPORT_OPPORTUNITY_SKIPPED",
+                                cycle_id=cycle_id,
+                                level=round(level, PRICE_DECIMALS),
+                                market_price=price,
+                                skip_reason=skip_reason,
+                                buy_source=buy_source,
+                                anchor_strategy_router_enabled=(
+                                    anchor_strategy_router_enabled
+                                ),
+                                anchor_strategy_router_anchor=route_anchor,
+                                anchor_strategy_router_strategy_label=(
+                                    route.get("strategy_label") if route else None
+                                ),
+                                anchor_strategy_router_strategy_file=(
+                                    route.get("strategy_file") if route else None
+                                ),
+                                **sentiment_risk_fields,
+                                **low_support_shadow,
+                            )
                         continue
 
                     log_event(

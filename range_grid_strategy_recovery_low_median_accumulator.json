@@ -146,7 +146,7 @@
   "stale_level_reanchor_profit_guard_enabled": true,
   "stale_level_reanchor_profit_guard_fail_closed": true,
   "stale_level_reanchor_profit_guard_low_dip_bypass_enabled": true,
-  "stale_level_reanchor_profit_guard_low_dip_bypass_phases": "dip_leveling_entry",
+  "stale_level_reanchor_profit_guard_low_dip_bypass_phases": "dip_leveling_entry,bottoming_setup,range_chop_accumulation",
   "stale_level_reanchor_profit_guard_low_dip_min_stabilization_score": 0.6,
   "stale_level_reanchor_profit_guard_low_dip_min_entry_opportunity_score": 0.6,
   "stale_level_reanchor_profit_guard_low_dip_min_resistance_room_pct": 0.006,

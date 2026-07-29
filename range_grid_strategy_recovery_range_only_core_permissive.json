@@ -94,6 +94,7 @@
   "risk_context_high_band_neutral_min_breakout_score": 0.65,
   "risk_context_high_band_neutral_min_rebound_score": 0.7,
   "risk_context_high_band_max_market_risk_score": 0.35,
+  "high_band_min_actionable_resistance_room_pct": 0.003,
   "risk_context_position_sizing_enabled": true,
   "risk_context_position_size_min_multiplier": 0.35,
   "risk_context_position_size_max_multiplier": 1.0,
