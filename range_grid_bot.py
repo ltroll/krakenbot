@@ -1787,6 +1787,143 @@ def low_dip_leveling_profit_guard_bypass(
     }
 
 
+def source_weather_entry_guard(config, fallback_config, buy_source, weather_report):
+    if not strategy_bool_with_fallback(
+        config,
+        fallback_config,
+        "weather_entry_guard_enabled",
+        False,
+    ):
+        return {"allowed": True, "reason": None}
+
+    sources = config_token_set_with_fallback(
+        config,
+        fallback_config,
+        "weather_entry_guard_sources",
+        "range_median",
+    )
+    if buy_source not in sources:
+        return {"allowed": True, "reason": None}
+
+    if not weather_bot_decides(weather_report):
+        return {"allowed": False, "reason": "weather_entry_guard_unavailable"}
+    if weather_report.get("emergency_bell") or weather_report.get("alert_level") == "danger":
+        return {"allowed": False, "reason": "weather_entry_guard_danger"}
+
+    opportunity = weather_market_opportunity(weather_report)
+    phase = str(opportunity.get("cycle_phase") or "").strip().lower()
+    allowed_phases = config_token_set_with_fallback(
+        config,
+        fallback_config,
+        "weather_entry_guard_phases",
+        "range_chop_stabilizing,range_chop_accumulation,early_rebound",
+    )
+    if allowed_phases and phase not in allowed_phases:
+        return {"allowed": False, "reason": "weather_entry_guard_phase"}
+
+    trend_pressure = weather_trend_pressure(weather_report)
+    if strategy_bool_with_fallback(
+        config,
+        fallback_config,
+        "weather_entry_guard_block_falling_tape",
+        True,
+    ):
+        if bool(trend_pressure.get("falling_tape")):
+            return {"allowed": False, "reason": "weather_entry_guard_falling_tape"}
+
+    stability = weather_market_stability(weather_report)
+    entry_score = optional_float(opportunity.get("entry_opportunity_score"))
+    rebound_score = optional_float(opportunity.get("rebound_confirmation_score"))
+    exit_pressure_score = optional_float(opportunity.get("exit_pressure_score"))
+    stabilization_score = optional_float(stability.get("stabilization_score"))
+    min_stabilization = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "weather_entry_guard_min_stabilization_score",
+        0.0,
+    )
+    min_entry = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "weather_entry_guard_min_entry_opportunity_score",
+        0.0,
+    )
+    min_rebound = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "weather_entry_guard_min_rebound_confirmation_score",
+        0.0,
+    )
+    max_exit_pressure = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "weather_entry_guard_max_exit_pressure_score",
+        1.0,
+    )
+    if stabilization_score is not None and stabilization_score < min_stabilization:
+        return {"allowed": False, "reason": "weather_entry_guard_stabilization"}
+    if entry_score is not None and entry_score < min_entry:
+        return {"allowed": False, "reason": "weather_entry_guard_entry_score"}
+    if rebound_score is not None and rebound_score < min_rebound:
+        return {"allowed": False, "reason": "weather_entry_guard_rebound"}
+    if exit_pressure_score is not None and exit_pressure_score > max_exit_pressure:
+        return {"allowed": False, "reason": "weather_entry_guard_exit_pressure"}
+
+    bottom_signals = weather_bottom_signals(weather_report)
+    bottom_readiness_score = optional_float(
+        bottom_signals.get("bottom_readiness_score")
+    )
+    min_bottom_readiness = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "weather_entry_guard_min_bottom_readiness_score",
+        0.0,
+    )
+    if (
+        bottom_signals
+        and min_bottom_readiness > 0
+        and (
+            bottom_readiness_score is None
+            or bottom_readiness_score < min_bottom_readiness
+        )
+    ):
+        return {"allowed": False, "reason": "weather_entry_guard_bottom_readiness"}
+
+    nearest_support = weather_nearest_support(weather_report)
+    support_distance_pct = optional_float(nearest_support.get("distance_pct"))
+    max_support_distance_pct = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "weather_entry_guard_max_support_distance_pct",
+        0.0,
+    )
+    if (
+        max_support_distance_pct > 0
+        and support_distance_pct is not None
+        and support_distance_pct > max_support_distance_pct * 100
+    ):
+        return {"allowed": False, "reason": "weather_entry_guard_support_distance"}
+
+    resistance_room = weather_actionable_resistance(weather_report)
+    resistance_room_pct = optional_float(resistance_room.get("distance_pct"))
+    min_resistance_room_pct = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "weather_entry_guard_min_resistance_room_pct",
+        0.0,
+    )
+    if (
+        min_resistance_room_pct > 0
+        and (
+            resistance_room_pct is None
+            or resistance_room_pct < min_resistance_room_pct * 100
+        )
+    ):
+        return {"allowed": False, "reason": "weather_entry_guard_resistance_room"}
+
+    return {"allowed": True, "reason": None}
+
+
 def high_band_resistance_room_guard(config, fallback_config, weather_report):
     min_room_pct = strategy_float_with_fallback(
         config,
@@ -8211,6 +8348,12 @@ def main():
                         weather_report,
                         now,
                     )
+                    weather_entry_guard = source_weather_entry_guard(
+                        route_config,
+                        strategy_config,
+                        buy_source,
+                        weather_report,
+                    )
 
                     if key in state["open_buy_orders"]:
                         skip_reason = "open_buy_order"
@@ -8286,6 +8429,8 @@ def main():
                                 )
                                 else "price_above_level"
                             )
+                    elif not weather_entry_guard["allowed"]:
+                        skip_reason = weather_entry_guard["reason"]
                     elif buy_cooldown["remaining_minutes"] > 0:
                         skip_reason = "buy_cooldown"
                     elif sell_fill_cooldown["remaining_minutes"] > 0:

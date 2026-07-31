@@ -251,18 +251,85 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertFalse(blocked_falling["allowed"])
         self.assertEqual(blocked_falling["reason"], "falling_tape")
 
+    def test_source_weather_entry_guard_filters_median_discount_entries(self):
+        config = {
+            "weather_entry_guard_enabled": True,
+            "weather_entry_guard_sources": "range_median",
+            "weather_entry_guard_phases": "range_chop_accumulation",
+            "weather_entry_guard_min_stabilization_score": 0.5,
+            "weather_entry_guard_min_entry_opportunity_score": 0.35,
+            "weather_entry_guard_max_exit_pressure_score": 0.35,
+            "weather_entry_guard_min_resistance_room_pct": 0.004,
+        }
+        weather = {
+            "mode": "weather_report",
+            "bot_decision_authority": "bot",
+            "trade_permission": "bot_decides",
+            "alert_level": "watch",
+            "emergency_bell": False,
+            "market_location": {
+                "current_price": 100.0,
+                "resistance_bands": [
+                    {"price": 101.0, "type": "median_reclaim", "distance_pct": 1.0}
+                ],
+            },
+            "market_stability": {"stabilization_score": 0.62},
+            "trend_pressure": {"falling_tape": False},
+            "market_opportunity": {
+                "cycle_phase": "range_chop_accumulation",
+                "entry_opportunity_score": 0.45,
+                "exit_pressure_score": 0.2,
+            },
+        }
+
+        allowed = backtest.source_weather_entry_guard(
+            config,
+            "range_median",
+            weather,
+        )
+        self.assertTrue(allowed["allowed"])
+
+        falling_weather = dict(weather)
+        falling_weather["trend_pressure"] = {"falling_tape": True}
+        blocked = backtest.source_weather_entry_guard(
+            config,
+            "range_median",
+            falling_weather,
+        )
+        self.assertFalse(blocked["allowed"])
+        self.assertEqual(blocked["reason"], "weather_entry_guard_falling_tape")
+
+        ignored = backtest.source_weather_entry_guard(
+            config,
+            "range_low",
+            falling_weather,
+        )
+        self.assertTrue(ignored["allowed"])
+
+        low_dip_weather = {
+            **weather,
+            "bottom_signals": {
+                "bottom_readiness": "forming",
+                "bottom_readiness_score": 0.68,
+                "falling_tape": False,
+            },
+            "market_opportunity": {
+                "cycle_phase": "dip_leveling_entry",
+                "entry_opportunity_score": 0.65,
+            },
+        }
         blocked_room = backtest.low_dip_leveling_profit_guard_bypass(
             {
                 "stale_level_reanchor_profit_guard_low_dip_min_resistance_room_pct": 0.015,
             },
             "range_low",
-            weather,
+            low_dip_weather,
         )
         self.assertFalse(blocked_room["allowed"])
         self.assertEqual(blocked_room["reason"], "resistance_room_low")
 
         not_ready_weather = {
-            **weather,
+            **low_dip_weather,
             "bottom_signals": {
                 "bottom_readiness": "not_ready_falling_tape",
                 "bottom_readiness_score": 0.08,

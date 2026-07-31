@@ -1,0 +1,6 @@
+# Median-discount reversion test strategies.
+# These test the original median idea: buy dips below median only when weather says the dip is playable.
+
+range_grid_strategy_median_discount_stable_chop.json
+range_grid_strategy_median_discount_deep_snapback.json
+range_grid_strategy_median_discount_rebound_confirmed.json
