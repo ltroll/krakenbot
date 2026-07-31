@@ -270,6 +270,37 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertFalse(blocked_bottom["allowed"])
         self.assertEqual(blocked_bottom["reason"], "bottom_falling_tape")
 
+    def test_high_band_resistance_room_guard_blocks_near_resistance(self):
+        config = {"high_band_min_actionable_resistance_room_pct": 0.003}
+        weather = {
+            "mode": "weather_report",
+            "bot_decision_authority": "bot",
+            "trade_permission": "bot_decides",
+            "market_location": {
+                "current_price": 100.0,
+                "resistance_bands": [
+                    {
+                        "price": 100.10,
+                        "type": "median_reclaim",
+                        "distance_pct": 0.10,
+                    },
+                    {
+                        "price": 101.0,
+                        "type": "recent_high",
+                        "distance_pct": 1.0,
+                    },
+                ],
+            },
+        }
+
+        blocked = backtest.high_band_resistance_room_guard(config, weather)
+        self.assertFalse(blocked["allowed"])
+        self.assertEqual(blocked["reason"], "high_band_resistance_room_low")
+
+        weather["market_location"]["resistance_bands"][0]["distance_pct"] = 0.35
+        allowed = backtest.high_band_resistance_room_guard(config, weather)
+        self.assertTrue(allowed["allowed"])
+
     def test_strategy_comparison_recomputes_ranges_per_strategy_window(self):
         snapshots = [
             make_snapshot("2026-06-13T08:00:00+00:00", 90.0),
@@ -2494,6 +2525,58 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(
             summary["recent_approved_but_not_placed"][0]["likely_live_blockers"],
             [],
+        )
+
+    def test_summarize_missed_price_above_opportunities_finds_playable_low_setup(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T10:00:00+00:00",
+                100.4,
+                strategy_overrides={
+                    "profit_target_pct": 0.005,
+                    "round_trip_fee_pct": 0.0,
+                },
+            ),
+            make_snapshot("2026-06-13T10:30:00+00:00", 100.9),
+            make_snapshot("2026-06-13T11:00:00+00:00", 101.1),
+        ]
+        event = {
+            "captured_at": "2026-06-13T10:00:00+00:00",
+            "price": 100.4,
+            "level": 100.0,
+            "buy_source": "range_low",
+            "reason": "price_above_level",
+            "weather_alert_level": "watch",
+            "weather_emergency_bell": False,
+            "weather_falling_tape": False,
+            "weather_bottom_falling_tape": False,
+            "weather_opportunity_phase": "dip_leveling_entry",
+            "weather_stabilization_score": 0.7,
+            "weather_entry_opportunity_score": 0.65,
+            "weather_bottom_readiness": "forming",
+            "weather_bottom_readiness_score": 0.6,
+            "weather_actionable_resistance_distance_pct": 0.8,
+            "weather_nearest_support_distance_pct": 0.4,
+        }
+
+        summary = backtest.summarize_missed_price_above_opportunities(
+            {"blocked_events": [event]},
+            snapshots,
+        )
+
+        self.assertEqual(summary["playable_price_above_count"], 1)
+        self.assertEqual(summary["profitable_price_above_count"], 1)
+        self.assertEqual(summary["take_profit_reached_rate"], 1.0)
+        self.assertEqual(summary["by_source"], {"range_low": 1})
+        self.assertEqual(
+            summary["by_weather_opportunity_phase"],
+            {"dip_leveling_entry": 1},
+        )
+        self.assertEqual(summary["filter_reason_counts"], {})
+        self.assertTrue(
+            summary["recent_profitable_price_above"][0]["potential"][
+                "take_profit_reached"
+            ]
         )
 
     def test_potential_summary_reports_risk_sized_return_impact(self):

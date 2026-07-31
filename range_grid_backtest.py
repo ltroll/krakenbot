@@ -2920,6 +2920,219 @@ def summarize_potential_from_approved_events(replay, snapshots):
     }
 
 
+def missed_price_above_opportunity_filter(config, event):
+    if event.get("reason") != "price_above_level":
+        return False, "not_price_above_level"
+    sources = config_token_set(
+        config,
+        "missed_price_above_opportunity_sources",
+        "range_low,range_median",
+    )
+    buy_source = str(event.get("buy_source") or "").strip().lower()
+    if buy_source not in sources:
+        return False, "source_not_enabled"
+    if safe_bool(event.get("weather_emergency_bell")):
+        return False, "emergency_bell"
+    if str(event.get("weather_alert_level") or "").strip().lower() == "danger":
+        return False, "weather_danger"
+
+    phases = config_token_set(
+        config,
+        "missed_price_above_opportunity_phases",
+        "dip_leveling_entry,bottoming_setup,range_chop_accumulation,early_rebound,range_chop_stabilizing",
+    )
+    phase = str(event.get("weather_opportunity_phase") or "").strip().lower()
+    if phase not in phases:
+        return False, "phase_not_enabled"
+    if safe_bool(event.get("weather_falling_tape")):
+        return False, "falling_tape"
+    if safe_bool(event.get("weather_bottom_falling_tape")):
+        return False, "bottom_falling_tape"
+
+    min_stabilization = strategy_float(
+        config,
+        "missed_price_above_opportunity_min_stabilization_score",
+        0.50,
+    )
+    min_entry = strategy_float(
+        config,
+        "missed_price_above_opportunity_min_entry_opportunity_score",
+        0.45,
+    )
+    min_bottom_readiness = strategy_float(
+        config,
+        "missed_price_above_opportunity_min_bottom_readiness_score",
+        0.45,
+    )
+    max_support_distance_pct = strategy_float(
+        config,
+        "missed_price_above_opportunity_max_support_distance_pct",
+        0.012,
+    )
+    min_resistance_room_pct = strategy_float(
+        config,
+        "missed_price_above_opportunity_min_resistance_room_pct",
+        0.003,
+    )
+
+    stabilization_score = safe_float(event.get("weather_stabilization_score"))
+    entry_score = safe_float(event.get("weather_entry_opportunity_score"))
+    bottom_readiness_score = safe_float(
+        event.get("weather_bottom_readiness_score")
+    )
+    support_distance_pct = safe_float(
+        event.get("weather_nearest_support_distance_pct")
+    )
+    resistance_room_pct = safe_float(
+        event.get("weather_actionable_resistance_distance_pct")
+    )
+
+    if stabilization_score is None or stabilization_score < min_stabilization:
+        return False, "stabilization_score_low"
+    if entry_score is None or entry_score < min_entry:
+        return False, "entry_score_low"
+    if (
+        bottom_readiness_score is not None
+        and bottom_readiness_score < min_bottom_readiness
+    ):
+        return False, "bottom_readiness_low"
+    if (
+        max_support_distance_pct > 0
+        and support_distance_pct is not None
+        and support_distance_pct > max_support_distance_pct * 100
+    ):
+        return False, "support_distance_high"
+    if (
+        min_resistance_room_pct > 0
+        and (
+            resistance_room_pct is None
+            or resistance_room_pct < min_resistance_room_pct * 100
+        )
+    ):
+        return False, "resistance_room_low"
+    return True, "playable_price_above_setup"
+
+
+def summarize_missed_price_above_opportunities(replay, snapshots):
+    snapshot_by_timestamp = {}
+    for snapshot in snapshots or []:
+        captured_at = snapshot.get("captured_at")
+        if captured_at:
+            snapshot_by_timestamp[captured_at] = snapshot
+    snapshot_price_index = build_snapshot_price_index(snapshots)
+
+    filter_reason_counts = Counter()
+    by_source = Counter()
+    by_phase = Counter()
+    by_source_profitable = Counter()
+    by_phase_profitable = Counter()
+    potential_results = []
+    recent_playable = []
+    recent_profitable = []
+
+    for event in replay.get("blocked_events") or []:
+        snapshot = snapshot_by_timestamp.get(event.get("captured_at"))
+        if not snapshot:
+            continue
+        config = strategy_payload(snapshot)
+        playable, filter_reason = missed_price_above_opportunity_filter(
+            config,
+            event,
+        )
+        if not playable:
+            filter_reason_counts[filter_reason] += 1
+            continue
+
+        potential = simulate_missed_opportunity(
+            snapshot,
+            event,
+            snapshots or [],
+            snapshot_price_index,
+        )
+        if not potential:
+            filter_reason_counts["potential_unavailable"] += 1
+            continue
+
+        source = str(event.get("buy_source") or "unknown")
+        phase = str(event.get("weather_opportunity_phase") or "unknown")
+        enriched = {
+            "captured_at": event.get("captured_at"),
+            "price": event.get("price"),
+            "level": event.get("level"),
+            "buy_source": source,
+            "weather_opportunity_phase": phase,
+            "weather_bottom_readiness": event.get("weather_bottom_readiness"),
+            "weather_stabilization_score": event.get(
+                "weather_stabilization_score"
+            ),
+            "weather_entry_opportunity_score": event.get(
+                "weather_entry_opportunity_score"
+            ),
+            "weather_actionable_resistance_distance_pct": event.get(
+                "weather_actionable_resistance_distance_pct"
+            ),
+            "weather_nearest_support_distance_pct": event.get(
+                "weather_nearest_support_distance_pct"
+            ),
+            "potential": potential,
+        }
+        potential_results.append(potential | {
+            "buy_source": source,
+            "weather_opportunity_phase": phase,
+        })
+        by_source[source] += 1
+        by_phase[phase] += 1
+        recent_playable.append(enriched)
+        if potential.get("take_profit_reached"):
+            by_source_profitable[source] += 1
+            by_phase_profitable[phase] += 1
+            recent_profitable.append(enriched)
+
+    def values(field):
+        return [
+            result[field]
+            for result in potential_results
+            if result.get(field) is not None
+        ]
+
+    take_profit_count = sum(
+        1 for result in potential_results if result.get("take_profit_reached")
+    )
+    end_returns = values("end_return_pct")
+    max_runups = values("max_runup_pct")
+    max_drawdowns = values("max_drawdown_pct")
+
+    return {
+        "playable_price_above_count": len(potential_results),
+        "profitable_price_above_count": take_profit_count,
+        "take_profit_reached_rate": (
+            round(take_profit_count / len(potential_results), 4)
+            if potential_results
+            else None
+        ),
+        "avg_end_return_pct": (
+            round(statistics.mean(end_returns), 6) if end_returns else None
+        ),
+        "avg_max_runup_pct": (
+            round(statistics.mean(max_runups), 6) if max_runups else None
+        ),
+        "avg_max_drawdown_pct": (
+            round(statistics.mean(max_drawdowns), 6) if max_drawdowns else None
+        ),
+        "by_source": dict(by_source.most_common()),
+        "profitable_by_source": dict(by_source_profitable.most_common()),
+        "by_weather_opportunity_phase": dict(by_phase.most_common()),
+        "profitable_by_weather_opportunity_phase": dict(
+            by_phase_profitable.most_common()
+        ),
+        "filter_reason_counts": dict(filter_reason_counts.most_common()),
+        "recent_playable_price_above": recent_playable[-BACKTEST_RECENT_LIMIT:],
+        "recent_profitable_price_above": recent_profitable[
+            -BACKTEST_RECENT_LIMIT:
+        ],
+    }
+
+
 def build_strategy_comparison_rows(
     snapshots,
     strategy_set_file,
@@ -2962,6 +3175,7 @@ def build_strategy_comparison_rows(
         potential = summarize_potential_from_approved_events(replay, variant_snapshots)
         summary = replay["summary"]
         risk_summary = summary.get("approved_sentiment_risk") or {}
+        missed_price_above = summary.get("missed_price_above_opportunities") or {}
         reanchor_summary = summarize_stale_level_reanchor_events(
             replay.get("approved_events") or []
         )
@@ -2984,6 +3198,40 @@ def build_strategy_comparison_rows(
             "approved_range_high_band": summary.get("approved_counts_by_source", {}).get("range_high_band", 0),
             "blocked_price_above_level": summary.get("blocked_reason_counts", {}).get("price_above_level", 0),
             "blocked_sentiment_high": summary.get("blocked_reason_counts", {}).get("sentiment_action_not_high_range_permitted", 0),
+            "missed_price_above_playable": missed_price_above.get(
+                "playable_price_above_count"
+            ),
+            "missed_price_above_profitable": missed_price_above.get(
+                "profitable_price_above_count"
+            ),
+            "missed_price_above_take_profit_reached_rate": (
+                missed_price_above.get("take_profit_reached_rate")
+            ),
+            "missed_price_above_avg_end_return_pct": missed_price_above.get(
+                "avg_end_return_pct"
+            ),
+            "missed_price_above_avg_max_runup_pct": missed_price_above.get(
+                "avg_max_runup_pct"
+            ),
+            "missed_price_above_avg_max_drawdown_pct": missed_price_above.get(
+                "avg_max_drawdown_pct"
+            ),
+            "missed_price_above_by_source": json.dumps(
+                missed_price_above.get("by_source") or {},
+                sort_keys=True,
+            ),
+            "missed_price_above_profitable_by_source": json.dumps(
+                missed_price_above.get("profitable_by_source") or {},
+                sort_keys=True,
+            ),
+            "missed_price_above_by_phase": json.dumps(
+                missed_price_above.get("by_weather_opportunity_phase") or {},
+                sort_keys=True,
+            ),
+            "missed_price_above_filter_reasons": json.dumps(
+                missed_price_above.get("filter_reason_counts") or {},
+                sort_keys=True,
+            ),
             "potential_evaluated_count": potential.get("evaluated_count"),
             "potential_take_profit_reached_rate": potential.get("take_profit_reached_rate"),
             "potential_avg_end_return_pct": potential.get("avg_end_return_pct"),
@@ -3487,6 +3735,16 @@ def write_strategy_comparison_csv(comparison, output_path):
         "approved_range_high_band",
         "blocked_price_above_level",
         "blocked_sentiment_high",
+        "missed_price_above_playable",
+        "missed_price_above_profitable",
+        "missed_price_above_take_profit_reached_rate",
+        "missed_price_above_avg_end_return_pct",
+        "missed_price_above_avg_max_runup_pct",
+        "missed_price_above_avg_max_drawdown_pct",
+        "missed_price_above_by_source",
+        "missed_price_above_profitable_by_source",
+        "missed_price_above_by_phase",
+        "missed_price_above_filter_reasons",
         "potential_evaluated_count",
         "potential_take_profit_reached_rate",
         "potential_avg_end_return_pct",
@@ -3496,6 +3754,16 @@ def write_strategy_comparison_csv(comparison, output_path):
         "potential_risk_sized_avg_end_return_pct",
         "potential_risk_sized_avg_max_runup_pct",
         "potential_risk_sized_avg_max_drawdown_pct",
+        "missed_price_above_playable",
+        "missed_price_above_profitable",
+        "missed_price_above_take_profit_reached_rate",
+        "missed_price_above_avg_end_return_pct",
+        "missed_price_above_avg_max_runup_pct",
+        "missed_price_above_avg_max_drawdown_pct",
+        "missed_price_above_by_source",
+        "missed_price_above_profitable_by_source",
+        "missed_price_above_by_phase",
+        "missed_price_above_filter_reasons",
         "approved_sentiment_risk_samples",
         "approved_sentiment_risk_postures",
         "approved_weather_leveling_states",
@@ -4539,6 +4807,7 @@ def replay_from_snapshots(snapshots):
     recent = []
     recent_approved = []
     approved_events = []
+    blocked_events = []
     hold_reason_counts = Counter()
     hold_action_recommendation_counts = Counter()
     hold_action_policy_reason_counts = Counter()
@@ -4759,7 +5028,7 @@ def replay_from_snapshots(snapshots):
                 approved_events.append(approved_event)
             else:
                 blocked_reason_counts[reason] += 1
-                recent.append({
+                blocked_event = {
                     "captured_at": snapshot.get("captured_at"),
                     "price": price,
                     "active_strategy_modes": built.get("strategy_modes") or [],
@@ -4810,7 +5079,9 @@ def replay_from_snapshots(snapshots):
                     "status": "blocked_gate_only",
                     "reason": reason,
                     **sentiment_risk_fields,
-                })
+                }
+                recent.append(blocked_event)
+                blocked_events.append(blocked_event)
 
     summary["hold_reason_counts"] = dict(hold_reason_counts.most_common())
     summary["hold_action_recommendation_counts"] = dict(
@@ -4836,6 +5107,12 @@ def replay_from_snapshots(snapshots):
     )
     summary["approved_sentiment_risk"] = summarize_sentiment_risk_events(
         approved_events
+    )
+    summary["missed_price_above_opportunities"] = (
+        summarize_missed_price_above_opportunities(
+            {"blocked_events": blocked_events},
+            snapshots,
+        )
     )
 
     return {
