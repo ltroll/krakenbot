@@ -219,11 +219,18 @@ class RangeGridBacktestTests(unittest.TestCase):
             weather,
         )
         self.assertTrue(allowed["allowed"])
-        self.assertEqual(allowed["reason"], "low_dip_leveling_cold_start_bypass")
+        self.assertEqual(allowed["reason"], "weather_reanchor_cold_start_bypass")
         self.assertEqual(allowed["size_multiplier"], 0.35)
         self.assertEqual(allowed["actionable_resistance"]["type"], "median_reclaim")
         self.assertEqual(allowed["bottom_readiness"], "forming")
         self.assertEqual(allowed["nearest_support"]["type"], "recent_low")
+
+        median_allowed = backtest.low_dip_leveling_profit_guard_bypass(
+            {"stale_level_reanchor_profit_guard_weather_bypass_sources": "range_median"},
+            "range_median",
+            weather,
+        )
+        self.assertTrue(median_allowed["allowed"])
 
         blocked_high = backtest.low_dip_leveling_profit_guard_bypass(
             {},

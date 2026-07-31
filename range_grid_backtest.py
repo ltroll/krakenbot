@@ -668,7 +668,12 @@ def low_dip_leveling_profit_guard_bypass(
     buy_source,
     weather_report,
 ):
-    if buy_source != "range_low":
+    bypass_sources = config_token_set(
+        config,
+        "stale_level_reanchor_profit_guard_weather_bypass_sources",
+        "range_low",
+    )
+    if buy_source not in bypass_sources:
         return {"allowed": False, "reason": "unsupported_source"}
     if not strategy_bool(
         config,
@@ -787,7 +792,7 @@ def low_dip_leveling_profit_guard_bypass(
         }
     return {
         "allowed": True,
-        "reason": "low_dip_leveling_cold_start_bypass",
+        "reason": "weather_reanchor_cold_start_bypass",
         "size_multiplier": max(0.0, min(size_multiplier, 1.0)),
         "bottom_readiness": bottom_signals.get("bottom_readiness"),
         "bottom_readiness_score": bottom_readiness_score,

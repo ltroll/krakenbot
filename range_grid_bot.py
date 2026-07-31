@@ -1635,7 +1635,13 @@ def low_dip_leveling_profit_guard_bypass(
         return {"allowed": False, "reason": "profit_guard_allowed"}
     if profit_guard.get("reason") != "insufficient_recent_profit_samples":
         return {"allowed": False, "reason": "unsupported_profit_guard_reason"}
-    if buy_source != "range_low":
+    bypass_sources = config_token_set_with_fallback(
+        config,
+        fallback_config,
+        "stale_level_reanchor_profit_guard_weather_bypass_sources",
+        "range_low",
+    )
+    if buy_source not in bypass_sources:
         return {"allowed": False, "reason": "unsupported_source"}
     if not strategy_bool_with_fallback(
         config,
@@ -1764,7 +1770,7 @@ def low_dip_leveling_profit_guard_bypass(
 
     return {
         "allowed": True,
-        "reason": "low_dip_leveling_cold_start_bypass",
+        "reason": "weather_reanchor_cold_start_bypass",
         "phase": phase,
         "stabilization_score": stabilization_score,
         "entry_opportunity_score": entry_score,

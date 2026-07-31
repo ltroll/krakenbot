@@ -115,6 +115,7 @@
   "stale_level_reanchor_max_exit_pressure_score": 0.35,
   "stale_level_reanchor_profit_guard_enabled": true,
   "stale_level_reanchor_profit_guard_fail_closed": true,
+  "stale_level_reanchor_profit_guard_weather_bypass_sources": "range_median",
   "stale_level_reanchor_profit_guard_low_dip_bypass_enabled": true,
   "stale_level_reanchor_profit_guard_low_dip_bypass_phases": "range_chop_stabilizing,range_chop_accumulation,early_rebound",
   "stale_level_reanchor_profit_guard_low_dip_min_stabilization_score": 0.5,
