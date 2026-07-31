@@ -306,6 +306,40 @@ class RangeGridBacktestTests(unittest.TestCase):
         )
         self.assertTrue(ignored["allowed"])
 
+        near_reclaim_config = {
+            **config,
+            "weather_entry_guard_max_median_reclaim_distance_pct": 0.005,
+        }
+        allowed_near_reclaim = backtest.source_weather_entry_guard(
+            near_reclaim_config,
+            "range_median",
+            {
+                **weather,
+                "market_location": {
+                    "current_price": 100.0,
+                    "resistance_bands": [
+                        {
+                            "price": 100.4,
+                            "type": "median_reclaim",
+                            "distance_pct": 0.4,
+                        }
+                    ],
+                },
+            },
+        )
+        self.assertTrue(allowed_near_reclaim["allowed"])
+
+        blocked_far_reclaim = backtest.source_weather_entry_guard(
+            near_reclaim_config,
+            "range_median",
+            weather,
+        )
+        self.assertFalse(blocked_far_reclaim["allowed"])
+        self.assertEqual(
+            blocked_far_reclaim["reason"],
+            "weather_entry_guard_median_reclaim_distance",
+        )
+
         low_dip_weather = {
             **weather,
             "bottom_signals": {

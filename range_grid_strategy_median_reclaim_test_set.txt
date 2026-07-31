@@ -1,0 +1,6 @@
+# Median-reclaim test strategies.
+# These test buying after a below-median dip starts reclaiming median/fair value.
+
+range_grid_strategy_median_reclaim_near_reclaim.json
+range_grid_strategy_median_reclaim_confirmed_rebound.json
+range_grid_strategy_median_reclaim_reanchor_probe.json

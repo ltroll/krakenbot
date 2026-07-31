@@ -1921,6 +1921,24 @@ def source_weather_entry_guard(config, fallback_config, buy_source, weather_repo
     ):
         return {"allowed": False, "reason": "weather_entry_guard_resistance_room"}
 
+    max_median_reclaim_distance_pct = strategy_float_with_fallback(
+        config,
+        fallback_config,
+        "weather_entry_guard_max_median_reclaim_distance_pct",
+        0.0,
+    )
+    median_reclaim_distance_pct = optional_float(
+        weather_resistance_room_by_type(weather_report, "median_reclaim")
+    )
+    if (
+        max_median_reclaim_distance_pct > 0
+        and (
+            median_reclaim_distance_pct is None
+            or median_reclaim_distance_pct > max_median_reclaim_distance_pct * 100
+        )
+    ):
+        return {"allowed": False, "reason": "weather_entry_guard_median_reclaim_distance"}
+
     return {"allowed": True, "reason": None}
 
 
