@@ -278,6 +278,7 @@ class RangeGridBacktestTests(unittest.TestCase):
             "market_opportunity": {
                 "cycle_phase": "range_chop_accumulation",
                 "entry_opportunity_score": 0.45,
+                "hold_through_score": 0.45,
                 "exit_pressure_score": 0.2,
             },
         }
@@ -339,6 +340,58 @@ class RangeGridBacktestTests(unittest.TestCase):
             blocked_far_reclaim["reason"],
             "weather_entry_guard_median_reclaim_distance",
         )
+
+        strict_config = {
+            **near_reclaim_config,
+            "weather_entry_guard_min_hold_through_score": 0.4,
+            "weather_entry_guard_block_risk_postures": "risk_off",
+        }
+        blocked_hold = backtest.source_weather_entry_guard(
+            strict_config,
+            "range_median",
+            {
+                **weather,
+                "market_location": {
+                    "current_price": 100.0,
+                    "resistance_bands": [
+                        {
+                            "price": 100.4,
+                            "type": "median_reclaim",
+                            "distance_pct": 0.4,
+                        }
+                    ],
+                },
+                "market_opportunity": {
+                    "cycle_phase": "range_chop_accumulation",
+                    "entry_opportunity_score": 0.45,
+                    "hold_through_score": 0.25,
+                    "exit_pressure_score": 0.2,
+                },
+            },
+        )
+        self.assertFalse(blocked_hold["allowed"])
+        self.assertEqual(blocked_hold["reason"], "weather_entry_guard_hold_through")
+
+        blocked_posture = backtest.source_weather_entry_guard(
+            strict_config,
+            "range_median",
+            {
+                **weather,
+                "_risk_context": {"recommended_posture": "risk_off"},
+                "market_location": {
+                    "current_price": 100.0,
+                    "resistance_bands": [
+                        {
+                            "price": 100.4,
+                            "type": "median_reclaim",
+                            "distance_pct": 0.4,
+                        }
+                    ],
+                },
+            },
+        )
+        self.assertFalse(blocked_posture["allowed"])
+        self.assertEqual(blocked_posture["reason"], "weather_entry_guard_risk_posture")
 
         low_dip_weather = {
             **weather,

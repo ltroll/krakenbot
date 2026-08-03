@@ -821,6 +821,24 @@ def source_weather_entry_guard(config, buy_source, weather_report):
     if weather_report.get("emergency_bell") or weather_report.get("alert_level") == "danger":
         return {"allowed": False, "reason": "weather_entry_guard_danger"}
 
+    risk_context = (
+        weather_report.get("_risk_context")
+        if isinstance(weather_report.get("_risk_context"), dict)
+        else {}
+    )
+    blocked_postures = config_token_set(
+        config,
+        "weather_entry_guard_block_risk_postures",
+        "",
+    )
+    risk_posture = str(
+        risk_context.get("recommended_posture")
+        or weather_report.get("recommended_posture")
+        or ""
+    ).strip().lower()
+    if blocked_postures and risk_posture in blocked_postures:
+        return {"allowed": False, "reason": "weather_entry_guard_risk_posture"}
+
     opportunity = weather_market_opportunity(weather_report)
     phase = str(opportunity.get("cycle_phase") or "").strip().lower()
     allowed_phases = config_token_set(
@@ -840,6 +858,7 @@ def source_weather_entry_guard(config, buy_source, weather_report):
     entry_score = safe_float(opportunity.get("entry_opportunity_score"))
     rebound_score = safe_float(opportunity.get("rebound_confirmation_score"))
     exit_pressure_score = safe_float(opportunity.get("exit_pressure_score"))
+    hold_through_score = safe_float(opportunity.get("hold_through_score"))
     stabilization_score = safe_float(stability.get("stabilization_score"))
     min_stabilization = strategy_float(
         config,
@@ -861,6 +880,11 @@ def source_weather_entry_guard(config, buy_source, weather_report):
         "weather_entry_guard_max_exit_pressure_score",
         1.0,
     )
+    min_hold_through = strategy_float(
+        config,
+        "weather_entry_guard_min_hold_through_score",
+        0.0,
+    )
     if stabilization_score is not None and stabilization_score < min_stabilization:
         return {"allowed": False, "reason": "weather_entry_guard_stabilization"}
     if entry_score is not None and entry_score < min_entry:
@@ -869,6 +893,8 @@ def source_weather_entry_guard(config, buy_source, weather_report):
         return {"allowed": False, "reason": "weather_entry_guard_rebound"}
     if exit_pressure_score is not None and exit_pressure_score > max_exit_pressure:
         return {"allowed": False, "reason": "weather_entry_guard_exit_pressure"}
+    if hold_through_score is not None and hold_through_score < min_hold_through:
+        return {"allowed": False, "reason": "weather_entry_guard_hold_through"}
 
     bottom_signals = weather_bottom_signals(weather_report)
     bottom_readiness_score = safe_float(
@@ -4834,10 +4860,14 @@ def evaluate_candidate(snapshot, candidate, price):
             return False, "open_buy_order"
         if key in open_sell_levels:
             return False, "open_sell_order"
+    weather_report_with_context = {
+        **weather_report,
+        "_risk_context": risk_context,
+    }
     weather_entry_guard = source_weather_entry_guard(
         config,
         buy_source,
-        weather_report,
+        weather_report_with_context,
     )
     if not weather_entry_guard["allowed"]:
         return False, weather_entry_guard["reason"]
