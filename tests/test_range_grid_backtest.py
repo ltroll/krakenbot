@@ -251,6 +251,44 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertFalse(blocked_falling["allowed"])
         self.assertEqual(blocked_falling["reason"], "falling_tape")
 
+        low_dip_weather = {
+            **weather,
+            "bottom_signals": {
+                "bottom_readiness": "forming",
+                "bottom_readiness_score": 0.68,
+                "falling_tape": False,
+            },
+            "market_opportunity": {
+                "cycle_phase": "dip_leveling_entry",
+                "entry_opportunity_score": 0.65,
+            },
+        }
+        blocked_room = backtest.low_dip_leveling_profit_guard_bypass(
+            {
+                "stale_level_reanchor_profit_guard_low_dip_min_resistance_room_pct": 0.015,
+            },
+            "range_low",
+            low_dip_weather,
+        )
+        self.assertFalse(blocked_room["allowed"])
+        self.assertEqual(blocked_room["reason"], "resistance_room_low")
+
+        not_ready_weather = {
+            **low_dip_weather,
+            "bottom_signals": {
+                "bottom_readiness": "not_ready_falling_tape",
+                "bottom_readiness_score": 0.08,
+                "falling_tape": True,
+            },
+        }
+        blocked_bottom = backtest.low_dip_leveling_profit_guard_bypass(
+            {},
+            "range_low",
+            not_ready_weather,
+        )
+        self.assertFalse(blocked_bottom["allowed"])
+        self.assertEqual(blocked_bottom["reason"], "bottom_falling_tape")
+
     def test_source_weather_entry_guard_filters_median_discount_entries(self):
         config = {
             "weather_entry_guard_enabled": True,
@@ -393,43 +431,103 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertFalse(blocked_posture["allowed"])
         self.assertEqual(blocked_posture["reason"], "weather_entry_guard_risk_posture")
 
-        low_dip_weather = {
-            **weather,
-            "bottom_signals": {
-                "bottom_readiness": "forming",
-                "bottom_readiness_score": 0.68,
-                "falling_tape": False,
+    def test_price_first_source_policy_bypasses_normal_sentiment_gate(self):
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            94.0,
+            action_recommendation="blocked",
+            strategy_modes=["low"],
+            strategy_overrides={
+                "sentiment_control_mode": "strict_sentiment",
+                "source_entry_policy_enabled": True,
+                "entry_policy_by_source": {
+                    "range_low": {
+                        "authority": "price_first",
+                        "position_size_multiplier": 0.6,
+                    }
+                },
             },
-            "market_opportunity": {
-                "cycle_phase": "dip_leveling_entry",
-                "entry_opportunity_score": 0.65,
-            },
-        }
-        blocked_room = backtest.low_dip_leveling_profit_guard_bypass(
-            {
-                "stale_level_reanchor_profit_guard_low_dip_min_resistance_room_pct": 0.015,
-            },
-            "range_low",
-            low_dip_weather,
         )
-        self.assertFalse(blocked_room["allowed"])
-        self.assertEqual(blocked_room["reason"], "resistance_room_low")
+        candidate = {
+            "level": 95.0,
+            "buy_source": "range_low",
+            "strategy_mode": "low",
+        }
 
-        not_ready_weather = {
-            **low_dip_weather,
-            "bottom_signals": {
-                "bottom_readiness": "not_ready_falling_tape",
-                "bottom_readiness_score": 0.08,
-                "falling_tape": True,
-            },
-        }
-        blocked_bottom = backtest.low_dip_leveling_profit_guard_bypass(
-            {},
-            "range_low",
-            not_ready_weather,
+        approved, reason = backtest.evaluate_candidate(snapshot, candidate, 94.0)
+
+        self.assertTrue(approved)
+        self.assertIsNone(reason)
+        self.assertEqual(
+            candidate["source_entry_policy"]["authority"],
+            "price_first",
         )
-        self.assertFalse(blocked_bottom["allowed"])
-        self.assertEqual(blocked_bottom["reason"], "bottom_falling_tape")
+        self.assertTrue(
+            candidate["source_entry_policy"]["bypass_sentiment_gate"]
+        )
+
+    def test_high_chop_policy_blocks_when_weather_is_missing(self):
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            104.5,
+            strategy_modes=["high"],
+            strategy_overrides={
+                "source_entry_policy_enabled": True,
+                "entry_policy_by_source": {
+                    "range_high_band": {
+                        "authority": "chop_confirmed",
+                    }
+                },
+            },
+        )
+        candidate = {
+            "level": 104.5,
+            "buy_source": "range_high_band",
+            "strategy_mode": "high",
+        }
+
+        approved, reason = backtest.evaluate_candidate(snapshot, candidate, 104.5)
+
+        self.assertFalse(approved)
+        self.assertEqual(reason, "source_policy_weather_required")
+
+    def test_replay_applies_source_policy_size_and_entry_spacing(self):
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            94.0,
+            action_recommendation="blocked",
+            strategy_modes=["low"],
+            strategy_overrides={
+                "sentiment_control_mode": "strict_sentiment",
+                "entry_step_pct": 0.0045,
+                "entry_step_pct_by_source": {"range_low": 0.006},
+                "source_entry_policy_enabled": True,
+                "entry_policy_by_source": {
+                    "range_low": {
+                        "authority": "price_first",
+                        "position_size_multiplier": 0.5,
+                        "missing_weather_size_multiplier": 0.5,
+                    }
+                },
+            },
+        )
+
+        replay = backtest.replay_from_snapshots([snapshot])
+
+        self.assertGreaterEqual(replay["summary"]["approved_candidates"], 1)
+        approved_event = replay["approved_events"][0]
+        self.assertEqual(approved_event["effective_entry_step_pct"], 0.006)
+        self.assertEqual(approved_event["source_entry_authority"], "price_first")
+        self.assertAlmostEqual(
+            approved_event["source_entry_policy_size_multiplier"],
+            0.25,
+        )
+        self.assertAlmostEqual(
+            approved_event[
+                "risk_context_position_size_effective_multiplier"
+            ],
+            0.25,
+        )
 
     def test_high_band_resistance_room_guard_blocks_near_resistance(self):
         config = {"high_band_min_actionable_resistance_room_pct": 0.003}
@@ -976,6 +1074,46 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(result["filled_entries"], 1)
         self.assertEqual(result["capital_or_inventory_blocked"], 1)
         self.assertEqual(result["ending_committed_inventory_usd"], 100.0)
+
+    def test_order_lifecycle_respects_source_bucket_inventory_cap(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                95.0,
+                strategy_overrides={
+                    "backtest_starting_cash_usd": 1000.0,
+                    "position_size_pct": 0.20,
+                    "max_inventory_usd": 1000.0,
+                    "max_inventory_usd_by_bucket": {"range_low": 100.0},
+                    "min_buy_notional_usd": 8.0,
+                },
+            )
+        ]
+        replay = {
+            "approved_events": [
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "level": 100.0,
+                    "buy_source": "range_low",
+                },
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "level": 99.0,
+                    "buy_source": "range_low",
+                },
+            ]
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(replay, snapshots)
+
+        self.assertEqual(result["orders_placed"], 1)
+        self.assertEqual(result["bucket_inventory_blocked"], 1)
+        self.assertEqual(result["capital_or_inventory_blocked"], 0)
+        self.assertEqual(result["ending_committed_inventory_usd"], 100.0)
+        self.assertEqual(
+            result["by_source"]["range_low"]["bucket_inventory_blocked"],
+            1,
+        )
 
     def test_replay_accepts_multi_asset_signal_payload(self):
         snapshot = make_snapshot(
@@ -3574,6 +3712,49 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertIn(
             "avg_end_return_below_min",
             winners["winners"]["high"]["candidates"][0]["rejection_reasons"],
+        )
+
+    def test_anchor_winners_use_anchor_specific_simulated_return_and_fills(self):
+        comparison = {
+            "rows": [
+                {
+                    "strategy_label": "mixed_results",
+                    "strategy_file": "/tmp/mixed.json",
+                    "grid_anchor": "low,median",
+                    "raw_candidates": 8,
+                    "approved_candidates": 4,
+                    "approved_range_low": 2,
+                    "approved_range_median": 2,
+                    "approved_range_high_band": 0,
+                    "simulation_filled_entries": 4,
+                    "simulation_closed_positions": 4,
+                    "simulation_open_positions": 0,
+                    "simulation_net_return_pct": 0.5,
+                    "simulation_max_equity_drawdown_pct": -0.2,
+                    "simulation_filled_range_low": 2,
+                    "simulation_net_return_range_low_pct": -0.2,
+                    "simulation_filled_range_median": 2,
+                    "simulation_net_return_range_median_pct": 1.2,
+                }
+            ],
+            "details": [
+                {
+                    "strategy_file": "/tmp/mixed.json",
+                    "strategy_payload": {"grid_anchor": "low,median"},
+                }
+            ],
+        }
+
+        winners = backtest.build_anchor_winners(comparison)
+
+        self.assertIsNone(winners["winners"]["low"]["selected"])
+        self.assertIn(
+            "avg_end_return_below_min",
+            winners["winners"]["low"]["candidates"][0]["rejection_reasons"],
+        )
+        self.assertEqual(
+            winners["winners"]["median"]["selected"]["strategy_label"],
+            "mixed_results",
         )
 
     def test_write_anchor_winners_json_outputs_router_payload(self):

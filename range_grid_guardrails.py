@@ -1,5 +1,11 @@
 from datetime import datetime, timezone
 
+from range_grid_source_policy import (
+    ENTRY_POLICY_ALLOWED_FIELDS,
+    ENTRY_POLICY_NUMERIC_FIELDS,
+    VALID_ENTRY_AUTHORITIES,
+)
+
 
 VALID_OPERATING_MODES = {
     "range_plus_llm",
@@ -228,6 +234,7 @@ def validate_strategy_config(strategy_config):
 
     source_numeric_maps = {
         "sell_target_offset_pct_by_source": ("numeric", None),
+        "entry_step_pct_by_source": ("positive", None),
         "momentum_entry_tolerance_pct_by_source": ("non_negative", None),
         "aging_start_minutes_by_source": ("positive", None),
         "aging_step_minutes_by_source": ("positive", None),
@@ -258,6 +265,63 @@ def validate_strategy_config(strategy_config):
                 errors.append(f"{field}.{source} must be > 0")
             elif kind == "non_negative" and numeric < 0:
                 errors.append(f"{field}.{source} must be >= 0")
+
+    entry_policies = strategy_config.get("entry_policy_by_source")
+    if entry_policies is not None:
+        if not isinstance(entry_policies, dict):
+            errors.append("entry_policy_by_source must be an object")
+        else:
+            for source, policy in entry_policies.items():
+                normalized_source = str(source or "").strip().lower()
+                if normalized_source not in VALID_BUY_SOURCES:
+                    errors.append(
+                        f"entry_policy_by_source.{source} must use a supported source key"
+                    )
+                    continue
+                if not isinstance(policy, dict):
+                    errors.append(f"entry_policy_by_source.{source} must be an object")
+                    continue
+                unknown_fields = set(policy) - ENTRY_POLICY_ALLOWED_FIELDS
+                for field in sorted(unknown_fields):
+                    errors.append(
+                        f"entry_policy_by_source.{source}.{field} is not supported"
+                    )
+                authority = str(
+                    policy.get("authority", "sentiment_confirmed") or ""
+                ).strip().lower()
+                if authority not in VALID_ENTRY_AUTHORITIES:
+                    errors.append(
+                        f"entry_policy_by_source.{source}.authority must be one of "
+                        + ", ".join(sorted(VALID_ENTRY_AUTHORITIES))
+                    )
+                for field in ENTRY_POLICY_NUMERIC_FIELDS:
+                    if field not in policy:
+                        continue
+                    try:
+                        numeric = float(policy[field])
+                    except Exception:
+                        errors.append(
+                            f"entry_policy_by_source.{source}.{field} must be numeric"
+                        )
+                        continue
+                    if numeric < 0 or numeric > 1:
+                        errors.append(
+                            f"entry_policy_by_source.{source}.{field} must be between 0 and 1"
+                        )
+                if "hard_block_falling_tape" in policy and not isinstance(
+                    policy["hard_block_falling_tape"],
+                    bool,
+                ):
+                    errors.append(
+                        f"entry_policy_by_source.{source}.hard_block_falling_tape must be boolean"
+                    )
+                if "allowed_phases" in policy and not isinstance(
+                    policy["allowed_phases"],
+                    (str, list, tuple),
+                ):
+                    errors.append(
+                        f"entry_policy_by_source.{source}.allowed_phases must be a string or list"
+                    )
 
     return errors
 

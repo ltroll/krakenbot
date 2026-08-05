@@ -14,6 +14,10 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
+from range_grid_source_policy import (
+    source_entry_policy_decision,
+    source_entry_step_pct,
+)
 from signal_normalizer import normalize_signal_payload
 
 
@@ -102,6 +106,18 @@ ANCHOR_WINNER_SOURCES = {
     "low": "approved_range_low",
     "median": "approved_range_median",
     "high": "approved_range_high_band",
+}
+
+ANCHOR_SIMULATION_FILLED_FIELDS = {
+    "low": "simulation_filled_range_low",
+    "median": "simulation_filled_range_median",
+    "high": "simulation_filled_range_high_band",
+}
+
+ANCHOR_SIMULATION_RETURN_FIELDS = {
+    "low": "simulation_net_return_range_low_pct",
+    "median": "simulation_net_return_range_median_pct",
+    "high": "simulation_net_return_range_high_band_pct",
 }
 
 
@@ -2795,6 +2811,16 @@ def simulate_approved_order_lifecycle(replay, snapshots):
             if max_inventory_usd != float("inf")
             else 1000.0
         )
+    raw_bucket_caps = first_config.get("max_inventory_usd_by_bucket")
+    bucket_caps = {}
+    if isinstance(raw_bucket_caps, dict):
+        for bucket, raw_cap in raw_bucket_caps.items():
+            cap = safe_float(raw_cap)
+            if cap is not None and cap > 0:
+                bucket_caps[str(bucket).strip().lower()] = min(
+                    cap,
+                    max_inventory_usd,
+                )
 
     available_cash_usd = starting_cash_usd
     pending_orders = []
@@ -2809,6 +2835,17 @@ def simulate_approved_order_lifecycle(replay, snapshots):
     def committed_inventory_usd():
         return sum(order["entry_notional_usd"] for order in pending_orders) + sum(
             position["entry_notional_usd"] for position in open_positions
+        )
+
+    def committed_bucket_inventory_usd(bucket):
+        return sum(
+            order["entry_notional_usd"]
+            for order in pending_orders
+            if buy_source_bucket(order["buy_source"]) == bucket
+        ) + sum(
+            position["entry_notional_usd"]
+            for position in open_positions
+            if buy_source_bucket(position["buy_source"]) == bucket
         )
 
     def active_level_keys():
@@ -2907,10 +2944,22 @@ def simulate_approved_order_lifecycle(replay, snapshots):
                 available_cash_usd * position_size_pct * max(0.0, size_multiplier)
             )
             remaining_inventory_capacity = max_inventory_usd - committed_inventory_usd()
+            bucket = buy_source_bucket(buy_source)
+            bucket_cap = bucket_caps.get(bucket)
+            remaining_bucket_capacity = (
+                bucket_cap - committed_bucket_inventory_usd(bucket)
+                if bucket_cap is not None
+                else float("inf")
+            )
+            if bucket_cap is not None and remaining_bucket_capacity <= 0:
+                counts["bucket_inventory_blocked"] += 1
+                source_stats[buy_source]["bucket_inventory_blocked"] += 1
+                continue
             entry_notional = min(
                 requested_notional,
                 available_cash_usd,
                 remaining_inventory_capacity,
+                remaining_bucket_capacity,
             )
             min_notional = max(
                 0.0,
@@ -2946,6 +2995,7 @@ def simulate_approved_order_lifecycle(replay, snapshots):
             available_cash_usd -= entry_notional
             counts["orders_placed"] += 1
             source_stats[buy_source]["orders_placed"] += 1
+            source_stats[buy_source]["placed_notional_usd"] += entry_notional
             if price <= entry_price:
                 order["filled_at"] = captured_at.isoformat()
                 open_positions.append(order)
@@ -2966,11 +3016,15 @@ def simulate_approved_order_lifecycle(replay, snapshots):
     unrealized_net_pnl_usd = 0.0
     if last_price is not None:
         for position in open_positions:
-            unrealized_net_pnl_usd += position["entry_notional_usd"] * (
+            position_unrealized_pnl = position["entry_notional_usd"] * (
                 (last_price / position["entry_price"])
                 - 1.0
                 - position["round_trip_fee_pct"]
             )
+            unrealized_net_pnl_usd += position_unrealized_pnl
+            source_stats[position["buy_source"]][
+                "unrealized_net_pnl_usd"
+            ] += position_unrealized_pnl
     total_net_pnl_usd = realized_net_pnl_usd + unrealized_net_pnl_usd
     ending_equity_usd = starting_cash_usd + total_net_pnl_usd
     fill_rate = (
@@ -2984,8 +3038,23 @@ def simulate_approved_order_lifecycle(replay, snapshots):
         else None
     )
 
+    for order in pending_orders:
+        source_stats[order["buy_source"]]["unfilled_entries"] += 1
+    for position in open_positions:
+        source_stats[position["buy_source"]]["open_positions"] += 1
+
     by_source = {}
     for source, stats in sorted(source_stats.items()):
+        stats["total_net_pnl_usd"] = (
+            stats.get("realized_net_pnl_usd", 0.0)
+            + stats.get("unrealized_net_pnl_usd", 0.0)
+        )
+        placed_notional = stats.get("placed_notional_usd", 0.0)
+        stats["net_return_on_placed_notional_pct"] = (
+            (stats["total_net_pnl_usd"] / placed_notional) * 100.0
+            if placed_notional > 0
+            else None
+        )
         by_source[source] = {
             key: (round(value, 8) if isinstance(value, float) else value)
             for key, value in stats.items()
@@ -3002,6 +3071,7 @@ def simulate_approved_order_lifecycle(replay, snapshots):
         "open_positions": len(open_positions),
         "duplicate_active_level": counts["duplicate_active_level"],
         "capital_or_inventory_blocked": counts["capital_or_inventory_blocked"],
+        "bucket_inventory_blocked": counts["bucket_inventory_blocked"],
         "below_min_notional": counts["below_min_notional"],
         "fill_rate_after_placement": (
             round(fill_rate, 6) if fill_rate is not None else None
@@ -3664,6 +3734,7 @@ def build_strategy_comparison_rows(
         replay = replay_from_snapshots(variant_snapshots)
         potential = summarize_potential_from_approved_events(replay, variant_snapshots)
         simulation = simulate_approved_order_lifecycle(replay, variant_snapshots)
+        simulation_sources = simulation.get("by_source") or {}
         summary = replay["summary"]
         risk_summary = summary.get("approved_sentiment_risk") or {}
         missed_price_above = summary.get("missed_price_above_opportunities") or {}
@@ -3777,10 +3848,49 @@ def build_strategy_comparison_rows(
             "simulation_capital_or_inventory_blocked": simulation.get(
                 "capital_or_inventory_blocked"
             ),
+            "simulation_bucket_inventory_blocked": simulation.get(
+                "bucket_inventory_blocked"
+            ),
             "simulation_by_source": json.dumps(
                 simulation.get("by_source") or {},
                 sort_keys=True,
             ),
+            "simulation_filled_range_low": (
+                simulation_sources.get("range_low") or {}
+            ).get("filled_entries", 0),
+            "simulation_closed_range_low": (
+                simulation_sources.get("range_low") or {}
+            ).get("closed_positions", 0),
+            "simulation_open_range_low": (
+                simulation_sources.get("range_low") or {}
+            ).get("open_positions", 0),
+            "simulation_net_return_range_low_pct": (
+                simulation_sources.get("range_low") or {}
+            ).get("net_return_on_placed_notional_pct"),
+            "simulation_filled_range_median": (
+                simulation_sources.get("range_median") or {}
+            ).get("filled_entries", 0),
+            "simulation_closed_range_median": (
+                simulation_sources.get("range_median") or {}
+            ).get("closed_positions", 0),
+            "simulation_open_range_median": (
+                simulation_sources.get("range_median") or {}
+            ).get("open_positions", 0),
+            "simulation_net_return_range_median_pct": (
+                simulation_sources.get("range_median") or {}
+            ).get("net_return_on_placed_notional_pct"),
+            "simulation_filled_range_high_band": (
+                simulation_sources.get("range_high_band") or {}
+            ).get("filled_entries", 0),
+            "simulation_closed_range_high_band": (
+                simulation_sources.get("range_high_band") or {}
+            ).get("closed_positions", 0),
+            "simulation_open_range_high_band": (
+                simulation_sources.get("range_high_band") or {}
+            ).get("open_positions", 0),
+            "simulation_net_return_range_high_band_pct": (
+                simulation_sources.get("range_high_band") or {}
+            ).get("net_return_on_placed_notional_pct"),
             "approved_sentiment_risk_samples": risk_summary.get(
                 "sentiment_risk_sample_count"
             ),
@@ -4087,6 +4197,7 @@ def practical_strategy_score(row):
         lifecycle_penalty = (
             ((row.get("simulation_unfilled_entries") or 0) * 0.1)
             + ((row.get("simulation_capital_or_inventory_blocked") or 0) * 0.1)
+            + ((row.get("simulation_bucket_inventory_blocked") or 0) * 0.1)
             + ((row.get("simulation_duplicate_active_level") or 0) * 0.02)
         )
 
@@ -4139,10 +4250,16 @@ def anchor_winner_rejection_reasons(row, anchor, criteria):
     reasons = []
     source_field = ANCHOR_WINNER_SOURCES[anchor]
     anchor_approved = row.get(source_field) or 0
-    avg_end_return = row.get("simulation_net_return_pct")
-    if avg_end_return is None:
+    has_simulation = "simulation_net_return_pct" in row
+    anchor_filled = row.get(ANCHOR_SIMULATION_FILLED_FIELDS[anchor]) or 0
+    avg_end_return = (
+        row.get(ANCHOR_SIMULATION_RETURN_FIELDS[anchor])
+        if has_simulation
+        else None
+    )
+    if avg_end_return is None and not has_simulation:
         avg_end_return = row.get("potential_avg_net_end_return_pct")
-    if avg_end_return is None:
+    if avg_end_return is None and not has_simulation:
         avg_end_return = row.get("potential_avg_end_return_pct")
     avg_drawdown = row.get("simulation_max_equity_drawdown_pct")
     if avg_drawdown is None:
@@ -4150,6 +4267,8 @@ def anchor_winner_rejection_reasons(row, anchor, criteria):
 
     if anchor_approved < criteria["min_anchor_approved"]:
         reasons.append("anchor_approved_below_min")
+    if has_simulation and anchor_filled < criteria["min_anchor_approved"]:
+        reasons.append("anchor_filled_below_min")
     if avg_end_return is None:
         reasons.append("missing_avg_end_return")
     elif avg_end_return < criteria["min_avg_end_return_pct"]:
@@ -4234,6 +4353,12 @@ def build_anchor_winners(
                 "source_strategy_file": source_strategy_file,
                 "practical_score": row.get("practical_score"),
                 "anchor_approved_candidates": row.get(source_field) or 0,
+                "anchor_filled_entries": row.get(
+                    ANCHOR_SIMULATION_FILLED_FIELDS[anchor]
+                ),
+                "anchor_simulated_net_return_pct": row.get(
+                    ANCHOR_SIMULATION_RETURN_FIELDS[anchor]
+                ),
                 "approved_candidates": row.get("approved_candidates") or 0,
                 "candidate_efficiency": row.get("candidate_efficiency"),
                 "potential_take_profit_reached_rate": row.get(
@@ -4370,7 +4495,20 @@ def write_strategy_comparison_csv(comparison, output_path):
         "simulation_max_equity_drawdown_pct",
         "simulation_duplicate_active_level",
         "simulation_capital_or_inventory_blocked",
+        "simulation_bucket_inventory_blocked",
         "simulation_by_source",
+        "simulation_filled_range_low",
+        "simulation_closed_range_low",
+        "simulation_open_range_low",
+        "simulation_net_return_range_low_pct",
+        "simulation_filled_range_median",
+        "simulation_closed_range_median",
+        "simulation_open_range_median",
+        "simulation_net_return_range_median_pct",
+        "simulation_filled_range_high_band",
+        "simulation_closed_range_high_band",
+        "simulation_open_range_high_band",
+        "simulation_net_return_range_high_band_pct",
         "approved_sentiment_risk_samples",
         "approved_sentiment_risk_postures",
         "approved_weather_leveling_states",
@@ -4480,7 +4618,20 @@ def write_ranked_strategy_csv(comparison, output_path):
         "simulation_max_equity_drawdown_pct",
         "simulation_duplicate_active_level",
         "simulation_capital_or_inventory_blocked",
+        "simulation_bucket_inventory_blocked",
         "simulation_by_source",
+        "simulation_filled_range_low",
+        "simulation_closed_range_low",
+        "simulation_open_range_low",
+        "simulation_net_return_range_low_pct",
+        "simulation_filled_range_median",
+        "simulation_closed_range_median",
+        "simulation_open_range_median",
+        "simulation_net_return_range_median_pct",
+        "simulation_filled_range_high_band",
+        "simulation_closed_range_high_band",
+        "simulation_open_range_high_band",
+        "simulation_net_return_range_high_band_pct",
         "approved_sentiment_risk_samples",
         "approved_sentiment_risk_postures",
         "approved_weather_leveling_states",
@@ -4951,6 +5102,7 @@ def build_candidates(snapshot, price):
     context = strategy_context(snapshot)
     state_info = state_summary(snapshot)
     action_recommendation = signal.get("action_recommendation") or "neutral"
+    action_policy = signal.get("action_policy")
     signal_status = signal.get("signal_status")
     source_status = signal.get("source_status", {})
     source_guard_allows_trading = signal.get("bot_action_allowed")
@@ -4978,7 +5130,7 @@ def build_candidates(snapshot, price):
     weather_report = weather_report_payload(risk_context)
     buy_permissions = sentiment_buy_permissions(
         action_recommendation,
-        signal.get("action_policy"),
+        action_policy,
         operating_mode=operating_mode,
         allow_range_buy_on_confidence_block=(
             allow_range_buy_on_confidence_block
@@ -5003,6 +5155,29 @@ def build_candidates(snapshot, price):
         safe_float(signal.get("price_regime", {}).get("range_position_24h")),
         config,
     )
+    source_by_mode = {
+        "low": "range_low",
+        "mean": "range_mean",
+        "median": "range_median",
+        "high": "range_high_band",
+    }
+    range_source_policy_decisions = {}
+    range_source_policy_bypass_available = False
+    for strategy_mode in strategy_modes:
+        buy_source = source_by_mode.get(strategy_mode)
+        if buy_source is None:
+            continue
+        decision = source_entry_policy_decision(
+            config,
+            buy_source,
+            action_recommendation=action_recommendation,
+            action_policy=action_policy,
+            risk_context=risk_context,
+            weather_report=weather_report,
+        )
+        range_source_policy_decisions[buy_source] = decision
+        if decision["allowed"] and decision["bypass_sentiment_gate"]:
+            range_source_policy_bypass_available = True
     range_modes_enabled = any(mode != "llm_target" for mode in strategy_modes)
     allow_range_fallback_without_sentiment = bool(
         config.get("allow_range_fallback_without_sentiment", True)
@@ -5021,6 +5196,10 @@ def build_candidates(snapshot, price):
     any_buys_allowed = (
         (llm_buys_allowed and llm_signal_gates_allow)
         or (range_buys_allowed and range_signal_gates_allow)
+        or (
+            range_source_policy_bypass_available
+            and range_signal_gates_allow
+        )
     )
     llm_target_proximity_pct = safe_float(config.get("llm_target_proximity_pct")) or safe_float(config.get("entry_step_pct")) or 0.0
     llm_target = find_llm_target(signal, price, llm_target_proximity_pct)
@@ -5029,11 +5208,26 @@ def build_candidates(snapshot, price):
     if mean_reversion_opportunity is None:
         mean_reversion_opportunity = 0.0
     base_entry_step_pct = safe_float(config.get("entry_step_pct")) or 0.0
+    realized_volatility_pct = safe_float(
+        signal.get("price_regime", {}).get("realized_volatility_24h_pct")
+    )
     effective_step_pct = effective_entry_step_pct(
         base_entry_step_pct,
-        safe_float(signal.get("price_regime", {}).get("realized_volatility_24h_pct")),
+        realized_volatility_pct,
         config,
     )
+
+    def effective_source_step(buy_source):
+        source_base_step = source_entry_step_pct(
+            config,
+            buy_source,
+            base_entry_step_pct,
+        )
+        return effective_entry_step_pct(
+            source_base_step,
+            realized_volatility_pct,
+            config,
+        )
     effective_max_inventory_usd = safe_float(config.get("max_inventory_usd")) or float("inf")
     deployed_inventory_usd = safe_float(state_info.get("deployed_inventory_usd")) or 0.0
     inventory_pressure = inventory_pressure_adjustment(
@@ -5056,6 +5250,10 @@ def build_candidates(snapshot, price):
         "range_buys_allowed": range_buys_allowed,
         "any_buys_allowed": any_buys_allowed,
         "range_fallback_active": range_fallback_active,
+        "range_source_policy_bypass_available": (
+            range_source_policy_bypass_available
+        ),
+        "range_source_policy_decisions": range_source_policy_decisions,
         "action_recommendation": action_recommendation,
         "strategy_modes": strategy_modes,
         "effective_entry_step_pct": effective_step_pct,
@@ -5102,7 +5300,10 @@ def build_candidates(snapshot, price):
         range_signal_gates_allow
         and strategy_modes
         and low and high
-        and base_any_buys_allowed
+        and (
+            base_any_buys_allowed
+            or range_source_policy_bypass_available
+        )
     ):
         result["hold_reason"] = (
             "buy_modes_disabled"
@@ -5150,30 +5351,34 @@ def build_candidates(snapshot, price):
     else:
         for strategy_mode in strategy_modes:
             if strategy_mode == "mean" and mean is not None:
-                grid = compute_grid(mean, effective_step_pct, max_grid_size)
-                sell_pct_override = None
                 buy_source = "range_mean"
-            elif strategy_mode == "median" and median is not None:
-                grid = compute_grid(median, effective_step_pct, max_grid_size)
+                candidate_step_pct = effective_source_step(buy_source)
+                grid = compute_grid(mean, candidate_step_pct, max_grid_size)
                 sell_pct_override = None
+            elif strategy_mode == "median" and median is not None:
                 buy_source = "range_median"
+                candidate_step_pct = effective_source_step(buy_source)
+                grid = compute_grid(median, candidate_step_pct, max_grid_size)
+                sell_pct_override = None
             elif strategy_mode == "high":
                 if not allow_high_anchor:
                     continue
+                buy_source = "range_high_band"
+                candidate_step_pct = effective_source_step(buy_source)
                 grid = compute_high_anchor_grid(
                     high,
                     price,
-                    effective_step_pct,
+                    candidate_step_pct,
                     safe_float(config.get("high_anchor_breakout_extension_pct"))
                     or 0.0,
                     weather_high_anchor_tailwind(weather_report),
                 )
                 sell_pct_override = safe_float(config.get("high_anchor_profit_target_pct"))
-                buy_source = "range_high_band"
             else:
-                grid = compute_grid(low, effective_step_pct, max_grid_size)
-                sell_pct_override = None
                 buy_source = "range_low"
+                candidate_step_pct = effective_source_step(buy_source)
+                grid = compute_grid(low, candidate_step_pct, max_grid_size)
+                sell_pct_override = None
 
             for level in grid:
                 candidate_levels.append({
@@ -5181,6 +5386,7 @@ def build_candidates(snapshot, price):
                     "sell_pct_override": sell_pct_override,
                     "buy_source": buy_source,
                     "strategy_mode": strategy_mode,
+                    "effective_entry_step_pct": candidate_step_pct,
                 })
 
     deduped_candidates = []
@@ -5251,6 +5457,15 @@ def evaluate_candidate(snapshot, candidate, price):
     open_buy_levels = {str(order.get("level")) for order in open_buy_orders if order.get("level") is not None}
     open_sell_levels = {str(order.get("level")) for order in open_sell_orders if order.get("level") is not None}
     buy_source = candidate["buy_source"]
+    source_policy = source_entry_policy_decision(
+        config,
+        buy_source,
+        action_recommendation=signal.get("action_recommendation") or "neutral",
+        action_policy=signal.get("action_policy"),
+        risk_context=risk_context,
+        weather_report=weather_report,
+    )
+    candidate["source_entry_policy"] = source_policy
     level = safe_float(candidate["level"]) or 0.0
     key = str(candidate["level"])
     stale_reanchor = {"allowed": False}
@@ -5331,6 +5546,8 @@ def evaluate_candidate(snapshot, candidate, price):
         **weather_report,
         "_risk_context": risk_context,
     }
+    if not source_policy["allowed"]:
+        return False, source_policy["reason"]
     weather_entry_guard = source_weather_entry_guard(
         config,
         buy_source,
@@ -5355,9 +5572,17 @@ def evaluate_candidate(snapshot, candidate, price):
         return False, freshness_block_reason or "source_guard_blocked"
     if buy_source == "llm_target" and not llm_buys_allowed:
         return False, "sentiment_action_not_bullish_allowed"
-    if buy_source == "range_high_band" and not range_high_buys_allowed:
+    if (
+        buy_source == "range_high_band"
+        and not range_high_buys_allowed
+        and not source_policy["bypass_sentiment_gate"]
+    ):
         return False, "sentiment_action_not_high_range_permitted"
-    if buy_source != "llm_target" and not range_core_buys_allowed:
+    if (
+        buy_source != "llm_target"
+        and not range_core_buys_allowed
+        and not source_policy["bypass_sentiment_gate"]
+    ):
         return False, "sentiment_action_not_range_permitted"
     if buy_source == "range_high_band":
         high_band_guard = risk_context_high_band_guard(
@@ -5549,6 +5774,13 @@ def replay_from_snapshots(snapshots):
                 )
             )
             approved, reason = evaluate_candidate(snapshot, candidate, price)
+            source_policy = candidate.get("source_entry_policy") or {}
+            source_policy_size_multiplier = safe_float(
+                source_policy.get("size_multiplier")
+            )
+            if source_policy_size_multiplier is None:
+                source_policy_size_multiplier = 1.0
+            effective_size_multiplier *= source_policy_size_multiplier
             cooldown = buy_cooldown_status(
                 strategy_payload(snapshot),
                 candidate["buy_source"],
@@ -5588,7 +5820,10 @@ def replay_from_snapshots(snapshots):
                     "captured_at": snapshot.get("captured_at"),
                     "price": price,
                     "active_strategy_modes": built.get("strategy_modes") or [],
-                    "effective_entry_step_pct": built.get("effective_entry_step_pct"),
+                    "effective_entry_step_pct": candidate.get(
+                        "effective_entry_step_pct",
+                        built.get("effective_entry_step_pct"),
+                    ),
                     "inventory_pressure_usage_ratio": built.get(
                         "inventory_pressure_usage_ratio"
                     ),
@@ -5605,6 +5840,18 @@ def replay_from_snapshots(snapshots):
                         leveling_size_multiplier
                     ),
                     "weather_leveling_bypass_blocked": leveling_bypass_blocked,
+                    "source_entry_policy_enabled": source_policy.get(
+                        "policy_enabled",
+                        False,
+                    ),
+                    "source_entry_authority": source_policy.get("authority"),
+                    "source_entry_policy_reason": source_policy.get("reason"),
+                    "source_entry_policy_setup_confirmed": source_policy.get(
+                        "setup_confirmed"
+                    ),
+                    "source_entry_policy_size_multiplier": (
+                        source_policy_size_multiplier
+                    ),
                     "buy_cooldown_remaining_minutes": round(
                         cooldown["remaining_minutes"],
                         2,
@@ -5667,7 +5914,10 @@ def replay_from_snapshots(snapshots):
                     "captured_at": snapshot.get("captured_at"),
                     "price": price,
                     "active_strategy_modes": built.get("strategy_modes") or [],
-                    "effective_entry_step_pct": built.get("effective_entry_step_pct"),
+                    "effective_entry_step_pct": candidate.get(
+                        "effective_entry_step_pct",
+                        built.get("effective_entry_step_pct"),
+                    ),
                     "inventory_pressure_usage_ratio": built.get(
                         "inventory_pressure_usage_ratio"
                     ),
@@ -5684,6 +5934,18 @@ def replay_from_snapshots(snapshots):
                         leveling_size_multiplier
                     ),
                     "weather_leveling_bypass_blocked": leveling_bypass_blocked,
+                    "source_entry_policy_enabled": source_policy.get(
+                        "policy_enabled",
+                        False,
+                    ),
+                    "source_entry_authority": source_policy.get("authority"),
+                    "source_entry_policy_reason": source_policy.get("reason"),
+                    "source_entry_policy_setup_confirmed": source_policy.get(
+                        "setup_confirmed"
+                    ),
+                    "source_entry_policy_size_multiplier": (
+                        source_policy_size_multiplier
+                    ),
                     "buy_cooldown_remaining_minutes": round(
                         cooldown["remaining_minutes"],
                         2,

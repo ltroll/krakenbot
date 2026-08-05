@@ -42,6 +42,10 @@ from range_grid_order_safety import (
     order_execution,
     order_limit_price,
 )
+from range_grid_source_policy import (
+    source_entry_policy_decision,
+    source_entry_step_pct,
+)
 from signal_normalizer import normalize_signal_payload
 
 load_dotenv()
@@ -1362,9 +1366,25 @@ def anchor_strategy_route_for_source(buy_source):
     }
 
 
-def routed_effective_entry_step_pct(route_config, volatility_pct):
+def routed_effective_entry_step_pct(
+    route_config,
+    volatility_pct,
+    buy_source=None,
+):
+    base_step_pct = strategy_float(
+        route_config,
+        "entry_step_pct",
+        entry_step_pct,
+    )
+    if buy_source:
+        base_step_pct = source_entry_step_pct(
+            route_config,
+            buy_source,
+            base_step_pct,
+            strategy_config,
+        )
     return effective_entry_step_pct(
-        strategy_float(route_config, "entry_step_pct", entry_step_pct),
+        base_step_pct,
         volatility_pct,
         route_config,
     )
@@ -6561,6 +6581,38 @@ def main():
             ]
             range_buys_allowed = buy_permissions["range_buys_allowed"]
             base_any_buys_allowed = buy_permissions["any_buys_allowed"]
+            source_by_mode = {
+                "low": "range_low",
+                "mean": "range_mean",
+                "median": "range_median",
+                "high": "range_high_band",
+            }
+            range_source_policy_bypass_available = False
+            for active_mode in active_strategy_modes:
+                policy_source = source_by_mode.get(active_mode)
+                if policy_source is None:
+                    continue
+                route_context = anchor_strategy_route_for_source(policy_source)
+                route = route_context["route"]
+                route_config = (
+                    route.get("strategy_config")
+                    if route else strategy_config
+                )
+                source_policy_gate = source_entry_policy_decision(
+                    route_config,
+                    policy_source,
+                    action_recommendation=action_recommendation,
+                    action_policy=action_policy,
+                    risk_context=risk_context,
+                    weather_report=weather_report,
+                    fallback_config=strategy_config,
+                )
+                if (
+                    source_policy_gate["allowed"]
+                    and source_policy_gate["bypass_sentiment_gate"]
+                ):
+                    range_source_policy_bypass_available = True
+                    break
             range_modes_enabled = any(
                 mode != "llm_target" for mode in active_strategy_modes
             )
@@ -6626,12 +6678,17 @@ def main():
             any_buys_allowed = (
                 (llm_buys_allowed and llm_signal_gates_allow)
                 or (range_buys_allowed and range_signal_gates_allow)
+                or (
+                    range_source_policy_bypass_available
+                    and range_signal_gates_allow
+                )
             )
             if runtime_block_reason:
                 llm_buys_allowed = False
                 range_buys_allowed = False
                 base_any_buys_allowed = False
                 any_buys_allowed = False
+                range_source_policy_bypass_available = False
             external_block_reason = sentiment_payload.get("action_reason")
             price_regime_volatility_pct = numeric_or_default(
                 price_regime.get("realized_volatility_24h_pct"),
@@ -6733,6 +6790,9 @@ def main():
                 llm_buys_allowed=llm_buys_allowed,
                 range_buys_allowed=range_buys_allowed,
                 range_fallback_active=range_fallback_active,
+                range_source_policy_bypass_available=(
+                    range_source_policy_bypass_available
+                ),
                 source_guard_allows_trading=source_guard_allows_trading,
                 freshness_allows_trading=freshness_allows_trading,
                 freshness_block_reason=freshness_block_reason,
@@ -8044,7 +8104,10 @@ def main():
                 and effective_position_size_pct > 0
                 and active_strategy_modes
                 and low and high
-                and base_any_buys_allowed
+                and (
+                    base_any_buys_allowed
+                    or range_source_policy_bypass_available
+                )
             ):
                 candidate_levels = []
                 if llm_buy_allowed:
@@ -8072,6 +8135,7 @@ def main():
                             route_entry_step_pct = routed_effective_entry_step_pct(
                                 route_config,
                                 price_regime_volatility_pct,
+                                buy_source,
                             )
                             grid = compute_grid(
                                 mean,
@@ -8096,6 +8160,7 @@ def main():
                             route_entry_step_pct = routed_effective_entry_step_pct(
                                 route_config,
                                 price_regime_volatility_pct,
+                                buy_source,
                             )
                             grid = compute_grid(
                                 median,
@@ -8122,6 +8187,7 @@ def main():
                             route_entry_step_pct = routed_effective_entry_step_pct(
                                 route_config,
                                 price_regime_volatility_pct,
+                                buy_source,
                             )
                             grid = compute_high_anchor_grid(
                                 high,
@@ -8156,6 +8222,7 @@ def main():
                             route_entry_step_pct = routed_effective_entry_step_pct(
                                 route_config,
                                 price_regime_volatility_pct,
+                                buy_source,
                             )
                             grid = compute_grid(
                                 low,
@@ -8376,6 +8443,40 @@ def main():
                     weather_report_for_bypass["_risk_context"] = (
                         sentiment_payload.get("risk_context") or {}
                     )
+                    source_policy = source_entry_policy_decision(
+                        route_config,
+                        buy_source,
+                        action_recommendation=action_recommendation,
+                        action_policy=action_policy,
+                        risk_context=sentiment_payload.get("risk_context"),
+                        weather_report=weather_report,
+                        fallback_config=strategy_config,
+                    )
+                    source_policy_size_multiplier = optional_float(
+                        source_policy.get("size_multiplier")
+                    )
+                    if source_policy_size_multiplier is None:
+                        source_policy_size_multiplier = 1.0
+                    candidate_effective_position_size_pct *= (
+                        source_policy_size_multiplier
+                    )
+                    source_policy_log_fields = {
+                        "source_entry_policy_enabled": source_policy.get(
+                            "policy_enabled",
+                            False,
+                        ),
+                        "source_entry_authority": source_policy.get("authority"),
+                        "source_entry_policy_reason": source_policy.get("reason"),
+                        "source_entry_policy_setup_confirmed": source_policy.get(
+                            "setup_confirmed"
+                        ),
+                        "source_entry_policy_weather_available": source_policy.get(
+                            "weather_available"
+                        ),
+                        "source_entry_policy_size_multiplier": (
+                            source_policy_size_multiplier
+                        ),
+                    }
                     above_last_sell_breakout_bypass = (
                         allow_above_last_sell_for_candidate(
                             route_config,
@@ -8475,6 +8576,8 @@ def main():
                                 )
                                 else "price_above_level"
                             )
+                    elif not source_policy["allowed"]:
+                        skip_reason = source_policy["reason"]
                     elif not weather_entry_guard["allowed"]:
                         skip_reason = weather_entry_guard["reason"]
                     elif buy_cooldown["remaining_minutes"] > 0:
@@ -8515,6 +8618,7 @@ def main():
                     elif (
                         buy_source == "range_high_band"
                         and not range_high_buys_allowed
+                        and not source_policy["bypass_sentiment_gate"]
                     ):
                         skip_reason = (
                             "sentiment_action_not_high_range_permitted"
@@ -8522,6 +8626,7 @@ def main():
                     elif (
                         buy_source != "llm_target"
                         and not range_core_buys_allowed
+                        and not source_policy["bypass_sentiment_gate"]
                     ):
                         skip_reason = (
                             "sentiment_action_not_range_permitted"
@@ -8669,6 +8774,7 @@ def main():
                             action_recommendation=action_recommendation,
                             action_policy_reason=action_policy.get("reason"),
                             **sentiment_risk_fields,
+                            **source_policy_log_fields,
                             signal_status=signal_status,
                             freshness_allows_trading=freshness_allows_trading,
                             freshness_block_reason=freshness_block_reason,
@@ -9316,6 +9422,7 @@ def main():
                             "shadow_reason": "approved_risk_scored_candidate",
                         }
                         shadow_payload.update(sentiment_risk_fields)
+                        shadow_payload.update(source_policy_log_fields)
                         log_event(
                             "RISK_CONTEXT_PAPER_BUY_PLANNED",
                             **shadow_payload,
@@ -9366,6 +9473,7 @@ def main():
                             market_price=price,
                             execution_signal=execution_signal,
                             buy_source=buy_source,
+                            **source_policy_log_fields,
                             sell_pct_override=active_sell_pct_override,
                             above_last_sell_breakout_bypass=(
                                 above_last_sell_breakout_bypass
@@ -9433,6 +9541,7 @@ def main():
                             market_price=price,
                             execution_signal=execution_signal,
                             buy_source=buy_source,
+                            **source_policy_log_fields,
                             sell_pct_override=active_sell_pct_override,
                             above_last_sell_breakout_bypass=(
                                 above_last_sell_breakout_bypass
@@ -9486,6 +9595,11 @@ def main():
                         "placed_at": cycle_id,
                         "sell_pct_override": active_sell_pct_override,
                         "buy_source": buy_source,
+                        "source_entry_authority": source_policy.get("authority"),
+                        "source_entry_policy_reason": source_policy.get("reason"),
+                        "source_entry_policy_size_multiplier": (
+                            source_policy_size_multiplier
+                        ),
                         "anchor_strategy_router_anchor": route_anchor,
                         "anchor_strategy_router_strategy_label": (
                             route.get("strategy_label") if route else None
@@ -9656,6 +9770,7 @@ def main():
                         ),
                         **stale_reanchor_profit_guard_log_fields(stale_reanchor),
                         buy_source=buy_source,
+                        **source_policy_log_fields,
                         sell_pct_override=active_sell_pct_override,
                         buy_cooldown_minutes=(
                             buy_cooldown["global_cooldown_minutes"]
@@ -9730,6 +9845,7 @@ def main():
                         **stale_reanchor_profit_guard_log_fields(stale_reanchor),
                         trade_notional_usd=round(level * volume, 8),
                         buy_source=buy_source,
+                        **source_policy_log_fields,
                         sell_pct_override=active_sell_pct_override,
                         buy_cooldown_minutes=(
                             buy_cooldown["global_cooldown_minutes"]
