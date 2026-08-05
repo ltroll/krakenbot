@@ -494,6 +494,11 @@ The asset-specific env files set:
 - `RANGE_GRID_ASSET_BALANCE_KEYS`
 - asset-scoped snapshot, output, ranked CSV, and anchor-winner files
 
+By default, web-facing backtest artifacts are grouped under:
+
+- `/var/www/html/bot/eth/`
+- `/var/www/html/bot/sol/`
+
 The collector now emits asset-neutral private fields:
 
 - `private_balance.asset_balance`
@@ -570,6 +575,15 @@ LLM_TARGET_BACKTEST_STRATEGY_SET_FILE=llm_target_strategy_test_set.txt ./venv/bi
 
 The report includes `strategy_comparison`; ranked CSV output defaults to
 `llm_target_strategy_ranked.csv`.
+
+Range-grid strategy rankings use a stateful order-lifecycle simulation. An
+approved candidate becomes a cash-reserving GTC limit buy, fills only when a
+captured price touches the limit, and closes only when price reaches the
+configured profit margin plus `round_trip_fee_pct`. Open inventory is marked
+to market, including the estimated round-trip fee, and rankings use simulated
+net return and equity drawdown instead of gross gate-level opportunity return.
+The simulator defaults starting cash to `max_inventory_usd`; profiles can set
+`backtest_starting_cash_usd` to model a different cash balance.
 
 ## Backtest Results Viewer
 

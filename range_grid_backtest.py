@@ -2703,7 +2703,12 @@ def simulate_missed_opportunity(snapshot, event, snapshots, snapshot_price_index
 
     hold_end = entry_time + timedelta(hours=BACKTEST_POTENTIAL_MAX_HOLD_HOURS)
     target_profit_pct = approved_event_profit_target_pct(snapshot, event)
-    target_return_pct = target_profit_pct * 100.0
+    round_trip_fee_pct = max(
+        0.0,
+        safe_float(strategy_payload(snapshot).get("round_trip_fee_pct")) or 0.0,
+    )
+    target_price_move_pct = target_profit_pct + round_trip_fee_pct
+    target_return_pct = target_price_move_pct * 100.0
     max_runup_pct = 0.0
     max_drawdown_pct = 0.0
     end_return_pct = None
@@ -2728,12 +2733,299 @@ def simulate_missed_opportunity(snapshot, event, snapshots, snapshot_price_index
 
     return {
         "target_profit_pct": round(target_profit_pct * 100.0, 4),
+        "round_trip_fee_pct": round(round_trip_fee_pct * 100.0, 4),
+        "target_price_move_pct": round(target_price_move_pct * 100.0, 4),
         "take_profit_reached": take_profit_reached_at is not None,
         "take_profit_reached_at": take_profit_reached_at,
         "max_runup_pct": round(max_runup_pct, 6),
         "max_drawdown_pct": round(max_drawdown_pct, 6),
         "end_return_pct": round(end_return_pct, 6) if end_return_pct is not None else None,
+        "net_max_runup_pct": round(
+            max_runup_pct - (round_trip_fee_pct * 100.0),
+            6,
+        ),
+        "net_max_drawdown_pct": round(
+            max_drawdown_pct - (round_trip_fee_pct * 100.0),
+            6,
+        ),
+        "net_end_return_pct": (
+            round(end_return_pct - (round_trip_fee_pct * 100.0), 6)
+            if end_return_pct is not None
+            else None
+        ),
         "hold_window_hours": BACKTEST_POTENTIAL_MAX_HOLD_HOURS,
+    }
+
+
+def simulate_approved_order_lifecycle(replay, snapshots):
+    """Model approved grid entries as capital-constrained limit orders.
+
+    The live bot submits GTC limit buys, then lists a sell at the configured
+    profit margin plus the estimated round-trip fee. Snapshot data cannot
+    reconstruct intrabar order-book activity, so a buy fills only after an
+    observed price is at or below its limit and a sell fills only after an
+    observed price is at or above its target.
+    """
+    ordered_snapshots = sorted(
+        (
+            (snapshot_timestamp(snapshot), snapshot)
+            for snapshot in snapshots or []
+            if snapshot_timestamp(snapshot) is not None
+            and snapshot_price(snapshot) is not None
+        ),
+        key=lambda item: item[0],
+    )
+    approved_by_time = defaultdict(list)
+    for event in replay.get("approved_events") or []:
+        event_time = parse_iso8601(event.get("captured_at"))
+        if event_time is not None:
+            approved_by_time[event_time].append(event)
+
+    first_snapshot = ordered_snapshots[0][1] if ordered_snapshots else {}
+    first_config = strategy_payload(first_snapshot)
+    max_inventory_usd = safe_float(first_config.get("max_inventory_usd"))
+    if max_inventory_usd is None or max_inventory_usd <= 0:
+        max_inventory_usd = float("inf")
+    starting_cash_usd = safe_float(
+        first_config.get("backtest_starting_cash_usd")
+    )
+    if starting_cash_usd is None or starting_cash_usd <= 0:
+        starting_cash_usd = (
+            max_inventory_usd
+            if max_inventory_usd != float("inf")
+            else 1000.0
+        )
+
+    available_cash_usd = starting_cash_usd
+    pending_orders = []
+    open_positions = []
+    closed_positions = []
+    last_price = None
+    peak_equity = starting_cash_usd
+    max_drawdown_pct = 0.0
+    counts = Counter()
+    source_stats = defaultdict(Counter)
+
+    def committed_inventory_usd():
+        return sum(order["entry_notional_usd"] for order in pending_orders) + sum(
+            position["entry_notional_usd"] for position in open_positions
+        )
+
+    def active_level_keys():
+        return {
+            (order["buy_source"], round(order["entry_price"], 8))
+            for order in pending_orders
+        } | {
+            (position["buy_source"], round(position["entry_price"], 8))
+            for position in open_positions
+        }
+
+    def mark_to_market_equity(price):
+        pending_value = sum(
+            order["entry_notional_usd"] for order in pending_orders
+        )
+        position_value = 0.0
+        for position in open_positions:
+            gross_return = (price / position["entry_price"]) - 1.0
+            net_return = gross_return - position["round_trip_fee_pct"]
+            position_value += position["entry_notional_usd"] * (1.0 + net_return)
+        return available_cash_usd + pending_value + position_value
+
+    for captured_at, snapshot in ordered_snapshots:
+        price = snapshot_price(snapshot)
+        if price is None or price <= 0:
+            continue
+        last_price = price
+
+        newly_filled = []
+        still_pending = []
+        for order in pending_orders:
+            if price <= order["entry_price"]:
+                position = dict(order)
+                position["filled_at"] = captured_at.isoformat()
+                newly_filled.append(position)
+                counts["filled_entries"] += 1
+                source_stats[order["buy_source"]]["filled_entries"] += 1
+            else:
+                still_pending.append(order)
+        pending_orders = still_pending
+        open_positions.extend(newly_filled)
+
+        still_open = []
+        for position in open_positions:
+            if price >= position["sell_target_price"]:
+                net_pnl_usd = (
+                    position["entry_notional_usd"]
+                    * position["profit_target_pct"]
+                )
+                available_cash_usd += (
+                    position["entry_notional_usd"] + net_pnl_usd
+                )
+                closed = dict(position)
+                closed.update({
+                    "sold_at": captured_at.isoformat(),
+                    "sell_price": position["sell_target_price"],
+                    "net_pnl_usd": net_pnl_usd,
+                    "net_return_pct": position["profit_target_pct"] * 100.0,
+                })
+                closed_positions.append(closed)
+                counts["closed_positions"] += 1
+                source_stats[position["buy_source"]]["closed_positions"] += 1
+                source_stats[position["buy_source"]]["realized_net_pnl_usd"] += (
+                    net_pnl_usd
+                )
+            else:
+                still_open.append(position)
+        open_positions = still_open
+
+        for event in approved_by_time.get(captured_at, []):
+            counts["approved_candidates"] += 1
+            buy_source = str(event.get("buy_source") or "unknown")
+            source_stats[buy_source]["approved_candidates"] += 1
+            entry_price = safe_float(event.get("level"))
+            if entry_price is None or entry_price <= 0:
+                counts["invalid_entry"] += 1
+                source_stats[buy_source]["invalid_entry"] += 1
+                continue
+            level_key = (buy_source, round(entry_price, 8))
+            if level_key in active_level_keys():
+                counts["duplicate_active_level"] += 1
+                source_stats[buy_source]["duplicate_active_level"] += 1
+                continue
+
+            config = strategy_payload(snapshot)
+            size_multiplier = safe_float(
+                event.get("risk_context_position_size_effective_multiplier")
+            )
+            if size_multiplier is None:
+                size_multiplier = 1.0
+            position_size_pct = safe_float(config.get("position_size_pct"))
+            if position_size_pct is None:
+                position_size_pct = 0.10
+            position_size_pct = max(0.0, position_size_pct)
+            requested_notional = (
+                available_cash_usd * position_size_pct * max(0.0, size_multiplier)
+            )
+            remaining_inventory_capacity = max_inventory_usd - committed_inventory_usd()
+            entry_notional = min(
+                requested_notional,
+                available_cash_usd,
+                remaining_inventory_capacity,
+            )
+            min_notional = max(
+                0.0,
+                safe_float(config.get("min_buy_notional_usd")) or 0.0,
+            )
+            if entry_notional <= 0:
+                counts["capital_or_inventory_blocked"] += 1
+                source_stats[buy_source]["capital_or_inventory_blocked"] += 1
+                continue
+            if entry_notional < min_notional:
+                counts["below_min_notional"] += 1
+                source_stats[buy_source]["below_min_notional"] += 1
+                continue
+
+            profit_target_pct = approved_event_profit_target_pct(snapshot, event)
+            round_trip_fee_pct = max(
+                0.0,
+                safe_float(config.get("round_trip_fee_pct")) or 0.0,
+            )
+            order = {
+                "approved_at": captured_at.isoformat(),
+                "buy_source": buy_source,
+                "strategy_mode": event.get("strategy_mode"),
+                "entry_price": entry_price,
+                "entry_notional_usd": entry_notional,
+                "volume": entry_notional / entry_price,
+                "profit_target_pct": profit_target_pct,
+                "round_trip_fee_pct": round_trip_fee_pct,
+                "sell_target_price": entry_price * (
+                    1.0 + profit_target_pct + round_trip_fee_pct
+                ),
+            }
+            available_cash_usd -= entry_notional
+            counts["orders_placed"] += 1
+            source_stats[buy_source]["orders_placed"] += 1
+            if price <= entry_price:
+                order["filled_at"] = captured_at.isoformat()
+                open_positions.append(order)
+                counts["filled_entries"] += 1
+                source_stats[buy_source]["filled_entries"] += 1
+            else:
+                pending_orders.append(order)
+
+        equity = mark_to_market_equity(price)
+        peak_equity = max(peak_equity, equity)
+        if peak_equity > 0:
+            drawdown_pct = ((equity - peak_equity) / peak_equity) * 100.0
+            max_drawdown_pct = min(max_drawdown_pct, drawdown_pct)
+
+    realized_net_pnl_usd = sum(
+        position["net_pnl_usd"] for position in closed_positions
+    )
+    unrealized_net_pnl_usd = 0.0
+    if last_price is not None:
+        for position in open_positions:
+            unrealized_net_pnl_usd += position["entry_notional_usd"] * (
+                (last_price / position["entry_price"])
+                - 1.0
+                - position["round_trip_fee_pct"]
+            )
+    total_net_pnl_usd = realized_net_pnl_usd + unrealized_net_pnl_usd
+    ending_equity_usd = starting_cash_usd + total_net_pnl_usd
+    fill_rate = (
+        counts["filled_entries"] / counts["orders_placed"]
+        if counts["orders_placed"]
+        else None
+    )
+    close_rate = (
+        counts["closed_positions"] / counts["filled_entries"]
+        if counts["filled_entries"]
+        else None
+    )
+
+    by_source = {}
+    for source, stats in sorted(source_stats.items()):
+        by_source[source] = {
+            key: (round(value, 8) if isinstance(value, float) else value)
+            for key, value in stats.items()
+        }
+
+    return {
+        "starting_cash_usd": round(starting_cash_usd, 8),
+        "ending_equity_usd": round(ending_equity_usd, 8),
+        "approved_candidates": counts["approved_candidates"],
+        "orders_placed": counts["orders_placed"],
+        "filled_entries": counts["filled_entries"],
+        "unfilled_entries": len(pending_orders),
+        "closed_positions": counts["closed_positions"],
+        "open_positions": len(open_positions),
+        "duplicate_active_level": counts["duplicate_active_level"],
+        "capital_or_inventory_blocked": counts["capital_or_inventory_blocked"],
+        "below_min_notional": counts["below_min_notional"],
+        "fill_rate_after_placement": (
+            round(fill_rate, 6) if fill_rate is not None else None
+        ),
+        "close_rate_after_fill": (
+            round(close_rate, 6) if close_rate is not None else None
+        ),
+        "realized_net_pnl_usd": round(realized_net_pnl_usd, 8),
+        "unrealized_net_pnl_usd": round(unrealized_net_pnl_usd, 8),
+        "total_net_pnl_usd": round(total_net_pnl_usd, 8),
+        "net_return_on_starting_capital_pct": round(
+            (total_net_pnl_usd / starting_cash_usd) * 100.0,
+            6,
+        ),
+        "max_equity_drawdown_pct": round(max_drawdown_pct, 6),
+        "ending_available_cash_usd": round(available_cash_usd, 8),
+        "ending_committed_inventory_usd": round(committed_inventory_usd(), 8),
+        "by_source": by_source,
+        "assumptions": [
+            "Approved candidates become GTC limit buys; no fill is assumed until a captured price touches the limit.",
+            "Sell targets include the configured profit margin plus round_trip_fee_pct, matching live target construction.",
+            "Position sizing consumes simulated available cash and respects max_inventory_usd and min_buy_notional_usd.",
+            "Fills occur at the configured limit or target price without favorable price improvement or slippage.",
+        ],
     }
 
 
@@ -2931,6 +3223,11 @@ def summarize_potential_from_approved_events(replay, snapshots):
         for result in potential_results
         if result.get("end_return_pct") is not None
     ]
+    net_end_returns = [
+        result["net_end_return_pct"]
+        for result in potential_results
+        if result.get("net_end_return_pct") is not None
+    ]
     max_runups = [
         result["max_runup_pct"]
         for result in potential_results
@@ -2949,6 +3246,12 @@ def summarize_potential_from_approved_events(replay, snapshots):
         * result.get("risk_context_position_size_effective_multiplier", 1.0)
         for result in potential_results
         if result.get("end_return_pct") is not None
+    ]
+    risk_sized_net_end_returns = [
+        result["net_end_return_pct"]
+        * result.get("risk_context_position_size_effective_multiplier", 1.0)
+        for result in potential_results
+        if result.get("net_end_return_pct") is not None
     ]
     risk_sized_max_runups = [
         result["max_runup_pct"]
@@ -2973,6 +3276,11 @@ def summarize_potential_from_approved_events(replay, snapshots):
             result["end_return_pct"]
             for result in results
             if result.get("end_return_pct") is not None
+        ]
+        phase_net_end_returns = [
+            result["net_end_return_pct"]
+            for result in results
+            if result.get("net_end_return_pct") is not None
         ]
         phase_max_runups = [
             result["max_runup_pct"]
@@ -3000,6 +3308,11 @@ def summarize_potential_from_approved_events(replay, snapshots):
                 if phase_end_returns
                 else None
             ),
+            "avg_net_end_return_pct": (
+                round(statistics.mean(phase_net_end_returns), 6)
+                if phase_net_end_returns
+                else None
+            ),
             "avg_max_runup_pct": (
                 round(statistics.mean(phase_max_runups), 6)
                 if phase_max_runups
@@ -3023,6 +3336,11 @@ def summarize_potential_from_approved_events(replay, snapshots):
         "avg_end_return_pct": (
             round(statistics.mean(end_returns), 6)
             if end_returns
+            else None
+        ),
+        "avg_net_end_return_pct": (
+            round(statistics.mean(net_end_returns), 6)
+            if net_end_returns
             else None
         ),
         "median_end_return_pct": (
@@ -3050,6 +3368,11 @@ def summarize_potential_from_approved_events(replay, snapshots):
         "risk_sized_avg_end_return_pct": (
             round(statistics.mean(risk_sized_end_returns), 6)
             if risk_sized_end_returns
+            else None
+        ),
+        "risk_sized_avg_net_end_return_pct": (
+            round(statistics.mean(risk_sized_net_end_returns), 6)
+            if risk_sized_net_end_returns
             else None
         ),
         "risk_sized_avg_max_runup_pct": (
@@ -3340,6 +3663,7 @@ def build_strategy_comparison_rows(
         ]
         replay = replay_from_snapshots(variant_snapshots)
         potential = summarize_potential_from_approved_events(replay, variant_snapshots)
+        simulation = simulate_approved_order_lifecycle(replay, variant_snapshots)
         summary = replay["summary"]
         risk_summary = summary.get("approved_sentiment_risk") or {}
         missed_price_above = summary.get("missed_price_above_opportunities") or {}
@@ -3402,6 +3726,9 @@ def build_strategy_comparison_rows(
             "potential_evaluated_count": potential.get("evaluated_count"),
             "potential_take_profit_reached_rate": potential.get("take_profit_reached_rate"),
             "potential_avg_end_return_pct": potential.get("avg_end_return_pct"),
+            "potential_avg_net_end_return_pct": potential.get(
+                "avg_net_end_return_pct"
+            ),
             "potential_avg_max_runup_pct": potential.get("avg_max_runup_pct"),
             "potential_avg_max_drawdown_pct": potential.get("avg_max_drawdown_pct"),
             "potential_avg_risk_size_multiplier": potential.get(
@@ -3410,11 +3737,49 @@ def build_strategy_comparison_rows(
             "potential_risk_sized_avg_end_return_pct": potential.get(
                 "risk_sized_avg_end_return_pct"
             ),
+            "potential_risk_sized_avg_net_end_return_pct": potential.get(
+                "risk_sized_avg_net_end_return_pct"
+            ),
             "potential_risk_sized_avg_max_runup_pct": potential.get(
                 "risk_sized_avg_max_runup_pct"
             ),
             "potential_risk_sized_avg_max_drawdown_pct": potential.get(
                 "risk_sized_avg_max_drawdown_pct"
+            ),
+            "simulation_starting_cash_usd": simulation.get("starting_cash_usd"),
+            "simulation_orders_placed": simulation.get("orders_placed"),
+            "simulation_filled_entries": simulation.get("filled_entries"),
+            "simulation_unfilled_entries": simulation.get("unfilled_entries"),
+            "simulation_closed_positions": simulation.get("closed_positions"),
+            "simulation_open_positions": simulation.get("open_positions"),
+            "simulation_fill_rate_after_placement": simulation.get(
+                "fill_rate_after_placement"
+            ),
+            "simulation_close_rate_after_fill": simulation.get(
+                "close_rate_after_fill"
+            ),
+            "simulation_realized_net_pnl_usd": simulation.get(
+                "realized_net_pnl_usd"
+            ),
+            "simulation_unrealized_net_pnl_usd": simulation.get(
+                "unrealized_net_pnl_usd"
+            ),
+            "simulation_total_net_pnl_usd": simulation.get("total_net_pnl_usd"),
+            "simulation_net_return_pct": simulation.get(
+                "net_return_on_starting_capital_pct"
+            ),
+            "simulation_max_equity_drawdown_pct": simulation.get(
+                "max_equity_drawdown_pct"
+            ),
+            "simulation_duplicate_active_level": simulation.get(
+                "duplicate_active_level"
+            ),
+            "simulation_capital_or_inventory_blocked": simulation.get(
+                "capital_or_inventory_blocked"
+            ),
+            "simulation_by_source": json.dumps(
+                simulation.get("by_source") or {},
+                sort_keys=True,
             ),
             "approved_sentiment_risk_samples": risk_summary.get(
                 "sentiment_risk_sample_count"
@@ -3638,6 +4003,7 @@ def build_strategy_comparison_rows(
                 "strategy_payload": strategy_payload,
                 "replay_summary": summary,
                 "potential_summary": potential,
+                "simulation_summary": simulation,
                 "recent_replay_events": replay.get("recent_replay_events", []),
                 "recent_approved_events": replay.get(
                     "recent_approved_events",
@@ -3664,12 +4030,33 @@ def build_strategy_comparison_rows(
 
 def practical_strategy_score(row):
     approved = row.get("approved_candidates") or 0
-    take_profit_rate = row.get("potential_take_profit_reached_rate") or 0.0
-    avg_end_return = row.get("potential_avg_end_return_pct")
-    avg_drawdown = row.get("potential_avg_max_drawdown_pct")
+    has_simulation = row.get("simulation_net_return_pct") is not None
+    take_profit_rate = (
+        row.get("simulation_close_rate_after_fill")
+        if has_simulation
+        else row.get("potential_take_profit_reached_rate")
+    ) or 0.0
+    avg_end_return = (
+        row.get("simulation_net_return_pct")
+        if has_simulation
+        else row.get("potential_avg_net_end_return_pct")
+    )
+    if avg_end_return is None:
+        avg_end_return = row.get("potential_avg_end_return_pct")
+    avg_drawdown = (
+        row.get("simulation_max_equity_drawdown_pct")
+        if has_simulation
+        else row.get("potential_avg_max_drawdown_pct")
+    )
     hold_snapshots = row.get("hold_snapshots") or 0
     raw_candidates = row.get("raw_candidates") or 0
-    candidate_efficiency = (approved / raw_candidates) if raw_candidates > 0 else 0.0
+    if has_simulation:
+        effective_candidates = row.get("simulation_filled_entries") or 0
+    else:
+        effective_candidates = approved
+    candidate_efficiency = (
+        effective_candidates / raw_candidates if raw_candidates > 0 else 0.0
+    )
     blocked_high = row.get("blocked_sentiment_high") or 0
 
     if approved <= 0:
@@ -3685,12 +4072,23 @@ def practical_strategy_score(row):
     avg_end_return = avg_end_return if avg_end_return is not None else -2.0
     avg_drawdown = avg_drawdown if avg_drawdown is not None else min(avg_end_return, 0.0)
     positive_expectancy = avg_end_return > 0
+    if has_simulation:
+        activity_count = row.get("simulation_closed_positions") or 0
+    else:
+        activity_count = approved
     activity_reward = (
-        min(approved, 50) * 0.25
+        min(activity_count, 50) * 0.25
         if positive_expectancy else
-        -min(approved, 50) * 0.1
+        -min(max(activity_count, approved), 50) * 0.1
     )
     efficiency_reward = candidate_efficiency * (20.0 if positive_expectancy else 5.0)
+    lifecycle_penalty = 0.0
+    if has_simulation:
+        lifecycle_penalty = (
+            ((row.get("simulation_unfilled_entries") or 0) * 0.1)
+            + ((row.get("simulation_capital_or_inventory_blocked") or 0) * 0.1)
+            + ((row.get("simulation_duplicate_active_level") or 0) * 0.02)
+        )
 
     score = (
         (avg_end_return * 120.0)
@@ -3700,6 +4098,7 @@ def practical_strategy_score(row):
         + efficiency_reward
         - (hold_snapshots * 0.002)
         - (blocked_high * 0.005)
+        - lifecycle_penalty
     )
     return round(score, 6)
 
@@ -3708,8 +4107,13 @@ def build_ranked_strategy_rows(comparison):
     ranked_rows = []
     for row in comparison.get("rows") or []:
         ranked = dict(row)
+        ranked_candidate_count = (
+            row.get("simulation_filled_entries")
+            if row.get("simulation_net_return_pct") is not None
+            else row.get("approved_candidates")
+        ) or 0
         ranked["candidate_efficiency"] = round(
-            ((row.get("approved_candidates") or 0) / (row.get("raw_candidates") or 1)),
+            (ranked_candidate_count / (row.get("raw_candidates") or 1)),
             6,
         ) if (row.get("raw_candidates") or 0) > 0 else 0.0
         ranked["practical_score"] = practical_strategy_score(row)
@@ -3717,7 +4121,11 @@ def build_ranked_strategy_rows(comparison):
 
     ranked_rows.sort(
         key=lambda row: (
-            -(row.get("practical_score") or -999999),
+            -(
+                row.get("practical_score")
+                if row.get("practical_score") is not None
+                else -999999
+            ),
             -(row.get("approved_candidates") or 0),
             -((row.get("potential_take_profit_reached_rate") or 0)),
             -((row.get("potential_avg_end_return_pct") or -999999)),
@@ -3731,8 +4139,14 @@ def anchor_winner_rejection_reasons(row, anchor, criteria):
     reasons = []
     source_field = ANCHOR_WINNER_SOURCES[anchor]
     anchor_approved = row.get(source_field) or 0
-    avg_end_return = row.get("potential_avg_end_return_pct")
-    avg_drawdown = row.get("potential_avg_max_drawdown_pct")
+    avg_end_return = row.get("simulation_net_return_pct")
+    if avg_end_return is None:
+        avg_end_return = row.get("potential_avg_net_end_return_pct")
+    if avg_end_return is None:
+        avg_end_return = row.get("potential_avg_end_return_pct")
+    avg_drawdown = row.get("simulation_max_equity_drawdown_pct")
+    if avg_drawdown is None:
+        avg_drawdown = row.get("potential_avg_max_drawdown_pct")
 
     if anchor_approved < criteria["min_anchor_approved"]:
         reasons.append("anchor_approved_below_min")
@@ -3828,11 +4242,29 @@ def build_anchor_winners(
                 "potential_avg_end_return_pct": row.get(
                     "potential_avg_end_return_pct"
                 ),
+                "potential_avg_net_end_return_pct": row.get(
+                    "potential_avg_net_end_return_pct"
+                ),
                 "potential_avg_max_runup_pct": row.get(
                     "potential_avg_max_runup_pct"
                 ),
                 "potential_avg_max_drawdown_pct": row.get(
                     "potential_avg_max_drawdown_pct"
+                ),
+                "simulation_filled_entries": row.get(
+                    "simulation_filled_entries"
+                ),
+                "simulation_closed_positions": row.get(
+                    "simulation_closed_positions"
+                ),
+                "simulation_open_positions": row.get(
+                    "simulation_open_positions"
+                ),
+                "simulation_net_return_pct": row.get(
+                    "simulation_net_return_pct"
+                ),
+                "simulation_max_equity_drawdown_pct": row.get(
+                    "simulation_max_equity_drawdown_pct"
                 ),
                 "entry_step_pct": row.get("entry_step_pct"),
                 "volatility_reference_pct": row.get("volatility_reference_pct"),
@@ -3915,12 +4347,30 @@ def write_strategy_comparison_csv(comparison, output_path):
         "potential_evaluated_count",
         "potential_take_profit_reached_rate",
         "potential_avg_end_return_pct",
+        "potential_avg_net_end_return_pct",
         "potential_avg_max_runup_pct",
         "potential_avg_max_drawdown_pct",
         "potential_avg_risk_size_multiplier",
         "potential_risk_sized_avg_end_return_pct",
+        "potential_risk_sized_avg_net_end_return_pct",
         "potential_risk_sized_avg_max_runup_pct",
         "potential_risk_sized_avg_max_drawdown_pct",
+        "simulation_starting_cash_usd",
+        "simulation_orders_placed",
+        "simulation_filled_entries",
+        "simulation_unfilled_entries",
+        "simulation_closed_positions",
+        "simulation_open_positions",
+        "simulation_fill_rate_after_placement",
+        "simulation_close_rate_after_fill",
+        "simulation_realized_net_pnl_usd",
+        "simulation_unrealized_net_pnl_usd",
+        "simulation_total_net_pnl_usd",
+        "simulation_net_return_pct",
+        "simulation_max_equity_drawdown_pct",
+        "simulation_duplicate_active_level",
+        "simulation_capital_or_inventory_blocked",
+        "simulation_by_source",
         "approved_sentiment_risk_samples",
         "approved_sentiment_risk_postures",
         "approved_weather_leveling_states",
@@ -4008,12 +4458,29 @@ def write_ranked_strategy_csv(comparison, output_path):
         "potential_evaluated_count",
         "potential_take_profit_reached_rate",
         "potential_avg_end_return_pct",
+        "potential_avg_net_end_return_pct",
         "potential_avg_max_runup_pct",
         "potential_avg_max_drawdown_pct",
         "potential_avg_risk_size_multiplier",
         "potential_risk_sized_avg_end_return_pct",
+        "potential_risk_sized_avg_net_end_return_pct",
         "potential_risk_sized_avg_max_runup_pct",
         "potential_risk_sized_avg_max_drawdown_pct",
+        "simulation_orders_placed",
+        "simulation_filled_entries",
+        "simulation_unfilled_entries",
+        "simulation_closed_positions",
+        "simulation_open_positions",
+        "simulation_fill_rate_after_placement",
+        "simulation_close_rate_after_fill",
+        "simulation_realized_net_pnl_usd",
+        "simulation_unrealized_net_pnl_usd",
+        "simulation_total_net_pnl_usd",
+        "simulation_net_return_pct",
+        "simulation_max_equity_drawdown_pct",
+        "simulation_duplicate_active_level",
+        "simulation_capital_or_inventory_blocked",
+        "simulation_by_source",
         "approved_sentiment_risk_samples",
         "approved_sentiment_risk_postures",
         "approved_weather_leveling_states",
@@ -6305,8 +6772,8 @@ def summarize_missed_approved_opportunities(replay, actual, snapshots=None):
         "assumptions": [
             "Entry assumed at the approved replay level.",
             f"Opportunity path measured over the next {BACKTEST_POTENTIAL_MAX_HOLD_HOURS:g} hours of captured snapshots.",
-            "Potential takes profit when the configured target is first reached; otherwise end_return_pct is marked to the end of the hold window.",
-            "This does not model exchange fills, fees, slippage, or stop-loss exits."
+            "Potential takes profit only after price reaches the configured margin plus round_trip_fee_pct; otherwise end_return_pct is marked to the end of the hold window.",
+            "Potential analysis assumes an entry fill and does not model capital constraints, slippage, or stop-loss exits. Net return fields subtract the configured round-trip fee."
         ],
     }
 

@@ -840,6 +840,143 @@ class RangeGridBacktestTests(unittest.TestCase):
 
         self.assertAlmostEqual(result, 0.004, places=6)
 
+    def test_potential_take_profit_includes_round_trip_fee(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                100.0,
+                strategy_overrides={
+                    "profit_target_pct": 0.01,
+                    "round_trip_fee_pct": 0.0065,
+                },
+            ),
+            make_snapshot("2026-06-13T12:10:00+00:00", 101.0),
+            make_snapshot("2026-06-13T12:20:00+00:00", 101.7),
+        ]
+        event = {
+            "captured_at": "2026-06-13T12:00:00+00:00",
+            "level": 100.0,
+            "buy_source": "range_low",
+        }
+
+        result = backtest.simulate_missed_opportunity(
+            snapshots[0],
+            event,
+            snapshots,
+        )
+
+        self.assertEqual(result["target_profit_pct"], 1.0)
+        self.assertEqual(result["round_trip_fee_pct"], 0.65)
+        self.assertEqual(result["target_price_move_pct"], 1.65)
+        self.assertEqual(
+            result["take_profit_reached_at"],
+            "2026-06-13T12:20:00+00:00",
+        )
+        self.assertAlmostEqual(result["net_end_return_pct"], 1.05, places=6)
+
+    def test_order_lifecycle_requires_limit_touch_before_fill(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                100.0,
+                strategy_overrides={
+                    "position_size_pct": 0.10,
+                    "profit_target_pct": 0.01,
+                    "round_trip_fee_pct": 0.0065,
+                },
+            ),
+            make_snapshot("2026-06-13T12:10:00+00:00", 100.5),
+        ]
+        replay = {
+            "approved_events": [
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "level": 99.0,
+                    "buy_source": "range_low",
+                }
+            ]
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(replay, snapshots)
+
+        self.assertEqual(result["orders_placed"], 1)
+        self.assertEqual(result["filled_entries"], 0)
+        self.assertEqual(result["unfilled_entries"], 1)
+        self.assertEqual(result["open_positions"], 0)
+        self.assertEqual(result["net_return_on_starting_capital_pct"], 0.0)
+
+    def test_order_lifecycle_realizes_profit_only_at_fee_inclusive_target(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                100.0,
+                strategy_overrides={
+                    "position_size_pct": 0.10,
+                    "profit_target_pct": 0.01,
+                    "round_trip_fee_pct": 0.0065,
+                    "max_inventory_usd": 750.0,
+                },
+            ),
+            make_snapshot("2026-06-13T12:10:00+00:00", 101.0),
+            make_snapshot("2026-06-13T12:20:00+00:00", 101.65),
+        ]
+        replay = {
+            "approved_events": [
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "level": 100.0,
+                    "buy_source": "range_low",
+                }
+            ]
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(replay, snapshots)
+
+        self.assertEqual(result["filled_entries"], 1)
+        self.assertEqual(result["closed_positions"], 1)
+        self.assertEqual(result["open_positions"], 0)
+        self.assertAlmostEqual(result["realized_net_pnl_usd"], 0.75, places=6)
+        self.assertAlmostEqual(
+            result["net_return_on_starting_capital_pct"],
+            0.1,
+            places=6,
+        )
+
+    def test_order_lifecycle_respects_inventory_cap_across_approvals(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                95.0,
+                strategy_overrides={
+                    "backtest_starting_cash_usd": 1000.0,
+                    "position_size_pct": 0.50,
+                    "max_inventory_usd": 100.0,
+                    "min_buy_notional_usd": 8.0,
+                },
+            )
+        ]
+        replay = {
+            "approved_events": [
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "level": 100.0,
+                    "buy_source": "range_low",
+                },
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "level": 99.0,
+                    "buy_source": "range_low",
+                },
+            ]
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(replay, snapshots)
+
+        self.assertEqual(result["orders_placed"], 1)
+        self.assertEqual(result["filled_entries"], 1)
+        self.assertEqual(result["capital_or_inventory_blocked"], 1)
+        self.assertEqual(result["ending_committed_inventory_usd"], 100.0)
+
     def test_replay_accepts_multi_asset_signal_payload(self):
         snapshot = make_snapshot(
             "2026-06-13T12:00:00+00:00",
@@ -3043,6 +3180,9 @@ class RangeGridBacktestTests(unittest.TestCase):
             for row in comparison["rows"]:
                 self.assertIn("approved_candidates", row)
                 self.assertIn("potential_take_profit_reached_rate", row)
+                self.assertIn("potential_avg_net_end_return_pct", row)
+                self.assertIn("simulation_filled_entries", row)
+                self.assertIn("simulation_net_return_pct", row)
 
     def test_write_strategy_comparison_csv_outputs_digestible_table(self):
         comparison = {
@@ -3133,6 +3273,8 @@ class RangeGridBacktestTests(unittest.TestCase):
             self.assertIn("approved_stale_level_reanchor_count", text)
             self.assertIn("potential_by_stale_level_reanchor", text)
             self.assertIn("potential_risk_sized_avg_end_return_pct", text)
+            self.assertIn("simulation_net_return_pct", text)
+            self.assertIn("simulation_max_equity_drawdown_pct", text)
             self.assertIn("0.3", text)
             self.assertIn("0.081", text)
             self.assertIn("dip_leveling_entry", text)
@@ -3228,6 +3370,41 @@ class RangeGridBacktestTests(unittest.TestCase):
 
         self.assertEqual(ranked[0]["strategy_label"], "stays_out")
         self.assertGreater(ranked[0]["practical_score"], ranked[1]["practical_score"])
+
+    def test_ranked_strategy_rows_use_simulated_net_return_over_gross_potential(self):
+        comparison = {
+            "rows": [
+                {
+                    "strategy_label": "gross_only_winner",
+                    "raw_candidates": 10,
+                    "approved_candidates": 2,
+                    "hold_snapshots": 0,
+                    "blocked_sentiment_high": 0,
+                    "potential_take_profit_reached_rate": 1.0,
+                    "potential_avg_end_return_pct": 2.0,
+                    "potential_avg_max_drawdown_pct": -0.1,
+                    "simulation_filled_entries": 2,
+                    "simulation_closed_positions": 0,
+                    "simulation_unfilled_entries": 0,
+                    "simulation_capital_or_inventory_blocked": 0,
+                    "simulation_duplicate_active_level": 0,
+                    "simulation_close_rate_after_fill": 0.0,
+                    "simulation_net_return_pct": -0.25,
+                    "simulation_max_equity_drawdown_pct": -0.25,
+                },
+                {
+                    "strategy_label": "no_trade",
+                    "raw_candidates": 10,
+                    "approved_candidates": 0,
+                    "hold_snapshots": 0,
+                    "blocked_sentiment_high": 0,
+                },
+            ]
+        }
+
+        ranked = backtest.build_ranked_strategy_rows(comparison)
+
+        self.assertEqual(ranked[0]["strategy_label"], "no_trade")
 
     def test_write_ranked_strategy_csv_outputs_ranked_table(self):
         comparison = {
