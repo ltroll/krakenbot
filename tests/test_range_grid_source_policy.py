@@ -222,8 +222,34 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
         self.assertTrue(candidate["source_entry_policy_enabled"])
         self.assertEqual(
             candidate["entry_policy_by_source"]["range_high_band"]["authority"],
-            "chop_confirmed",
+            "stabilization_preferred",
         )
+        self.assertFalse(candidate["inventory_hard_cap_enabled"])
+        self.assertFalse(candidate["bucket_inventory_hard_caps_enabled"])
+        self.assertFalse(candidate["sell_backlog_hard_block_enabled"])
+        self.assertFalse(candidate["open_sell_hard_cap_enabled"])
+        self.assertFalse(candidate["flow_hard_block_enabled"])
+        self.assertEqual(candidate["max_open_sell_orders"], 999)
+        weak_high_weather = weather_report()
+        weak_high_weather["market_opportunity"][
+            "entry_opportunity_score"
+        ] = 0.4
+        weak_high = source_entry_policy_decision(
+            candidate,
+            "range_high_band",
+            action_recommendation="blocked",
+            weather_report=weak_high_weather,
+        )
+        self.assertTrue(weak_high["allowed"])
+        self.assertEqual(
+            weak_high["reason"],
+            "source_policy_preferred_weak_setup",
+        )
+        self.assertEqual(
+            weak_high["setup_failure_reason"],
+            "source_policy_entry_score",
+        )
+        self.assertAlmostEqual(weak_high["size_multiplier"], 0.44)
         self.assertNotIn("source_entry_policy_enabled", active)
 
 

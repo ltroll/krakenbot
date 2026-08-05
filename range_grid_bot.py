@@ -5306,24 +5306,48 @@ def flow_adjustment(flow_pressure, buy_source):
             "reason": "flow_llm_only"
         }
 
+    flow_hard_block_enabled = strategy_bool(
+        strategy_config,
+        "flow_hard_block_enabled",
+        True,
+    )
+
     if flow_pressure <= flow_block_threshold:
         if flow_block_high_only:
             return {
                 "size_multiplier": flow_defensive_size_multiplier,
-                "block_buy": buy_source == "range_high_band",
-                "reason": "flow_block_high"
+                "block_buy": (
+                    flow_hard_block_enabled
+                    and buy_source == "range_high_band"
+                ),
+                "reason": (
+                    "flow_block_high"
+                    if flow_hard_block_enabled
+                    else "flow_block_high_reduced"
+                )
             }
         return {
             "size_multiplier": flow_defensive_size_multiplier,
-            "block_buy": True,
-            "reason": "flow_block_all"
+            "block_buy": flow_hard_block_enabled,
+            "reason": (
+                "flow_block_all"
+                if flow_hard_block_enabled
+                else "flow_block_all_reduced"
+            )
         }
 
     if flow_pressure <= flow_defensive_threshold:
         return {
             "size_multiplier": flow_defensive_size_multiplier,
-            "block_buy": buy_source == "range_high_band",
-            "reason": "flow_defensive"
+            "block_buy": (
+                flow_hard_block_enabled
+                and buy_source == "range_high_band"
+            ),
+            "reason": (
+                "flow_defensive"
+                if flow_hard_block_enabled
+                else "flow_defensive_reduced"
+            )
         }
 
     return {
@@ -6641,6 +6665,11 @@ def main():
                 ),
                 max_consecutive_private_api_failures=(
                     max_consecutive_private_api_failures
+                ),
+                sell_backlog_hard_block_enabled=strategy_bool(
+                    strategy_config,
+                    "sell_backlog_hard_block_enabled",
+                    True,
                 ),
             )
             if runtime_block_reason:
@@ -8452,6 +8481,20 @@ def main():
                         weather_report=weather_report,
                         fallback_config=strategy_config,
                     )
+                    inventory_hard_cap_enabled = strategy_bool_with_fallback(
+                        route_config,
+                        strategy_config,
+                        "inventory_hard_cap_enabled",
+                        True,
+                    )
+                    bucket_inventory_hard_caps_enabled = (
+                        strategy_bool_with_fallback(
+                            route_config,
+                            strategy_config,
+                            "bucket_inventory_hard_caps_enabled",
+                            True,
+                        )
+                    )
                     source_policy_size_multiplier = optional_float(
                         source_policy.get("size_multiplier")
                     )
@@ -8467,6 +8510,9 @@ def main():
                         ),
                         "source_entry_authority": source_policy.get("authority"),
                         "source_entry_policy_reason": source_policy.get("reason"),
+                        "source_entry_policy_setup_failure_reason": (
+                            source_policy.get("setup_failure_reason")
+                        ),
                         "source_entry_policy_setup_confirmed": source_policy.get(
                             "setup_confirmed"
                         ),
@@ -8585,6 +8631,8 @@ def main():
                     elif sell_fill_cooldown["remaining_minutes"] > 0:
                         skip_reason = "buy_after_sell_fill_cooldown"
                     elif (
+                        inventory_hard_cap_enabled
+                        and
                         deployed_inventory_usd
                         >= candidate_effective_max_inventory_usd
                     ):
@@ -8695,6 +8743,7 @@ def main():
 
                     if (
                         skip_reason is None
+                        and inventory_hard_cap_enabled
                         and projected_inventory_usd > (
                             candidate_effective_max_inventory_usd
                         )
@@ -8703,6 +8752,7 @@ def main():
 
                     if (
                         skip_reason is None
+                        and bucket_inventory_hard_caps_enabled
                         and projected_bucket_inventory_usd > bucket_cap_usd
                     ):
                         skip_reason = "bucket_max_inventory_usd"

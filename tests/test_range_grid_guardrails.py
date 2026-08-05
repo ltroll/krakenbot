@@ -44,6 +44,25 @@ class RangeGridGuardrailsTests(unittest.TestCase):
         })
         self.assertFalse(errors)
 
+    def test_validate_strategy_config_rejects_non_boolean_soft_guard_flags(self):
+        errors = guardrails.validate_strategy_config({
+            "inventory_hard_cap_enabled": "sometimes",
+            "bucket_inventory_hard_caps_enabled": 1,
+            "sell_backlog_hard_block_enabled": "no",
+            "open_sell_hard_cap_enabled": None,
+            "flow_hard_block_enabled": 0,
+        })
+
+        self.assertTrue(any("inventory_hard_cap_enabled" in error for error in errors))
+        self.assertTrue(
+            any("bucket_inventory_hard_caps_enabled" in error for error in errors)
+        )
+        self.assertTrue(
+            any("sell_backlog_hard_block_enabled" in error for error in errors)
+        )
+        self.assertTrue(any("open_sell_hard_cap_enabled" in error for error in errors))
+        self.assertTrue(any("flow_hard_block_enabled" in error for error in errors))
+
     def test_validate_strategy_config_rejects_out_of_bounds_execution_threshold(self):
         errors = guardrails.validate_strategy_config({
             "grid_anchor": "low,high",
@@ -58,6 +77,7 @@ class RangeGridGuardrailsTests(unittest.TestCase):
             "operating_mode": "range_only",
             "risk_context_high_band_min_breakout_score": 1.5,
             "risk_context_high_band_distribution_min_breakout_score": 1.5,
+            "high_band_min_actionable_resistance_room_pct": 1.5,
             "risk_context_position_size_blend": -0.1,
             "high_anchor_backlog_old_order_weight": 1.5,
             "sell_backlog_old_order_weight": 1.5,
@@ -69,6 +89,11 @@ class RangeGridGuardrailsTests(unittest.TestCase):
             "stale_level_reanchor_profit_guard_low_dip_min_bottom_readiness_score": 1.5,
             "stale_level_reanchor_profit_guard_low_dip_max_support_distance_pct": -0.1,
             "stale_level_reanchor_profit_guard_low_dip_size_multiplier": 1.5,
+            "low_support_opportunity_shadow_min_stabilization_score": 1.5,
+            "low_support_opportunity_shadow_min_entry_opportunity_score": -0.1,
+            "low_support_opportunity_shadow_min_bottom_readiness_score": 1.5,
+            "low_support_opportunity_shadow_max_support_distance_pct": -0.1,
+            "low_support_opportunity_shadow_min_resistance_room_pct": 1.5,
             "stale_level_reanchor_profit_lookback_hours": -1,
             "stale_level_reanchor_profit_min_samples": -1,
         })
@@ -78,6 +103,12 @@ class RangeGridGuardrailsTests(unittest.TestCase):
         self.assertTrue(
             any(
                 "risk_context_high_band_distribution_min_breakout_score" in error
+                for error in errors
+            )
+        )
+        self.assertTrue(
+            any(
+                "high_band_min_actionable_resistance_room_pct" in error
                 for error in errors
             )
         )
@@ -156,6 +187,41 @@ class RangeGridGuardrailsTests(unittest.TestCase):
                 for error in errors
             )
         )
+        self.assertTrue(
+            any(
+                "low_support_opportunity_shadow_min_stabilization_score"
+                in error
+                for error in errors
+            )
+        )
+        self.assertTrue(
+            any(
+                "low_support_opportunity_shadow_min_entry_opportunity_score"
+                in error
+                for error in errors
+            )
+        )
+        self.assertTrue(
+            any(
+                "low_support_opportunity_shadow_min_bottom_readiness_score"
+                in error
+                for error in errors
+            )
+        )
+        self.assertTrue(
+            any(
+                "low_support_opportunity_shadow_max_support_distance_pct"
+                in error
+                for error in errors
+            )
+        )
+        self.assertTrue(
+            any(
+                "low_support_opportunity_shadow_min_resistance_room_pct"
+                in error
+                for error in errors
+            )
+        )
 
     def test_summarize_sell_backlog_counts_and_ages(self):
         now = datetime(2026, 6, 13, 12, 0, tzinfo=timezone.utc)
@@ -221,6 +287,24 @@ class RangeGridGuardrailsTests(unittest.TestCase):
             max_consecutive_private_api_failures=10,
         )
         self.assertEqual(reason, "sell_backlog_count")
+
+    def test_runtime_buy_block_reason_can_soften_sell_backlog(self):
+        reason = guardrails.runtime_buy_block_reason(
+            operating_mode="range_only",
+            realized_pnl_today=0.0,
+            max_daily_loss_usd=0.0,
+            sell_backlog_count=50,
+            sell_backlog_limit=4,
+            sell_backlog_oldest_minutes=10000.0,
+            sell_backlog_minutes_limit=60,
+            consecutive_loop_errors=0,
+            max_consecutive_loop_errors=10,
+            consecutive_private_api_failures=0,
+            max_consecutive_private_api_failures=10,
+            sell_backlog_hard_block_enabled=False,
+        )
+
+        self.assertIsNone(reason)
 
     def test_runtime_buy_block_reason_blocks_on_operating_mode(self):
         reason = guardrails.runtime_buy_block_reason(

@@ -2509,7 +2509,16 @@ def infer_live_only_blockers(snapshot, event):
     )
     if sell_backlog_count is None:
         sell_backlog_count = sell_backlog_effective_count(snapshot)
-    if backlog_limit > 0 and sell_backlog_count >= backlog_limit:
+    sell_backlog_hard_block_enabled = strategy_bool(
+        config,
+        "sell_backlog_hard_block_enabled",
+        True,
+    )
+    if (
+        sell_backlog_hard_block_enabled
+        and backlog_limit > 0
+        and sell_backlog_count >= backlog_limit
+    ):
         blockers.append("sell_backlog_count")
 
     open_sell_count = int(
@@ -2526,7 +2535,11 @@ def infer_live_only_blockers(snapshot, event):
     )
     if oldest_sell_age is None:
         oldest_sell_age = sell_backlog_oldest_minutes(snapshot)
-    if backlog_minutes_limit > 0 and oldest_sell_age >= backlog_minutes_limit:
+    if (
+        sell_backlog_hard_block_enabled
+        and backlog_minutes_limit > 0
+        and oldest_sell_age >= backlog_minutes_limit
+    ):
         blockers.append("sell_backlog_age_minutes")
 
     effective_position_size_pct = safe_float(
@@ -2561,6 +2574,7 @@ def infer_live_only_blockers(snapshot, event):
 
     if (
         runtime_status_fresh
+        and strategy_bool(config, "open_sell_hard_cap_enabled", True)
         and
         effective_max_open_sell_orders is not None
         and open_sell_count >= effective_max_open_sell_orders
@@ -2799,27 +2813,44 @@ def simulate_approved_order_lifecycle(replay, snapshots):
 
     first_snapshot = ordered_snapshots[0][1] if ordered_snapshots else {}
     first_config = strategy_payload(first_snapshot)
-    max_inventory_usd = safe_float(first_config.get("max_inventory_usd"))
-    if max_inventory_usd is None or max_inventory_usd <= 0:
-        max_inventory_usd = float("inf")
+    configured_max_inventory_usd = safe_float(
+        first_config.get("max_inventory_usd")
+    )
+    if configured_max_inventory_usd is None or configured_max_inventory_usd <= 0:
+        configured_max_inventory_usd = float("inf")
+    inventory_hard_cap_enabled = strategy_bool(
+        first_config,
+        "inventory_hard_cap_enabled",
+        True,
+    )
+    bucket_inventory_hard_caps_enabled = strategy_bool(
+        first_config,
+        "bucket_inventory_hard_caps_enabled",
+        True,
+    )
+    max_inventory_usd = (
+        configured_max_inventory_usd
+        if inventory_hard_cap_enabled
+        else float("inf")
+    )
     starting_cash_usd = safe_float(
         first_config.get("backtest_starting_cash_usd")
     )
     if starting_cash_usd is None or starting_cash_usd <= 0:
         starting_cash_usd = (
-            max_inventory_usd
-            if max_inventory_usd != float("inf")
+            configured_max_inventory_usd
+            if configured_max_inventory_usd != float("inf")
             else 1000.0
         )
     raw_bucket_caps = first_config.get("max_inventory_usd_by_bucket")
     bucket_caps = {}
-    if isinstance(raw_bucket_caps, dict):
+    if bucket_inventory_hard_caps_enabled and isinstance(raw_bucket_caps, dict):
         for bucket, raw_cap in raw_bucket_caps.items():
             cap = safe_float(raw_cap)
             if cap is not None and cap > 0:
                 bucket_caps[str(bucket).strip().lower()] = min(
                     cap,
-                    max_inventory_usd,
+                    configured_max_inventory_usd,
                 )
 
     available_cash_usd = starting_cash_usd
@@ -3760,6 +3791,38 @@ def build_strategy_comparison_rows(
             "approved_range_high_band": summary.get("approved_counts_by_source", {}).get("range_high_band", 0),
             "blocked_price_above_level": summary.get("blocked_reason_counts", {}).get("price_above_level", 0),
             "blocked_sentiment_high": summary.get("blocked_reason_counts", {}).get("sentiment_action_not_high_range_permitted", 0),
+            "blocked_reason_counts": json.dumps(
+                summary.get("blocked_reason_counts") or {},
+                sort_keys=True,
+            ),
+            "blocked_reason_counts_by_source": json.dumps(
+                summary.get("blocked_reason_counts_by_source") or {},
+                sort_keys=True,
+            ),
+            "source_entry_policy_reason_counts": json.dumps(
+                summary.get("source_entry_policy_reason_counts") or {},
+                sort_keys=True,
+            ),
+            "source_entry_policy_setup_failure_reason_counts": json.dumps(
+                summary.get(
+                    "source_entry_policy_setup_failure_reason_counts"
+                ) or {},
+                sort_keys=True,
+            ),
+            "approved_source_entry_policy_reason_counts": json.dumps(
+                summary.get("approved_source_entry_policy_reason_counts") or {},
+                sort_keys=True,
+            ),
+            "blocked_source_entry_policy_reason_counts": json.dumps(
+                summary.get("blocked_source_entry_policy_reason_counts") or {},
+                sort_keys=True,
+            ),
+            "approved_source_entry_policy_setup_failure_reason_counts": json.dumps(
+                summary.get(
+                    "approved_source_entry_policy_setup_failure_reason_counts"
+                ) or {},
+                sort_keys=True,
+            ),
             "missed_price_above_playable": missed_price_above.get(
                 "playable_price_above_count"
             ),
@@ -4168,14 +4231,20 @@ def practical_strategy_score(row):
         effective_candidates / raw_candidates if raw_candidates > 0 else 0.0
     )
     blocked_high = row.get("blocked_sentiment_high") or 0
+    gate_penalty = (
+        0.0
+        if has_simulation
+        else (hold_snapshots * 0.002) + (blocked_high * 0.005)
+    )
 
     if approved <= 0:
         # A strategy that stays out should not rank below strategies that prove
         # negative expectancy in the same window.
+        if has_simulation and avg_end_return is not None and avg_end_return >= 0:
+            return 0.0
         return round(
             0.0
-            - (hold_snapshots * 0.002)
-            - (blocked_high * 0.005),
+            - gate_penalty,
             6,
         )
 
@@ -4191,7 +4260,16 @@ def practical_strategy_score(row):
         if positive_expectancy else
         -min(max(activity_count, approved), 50) * 0.1
     )
-    efficiency_reward = candidate_efficiency * (20.0 if positive_expectancy else 5.0)
+    efficiency_reward = (
+        candidate_efficiency * 20.0
+        if positive_expectancy
+        else 0.0
+    )
+    take_profit_reward = (
+        take_profit_rate * 30.0
+        if positive_expectancy
+        else 0.0
+    )
     lifecycle_penalty = 0.0
     if has_simulation:
         lifecycle_penalty = (
@@ -4204,13 +4282,14 @@ def practical_strategy_score(row):
     score = (
         (avg_end_return * 120.0)
         + (avg_drawdown * 35.0)
-        + (take_profit_rate * 30.0)
+        + take_profit_reward
         + activity_reward
         + efficiency_reward
-        - (hold_snapshots * 0.002)
-        - (blocked_high * 0.005)
+        - gate_penalty
         - lifecycle_penalty
     )
+    if has_simulation and avg_end_return < 0:
+        score = min(score, -0.000001)
     return round(score, 6)
 
 
@@ -4459,6 +4538,13 @@ def write_strategy_comparison_csv(comparison, output_path):
         "approved_range_high_band",
         "blocked_price_above_level",
         "blocked_sentiment_high",
+        "blocked_reason_counts",
+        "blocked_reason_counts_by_source",
+        "source_entry_policy_reason_counts",
+        "source_entry_policy_setup_failure_reason_counts",
+        "approved_source_entry_policy_reason_counts",
+        "blocked_source_entry_policy_reason_counts",
+        "approved_source_entry_policy_setup_failure_reason_counts",
         "missed_price_above_playable",
         "missed_price_above_profitable",
         "missed_price_above_take_profit_reached_rate",
@@ -4593,6 +4679,13 @@ def write_ranked_strategy_csv(comparison, output_path):
         "candidate_efficiency",
         "approved_llm_target",
         "dynamic_anchor_mode",
+        "blocked_reason_counts",
+        "blocked_reason_counts_by_source",
+        "source_entry_policy_reason_counts",
+        "source_entry_policy_setup_failure_reason_counts",
+        "approved_source_entry_policy_reason_counts",
+        "blocked_source_entry_policy_reason_counts",
+        "approved_source_entry_policy_setup_failure_reason_counts",
         "potential_evaluated_count",
         "potential_take_profit_reached_rate",
         "potential_avg_end_return_pct",
@@ -4791,6 +4884,11 @@ def flow_adjustment(config, flow_pressure, buy_source):
     flow_block_threshold = safe_float(config.get("flow_block_threshold")) or -0.4
     flow_defensive_threshold = safe_float(config.get("flow_defensive_threshold")) or -0.2
     flow_block_high_only = bool(config.get("flow_block_high_only", True))
+    flow_hard_block_enabled = strategy_bool(
+        config,
+        "flow_hard_block_enabled",
+        True,
+    )
 
     if flow_pressure <= flow_block_llm_only_below and buy_source == "llm_target":
         return {
@@ -4803,20 +4901,38 @@ def flow_adjustment(config, flow_pressure, buy_source):
         if flow_block_high_only:
             return {
                 "size_multiplier": flow_defensive_size_multiplier,
-                "block_buy": buy_source == "range_high_band",
-                "reason": "flow_block_high"
+                "block_buy": (
+                    flow_hard_block_enabled
+                    and buy_source == "range_high_band"
+                ),
+                "reason": (
+                    "flow_block_high"
+                    if flow_hard_block_enabled
+                    else "flow_block_high_reduced"
+                )
             }
         return {
             "size_multiplier": flow_defensive_size_multiplier,
-            "block_buy": True,
-            "reason": "flow_block_all"
+            "block_buy": flow_hard_block_enabled,
+            "reason": (
+                "flow_block_all"
+                if flow_hard_block_enabled
+                else "flow_block_all_reduced"
+            )
         }
 
     if flow_pressure <= flow_defensive_threshold:
         return {
             "size_multiplier": flow_defensive_size_multiplier,
-            "block_buy": buy_source == "range_high_band",
-            "reason": "flow_defensive"
+            "block_buy": (
+                flow_hard_block_enabled
+                and buy_source == "range_high_band"
+            ),
+            "reason": (
+                "flow_defensive"
+                if flow_hard_block_enabled
+                else "flow_defensive_reduced"
+            )
         }
 
     return {"size_multiplier": 1.0, "block_buy": False, "reason": None}
@@ -5564,7 +5680,10 @@ def evaluate_candidate(snapshot, candidate, price):
     )
     if sell_fill_cooldown["remaining_minutes"] > 0:
         return False, "buy_after_sell_fill_cooldown"
-    if deployed_inventory_usd >= max_inventory_usd:
+    if (
+        strategy_bool(config, "inventory_hard_cap_enabled", True)
+        and deployed_inventory_usd >= max_inventory_usd
+    ):
         return False, "max_inventory_usd"
     if buy_source == "llm_target" and not llm_signal_gates_allow:
         return False, freshness_block_reason or "source_guard_blocked"
@@ -5655,6 +5774,12 @@ def empty_replay_summary():
         "hold_signal_status_counts": {},
         "hold_active_strategy_mode_counts": {},
         "blocked_reason_counts": {},
+        "blocked_reason_counts_by_source": {},
+        "source_entry_policy_reason_counts": {},
+        "source_entry_policy_setup_failure_reason_counts": {},
+        "approved_source_entry_policy_reason_counts": {},
+        "blocked_source_entry_policy_reason_counts": {},
+        "approved_source_entry_policy_setup_failure_reason_counts": {},
         "candidate_counts_by_source": {},
         "candidate_counts_by_strategy_mode": {},
         "approved_counts_by_source": {},
@@ -5674,6 +5799,12 @@ def replay_from_snapshots(snapshots):
     hold_signal_status_counts = Counter()
     hold_active_strategy_mode_counts = Counter()
     blocked_reason_counts = Counter()
+    blocked_reason_counts_by_source = defaultdict(Counter)
+    source_entry_policy_reason_counts = Counter()
+    source_entry_policy_setup_failure_reason_counts = Counter()
+    approved_source_entry_policy_reason_counts = Counter()
+    blocked_source_entry_policy_reason_counts = Counter()
+    approved_source_entry_policy_setup_failure_reason_counts = Counter()
     candidate_counts_by_source = Counter()
     candidate_counts_by_strategy_mode = Counter()
     approved_counts_by_source = Counter()
@@ -5775,6 +5906,18 @@ def replay_from_snapshots(snapshots):
             )
             approved, reason = evaluate_candidate(snapshot, candidate, price)
             source_policy = candidate.get("source_entry_policy") or {}
+            source_policy_reason = source_policy.get("reason")
+            source_policy_setup_failure_reason = source_policy.get(
+                "setup_failure_reason"
+            )
+            if source_policy.get("policy_enabled") and source_policy_reason:
+                source_entry_policy_reason_counts[
+                    str(source_policy_reason)
+                ] += 1
+            if source_policy_setup_failure_reason:
+                source_entry_policy_setup_failure_reason_counts[
+                    str(source_policy_setup_failure_reason)
+                ] += 1
             source_policy_size_multiplier = safe_float(
                 source_policy.get("size_multiplier")
             )
@@ -5816,6 +5959,14 @@ def replay_from_snapshots(snapshots):
                 summary["approved_candidates"] += 1
                 approved_counts_by_source[candidate["buy_source"]] += 1
                 approved_counts_by_strategy_mode[candidate["strategy_mode"]] += 1
+                if source_policy.get("policy_enabled") and source_policy_reason:
+                    approved_source_entry_policy_reason_counts[
+                        str(source_policy_reason)
+                    ] += 1
+                if source_policy_setup_failure_reason:
+                    approved_source_entry_policy_setup_failure_reason_counts[
+                        str(source_policy_setup_failure_reason)
+                    ] += 1
                 approved_event = {
                     "captured_at": snapshot.get("captured_at"),
                     "price": price,
@@ -5846,6 +5997,9 @@ def replay_from_snapshots(snapshots):
                     ),
                     "source_entry_authority": source_policy.get("authority"),
                     "source_entry_policy_reason": source_policy.get("reason"),
+                    "source_entry_policy_setup_failure_reason": (
+                        source_policy_setup_failure_reason
+                    ),
                     "source_entry_policy_setup_confirmed": source_policy.get(
                         "setup_confirmed"
                     ),
@@ -5910,6 +6064,17 @@ def replay_from_snapshots(snapshots):
                 approved_events.append(approved_event)
             else:
                 blocked_reason_counts[reason] += 1
+                blocked_reason_counts_by_source[candidate["buy_source"]][
+                    reason
+                ] += 1
+                if (
+                    source_policy.get("policy_enabled")
+                    and source_policy_reason
+                    and reason == source_policy_reason
+                ):
+                    blocked_source_entry_policy_reason_counts[
+                        str(source_policy_reason)
+                    ] += 1
                 blocked_event = {
                     "captured_at": snapshot.get("captured_at"),
                     "price": price,
@@ -5940,6 +6105,9 @@ def replay_from_snapshots(snapshots):
                     ),
                     "source_entry_authority": source_policy.get("authority"),
                     "source_entry_policy_reason": source_policy.get("reason"),
+                    "source_entry_policy_setup_failure_reason": (
+                        source_policy_setup_failure_reason
+                    ),
                     "source_entry_policy_setup_confirmed": source_policy.get(
                         "setup_confirmed"
                     ),
@@ -5994,6 +6162,27 @@ def replay_from_snapshots(snapshots):
         hold_active_strategy_mode_counts.most_common()
     )
     summary["blocked_reason_counts"] = dict(blocked_reason_counts.most_common())
+    summary["blocked_reason_counts_by_source"] = {
+        source: dict(counts.most_common())
+        for source, counts in sorted(blocked_reason_counts_by_source.items())
+    }
+    summary["source_entry_policy_reason_counts"] = dict(
+        source_entry_policy_reason_counts.most_common()
+    )
+    summary["source_entry_policy_setup_failure_reason_counts"] = dict(
+        source_entry_policy_setup_failure_reason_counts.most_common()
+    )
+    summary["approved_source_entry_policy_reason_counts"] = dict(
+        approved_source_entry_policy_reason_counts.most_common()
+    )
+    summary["blocked_source_entry_policy_reason_counts"] = dict(
+        blocked_source_entry_policy_reason_counts.most_common()
+    )
+    summary[
+        "approved_source_entry_policy_setup_failure_reason_counts"
+    ] = dict(
+        approved_source_entry_policy_setup_failure_reason_counts.most_common()
+    )
     summary["candidate_counts_by_source"] = dict(candidate_counts_by_source.most_common())
     summary["candidate_counts_by_strategy_mode"] = dict(
         candidate_counts_by_strategy_mode.most_common()

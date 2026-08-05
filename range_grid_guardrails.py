@@ -75,6 +75,20 @@ def validate_strategy_config(strategy_config):
             "range_plus_llm, range_only, sell_only, observe_only"
         )
 
+    boolean_fields = (
+        "inventory_hard_cap_enabled",
+        "bucket_inventory_hard_caps_enabled",
+        "sell_backlog_hard_block_enabled",
+        "open_sell_hard_cap_enabled",
+        "flow_hard_block_enabled",
+    )
+    for field in boolean_fields:
+        if field in strategy_config and not isinstance(
+            strategy_config[field],
+            bool,
+        ):
+            errors.append(f"{field} must be boolean")
+
     positive_numeric_fields = (
         "range_window_hours",
         "max_grid_size",
@@ -382,6 +396,7 @@ def runtime_buy_block_reason(
     max_consecutive_loop_errors,
     consecutive_private_api_failures,
     max_consecutive_private_api_failures,
+    sell_backlog_hard_block_enabled=True,
 ):
     if operating_mode not in ("range_plus_llm", "range_only"):
         return f"operating_mode_{operating_mode}"
@@ -390,12 +405,16 @@ def runtime_buy_block_reason(
         return "max_daily_loss_usd"
 
     if (
+        sell_backlog_hard_block_enabled
+        and
         sell_backlog_limit > 0
         and sell_backlog_count >= sell_backlog_limit
     ):
         return "sell_backlog_count"
 
     if (
+        sell_backlog_hard_block_enabled
+        and
         sell_backlog_minutes_limit > 0
         and sell_backlog_oldest_minutes >= sell_backlog_minutes_limit
     ):

@@ -491,6 +491,80 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertFalse(approved)
         self.assertEqual(reason, "source_policy_weather_required")
 
+        replay = backtest.replay_from_snapshots([snapshot])
+        self.assertGreater(
+            replay["summary"]["blocked_reason_counts_by_source"][
+                "range_high_band"
+            ]["source_policy_weather_required"],
+            0,
+        )
+        self.assertGreater(
+            replay["summary"]["blocked_source_entry_policy_reason_counts"][
+                "source_policy_weather_required"
+            ],
+            0,
+        )
+
+    def test_recovery_first_candidate_places_reduced_high_probe_end_to_end(self):
+        candidate_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "range_grid_strategy_price_first_source_policy_candidate.json",
+        )
+        with open(candidate_path, encoding="utf-8") as handle:
+            candidate_config = json.load(handle)
+        weather = {
+            "mode": "weather_report",
+            "bot_decision_authority": "bot",
+            "trade_permission": "bot_decides",
+            "alert_level": "watch",
+            "emergency_bell": False,
+            "market_stability": {"stabilization_score": 0.7},
+            "trend_pressure": {
+                "falling_tape": False,
+                "downtrend_strength": 0.2,
+            },
+            "market_opportunity": {
+                "cycle_phase": "range_chop_accumulation",
+                "entry_opportunity_score": 0.4,
+                "rebound_confirmation_score": 0.55,
+                "exit_pressure_score": 0.2,
+                "hold_through_score": 0.6,
+            },
+        }
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            104.8,
+            action_recommendation="blocked",
+            strategy_modes=["high"],
+            strategy_overrides=candidate_config,
+            risk_context={"weather_report": weather},
+        )
+
+        replay = backtest.replay_from_snapshots([snapshot])
+        simulation = backtest.simulate_approved_order_lifecycle(
+            replay,
+            [snapshot],
+        )
+
+        self.assertEqual(replay["summary"]["approved_candidates"], 1)
+        self.assertEqual(
+            replay["summary"]["approved_source_entry_policy_reason_counts"],
+            {"source_policy_preferred_weak_setup": 1},
+        )
+        self.assertEqual(
+            replay["summary"][
+                "approved_source_entry_policy_setup_failure_reason_counts"
+            ],
+            {"source_policy_entry_score": 1},
+        )
+        self.assertEqual(simulation["orders_placed"], 1)
+        self.assertAlmostEqual(
+            simulation["by_source"]["range_high_band"][
+                "placed_notional_usd"
+            ],
+            31.68,
+        )
+
     def test_replay_applies_source_policy_size_and_entry_spacing(self):
         snapshot = make_snapshot(
             "2026-06-13T12:00:00+00:00",
@@ -527,6 +601,10 @@ class RangeGridBacktestTests(unittest.TestCase):
                 "risk_context_position_size_effective_multiplier"
             ],
             0.25,
+        )
+        self.assertEqual(
+            replay["summary"]["approved_source_entry_policy_reason_counts"],
+            {"source_policy_price_first_weather_missing": 1},
         )
 
     def test_high_band_resistance_room_guard_blocks_near_resistance(self):
@@ -1114,6 +1192,82 @@ class RangeGridBacktestTests(unittest.TestCase):
             result["by_source"]["range_low"]["bucket_inventory_blocked"],
             1,
         )
+
+    def test_order_lifecycle_can_treat_inventory_caps_as_soft(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                95.0,
+                strategy_overrides={
+                    "backtest_starting_cash_usd": 1000.0,
+                    "position_size_pct": 0.20,
+                    "max_inventory_usd": 100.0,
+                    "inventory_hard_cap_enabled": False,
+                    "bucket_inventory_hard_caps_enabled": False,
+                    "max_inventory_usd_by_bucket": {"range_low": 100.0},
+                    "min_buy_notional_usd": 8.0,
+                },
+            )
+        ]
+        replay = {
+            "approved_events": [
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "level": 100.0,
+                    "buy_source": "range_low",
+                },
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "level": 99.0,
+                    "buy_source": "range_low",
+                },
+            ]
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(replay, snapshots)
+
+        self.assertEqual(result["orders_placed"], 2)
+        self.assertEqual(result["capital_or_inventory_blocked"], 0)
+        self.assertEqual(result["bucket_inventory_blocked"], 0)
+
+    def test_evaluate_candidate_can_treat_legacy_inventory_as_soft(self):
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            94.0,
+            strategy_modes=["low"],
+            strategy_overrides={
+                "max_inventory_usd": 100.0,
+                "inventory_hard_cap_enabled": False,
+            },
+            state_summary_overrides={"deployed_inventory_usd": 1000.0},
+        )
+        candidate = {
+            "level": 95.0,
+            "buy_source": "range_low",
+            "strategy_mode": "low",
+        }
+
+        approved, reason = backtest.evaluate_candidate(snapshot, candidate, 94.0)
+
+        self.assertTrue(approved)
+        self.assertIsNone(reason)
+
+    def test_flow_pressure_can_reduce_without_blocking_high_probe(self):
+        adjustment = backtest.flow_adjustment(
+            {
+                "flow_hard_block_enabled": False,
+                "flow_block_threshold": -0.4,
+                "flow_defensive_threshold": -0.2,
+                "flow_defensive_size_multiplier": 0.5,
+                "flow_block_high_only": True,
+            },
+            -0.5,
+            "range_high_band",
+        )
+
+        self.assertFalse(adjustment["block_buy"])
+        self.assertEqual(adjustment["size_multiplier"], 0.5)
+        self.assertEqual(adjustment["reason"], "flow_block_high_reduced")
 
     def test_replay_accepts_multi_asset_signal_payload(self):
         snapshot = make_snapshot(
@@ -3413,6 +3567,9 @@ class RangeGridBacktestTests(unittest.TestCase):
             self.assertIn("potential_risk_sized_avg_end_return_pct", text)
             self.assertIn("simulation_net_return_pct", text)
             self.assertIn("simulation_max_equity_drawdown_pct", text)
+            self.assertIn("blocked_reason_counts_by_source", text)
+            self.assertIn("approved_source_entry_policy_reason_counts", text)
+            self.assertIn("source_entry_policy_setup_failure_reason_counts", text)
             self.assertIn("0.3", text)
             self.assertIn("0.081", text)
             self.assertIn("dip_leveling_entry", text)
@@ -3543,6 +3700,67 @@ class RangeGridBacktestTests(unittest.TestCase):
         ranked = backtest.build_ranked_strategy_rows(comparison)
 
         self.assertEqual(ranked[0]["strategy_label"], "no_trade")
+
+    def test_ranked_strategy_rows_do_not_reward_close_rate_on_small_net_loss(self):
+        comparison = {
+            "rows": [
+                {
+                    "strategy_label": "one_close_but_net_negative",
+                    "raw_candidates": 632,
+                    "approved_candidates": 7,
+                    "hold_snapshots": 807,
+                    "blocked_sentiment_high": 0,
+                    "simulation_filled_entries": 3,
+                    "simulation_closed_positions": 1,
+                    "simulation_open_positions": 2,
+                    "simulation_unfilled_entries": 0,
+                    "simulation_capital_or_inventory_blocked": 0,
+                    "simulation_bucket_inventory_blocked": 0,
+                    "simulation_duplicate_active_level": 0,
+                    "simulation_close_rate_after_fill": 1 / 3,
+                    "simulation_net_return_pct": -0.004718,
+                    "simulation_max_equity_drawdown_pct": -0.034728,
+                },
+                {
+                    "strategy_label": "preserves_capital",
+                    "raw_candidates": 4000,
+                    "approved_candidates": 0,
+                    "hold_snapshots": 0,
+                    "blocked_sentiment_high": 0,
+                    "simulation_filled_entries": 0,
+                    "simulation_closed_positions": 0,
+                    "simulation_net_return_pct": 0.0,
+                    "simulation_max_equity_drawdown_pct": 0.0,
+                },
+                {
+                    "strategy_label": "larger_net_loss_but_fewer_holds",
+                    "raw_candidates": 6000,
+                    "approved_candidates": 1,
+                    "hold_snapshots": 2,
+                    "blocked_sentiment_high": 0,
+                    "simulation_filled_entries": 1,
+                    "simulation_closed_positions": 0,
+                    "simulation_open_positions": 1,
+                    "simulation_unfilled_entries": 0,
+                    "simulation_capital_or_inventory_blocked": 0,
+                    "simulation_bucket_inventory_blocked": 0,
+                    "simulation_duplicate_active_level": 0,
+                    "simulation_close_rate_after_fill": 0.0,
+                    "simulation_net_return_pct": -0.011873,
+                    "simulation_max_equity_drawdown_pct": -0.064988,
+                },
+            ]
+        }
+
+        ranked = backtest.build_ranked_strategy_rows(comparison)
+
+        self.assertEqual(ranked[0]["strategy_label"], "preserves_capital")
+        self.assertEqual(ranked[0]["practical_score"], 0.0)
+        self.assertEqual(
+            ranked[1]["strategy_label"],
+            "one_close_but_net_negative",
+        )
+        self.assertLess(ranked[1]["practical_score"], 0.0)
 
     def test_write_ranked_strategy_csv_outputs_ranked_table(self):
         comparison = {
