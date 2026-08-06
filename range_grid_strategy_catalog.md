@@ -7,7 +7,7 @@
   Recovery mode for long-held underwater sells. Uses `range_only`, `sentiment_control_mode=risk_modulated`, disables backlog buy blocking, allows range buys to continue through liquidity/confidence-only sentiment blocks, enables dynamic anchor selection across `low,median,high`, widens entry spacing automatically when realized volatility is elevated, and tapers new-buy size as deployed inventory approaches the configured inventory cap.
 
 - `range_grid_strategy_price_first_source_policy_candidate.json`
-  Paper-only recovery-first comparison profile. Low entries are price-first and weather-sized, median entries prefer stabilization but continue at reduced size, and imperfect high entries become small probes instead of complete rejections. Legacy inventory, sell backlog, and flow pressure soften sizing without imposing broad hard buy blocks. It is included in `range_grid_strategy_test_set.txt` but is not selected by `env.range`.
+  Paper-only recovery-first comparison profile. Low entries are price-first and weather-sized, median entries prefer stabilization but continue at reduced size, and high entries require confirmed range chop. Legacy inventory, sell backlog, and flow pressure soften sizing without imposing broad hard buy blocks. It is included in `range_grid_strategy_test_set.txt` but is not selected by `env.range`.
 
 Sentiment control modes:
 

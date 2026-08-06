@@ -505,7 +505,7 @@ class RangeGridBacktestTests(unittest.TestCase):
             0,
         )
 
-    def test_recovery_first_candidate_places_reduced_high_probe_end_to_end(self):
+    def test_recovery_first_candidate_requires_confirmed_high_chop_end_to_end(self):
         candidate_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "range_grid_strategy_price_first_source_policy_candidate.json",
@@ -546,23 +546,46 @@ class RangeGridBacktestTests(unittest.TestCase):
             [snapshot],
         )
 
-        self.assertEqual(replay["summary"]["approved_candidates"], 1)
+        self.assertEqual(replay["summary"]["approved_candidates"], 0)
         self.assertEqual(
-            replay["summary"]["approved_source_entry_policy_reason_counts"],
-            {"source_policy_preferred_weak_setup": 1},
-        )
-        self.assertEqual(
-            replay["summary"][
-                "approved_source_entry_policy_setup_failure_reason_counts"
-            ],
+            replay["summary"]["blocked_source_entry_policy_reason_counts"],
             {"source_policy_entry_score": 1},
         )
-        self.assertEqual(simulation["orders_placed"], 1)
+        self.assertEqual(simulation["orders_placed"], 0)
+
+        weather["market_opportunity"]["entry_opportunity_score"] = 0.65
+        confirmed_snapshot = make_snapshot(
+            "2026-06-13T12:05:00+00:00",
+            104.8,
+            action_recommendation="blocked",
+            strategy_modes=["high"],
+            strategy_overrides=candidate_config,
+            risk_context={"weather_report": weather},
+        )
+        confirmed_replay = backtest.replay_from_snapshots(
+            [confirmed_snapshot]
+        )
+        confirmed_simulation = backtest.simulate_approved_order_lifecycle(
+            confirmed_replay,
+            [confirmed_snapshot],
+        )
+
+        self.assertEqual(
+            confirmed_replay["summary"]["approved_candidates"],
+            1,
+        )
+        self.assertEqual(
+            confirmed_replay["summary"][
+                "approved_source_entry_policy_reason_counts"
+            ],
+            {"source_policy_chop_confirmed": 1},
+        )
+        self.assertEqual(confirmed_simulation["orders_placed"], 1)
         self.assertAlmostEqual(
-            simulation["by_source"]["range_high_band"][
+            confirmed_simulation["by_source"]["range_high_band"][
                 "placed_notional_usd"
             ],
-            31.68,
+            39.6,
         )
 
     def test_replay_applies_source_policy_size_and_entry_spacing(self):
@@ -1229,6 +1252,146 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(result["orders_placed"], 2)
         self.assertEqual(result["capital_or_inventory_blocked"], 0)
         self.assertEqual(result["bucket_inventory_blocked"], 0)
+
+    def test_order_lifecycle_enforces_high_anchor_order_cap(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                95.0,
+                strategy_overrides={
+                    "backtest_starting_cash_usd": 1000.0,
+                    "position_size_pct": 0.10,
+                    "max_inventory_usd": 1000.0,
+                    "max_open_high_anchor_orders": 2,
+                    "min_buy_notional_usd": 8.0,
+                },
+            )
+        ]
+        replay = {
+            "approved_events": [
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "level": level,
+                    "buy_source": "range_high_band",
+                }
+                for level in (100.0, 99.0, 98.0)
+            ]
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(
+            replay,
+            snapshots,
+        )
+
+        self.assertEqual(result["orders_placed"], 2)
+        self.assertEqual(result["filled_entries"], 2)
+        self.assertEqual(result["open_positions"], 2)
+        self.assertEqual(
+            result["max_open_high_anchor_orders_blocked"],
+            1,
+        )
+        self.assertEqual(
+            result["by_source"]["range_high_band"][
+                "max_open_high_anchor_orders_blocked"
+            ],
+            1,
+        )
+
+    def test_order_lifecycle_high_anchor_cap_releases_after_sale(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                100.0,
+                strategy_overrides={
+                    "backtest_starting_cash_usd": 1000.0,
+                    "position_size_pct": 0.10,
+                    "profit_target_pct": 0.01,
+                    "round_trip_fee_pct": 0.0065,
+                    "max_inventory_usd": 1000.0,
+                    "max_open_high_anchor_orders": 1,
+                    "min_buy_notional_usd": 8.0,
+                },
+            ),
+            make_snapshot("2026-06-13T12:20:00+00:00", 102.0),
+        ]
+        replay = {
+            "approved_events": [
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "level": 100.0,
+                    "buy_source": "range_high_band",
+                },
+                {
+                    "captured_at": "2026-06-13T12:20:00+00:00",
+                    "level": 102.0,
+                    "buy_source": "range_high_band",
+                },
+            ]
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(
+            replay,
+            snapshots,
+        )
+
+        self.assertEqual(result["orders_placed"], 2)
+        self.assertEqual(result["filled_entries"], 2)
+        self.assertEqual(result["closed_positions"], 1)
+        self.assertEqual(result["open_positions"], 1)
+        self.assertEqual(
+            result["max_open_high_anchor_orders_blocked"],
+            0,
+        )
+
+    def test_order_lifecycle_high_anchor_cap_weights_aged_positions(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                95.0,
+                strategy_overrides={
+                    "backtest_starting_cash_usd": 1000.0,
+                    "position_size_pct": 0.10,
+                    "max_inventory_usd": 1000.0,
+                    "max_open_high_anchor_orders": 2,
+                    "high_anchor_backlog_soft_release_minutes": 10,
+                    "high_anchor_backlog_old_order_weight": 0.25,
+                    "min_buy_notional_usd": 8.0,
+                },
+            ),
+            make_snapshot("2026-06-13T12:20:00+00:00", 95.0),
+        ]
+        replay = {
+            "approved_events": [
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "level": 100.0,
+                    "buy_source": "range_high_band",
+                },
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "level": 99.0,
+                    "buy_source": "range_high_band",
+                },
+                {
+                    "captured_at": "2026-06-13T12:20:00+00:00",
+                    "level": 98.0,
+                    "buy_source": "range_high_band",
+                },
+            ]
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(
+            replay,
+            snapshots,
+        )
+
+        self.assertEqual(result["orders_placed"], 3)
+        self.assertEqual(result["filled_entries"], 3)
+        self.assertEqual(result["open_positions"], 3)
+        self.assertEqual(
+            result["max_open_high_anchor_orders_blocked"],
+            0,
+        )
 
     def test_evaluate_candidate_can_treat_legacy_inventory_as_soft(self):
         snapshot = make_snapshot(
@@ -3567,6 +3730,10 @@ class RangeGridBacktestTests(unittest.TestCase):
             self.assertIn("potential_risk_sized_avg_end_return_pct", text)
             self.assertIn("simulation_net_return_pct", text)
             self.assertIn("simulation_max_equity_drawdown_pct", text)
+            self.assertIn(
+                "simulation_max_open_high_anchor_orders_blocked",
+                text,
+            )
             self.assertIn("blocked_reason_counts_by_source", text)
             self.assertIn("approved_source_entry_policy_reason_counts", text)
             self.assertIn("source_entry_policy_setup_failure_reason_counts", text)
@@ -3850,6 +4017,10 @@ class RangeGridBacktestTests(unittest.TestCase):
             self.assertIn("approved_stale_level_reanchor_count", text)
             self.assertIn("potential_by_stale_level_reanchor", text)
             self.assertIn("potential_risk_sized_avg_end_return_pct", text)
+            self.assertIn(
+                "simulation_max_open_high_anchor_orders_blocked",
+                text,
+            )
             self.assertIn("0.081", text)
             self.assertIn("dip_leveling_entry", text)
             self.assertIn("baseline", text)

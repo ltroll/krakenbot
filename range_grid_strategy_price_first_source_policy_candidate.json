@@ -28,10 +28,8 @@
       "min_hold_through_score": 0.35
     },
     "range_high_band": {
-      "authority": "stabilization_preferred",
+      "authority": "chop_confirmed",
       "position_size_multiplier": 0.55,
-      "missing_weather_size_multiplier": 0.35,
-      "weak_setup_size_multiplier": 0.8,
       "hard_block_falling_tape": true,
       "allowed_phases": "range_chop_stabilizing,range_chop_accumulation",
       "min_stabilization_score": 0.6,

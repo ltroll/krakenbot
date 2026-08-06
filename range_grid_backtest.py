@@ -2962,6 +2962,46 @@ def simulate_approved_order_lifecycle(replay, snapshots):
                 continue
 
             config = strategy_payload(snapshot)
+            max_open_high_anchor_orders = int(
+                safe_float(config.get("max_open_high_anchor_orders")) or 0
+            )
+            if (
+                buy_source == "range_high_band"
+                and max_open_high_anchor_orders > 0
+            ):
+                high_anchor_exposure = high_anchor_backlog_exposure(
+                    pending_orders,
+                    [
+                        {
+                            "buy_source": position.get("buy_source"),
+                            "placed_at": (
+                                position.get("filled_at")
+                                or position.get("approved_at")
+                            ),
+                        }
+                        for position in open_positions
+                    ],
+                    captured_at,
+                    safe_float(
+                        config.get("high_anchor_backlog_soft_release_minutes")
+                    ) or 0.0,
+                    safe_float(
+                        config.get("high_anchor_backlog_old_order_weight")
+                    )
+                    if config.get("high_anchor_backlog_old_order_weight")
+                    is not None
+                    else 1.0,
+                )
+                if (
+                    high_anchor_exposure["effective_count"]
+                    >= max_open_high_anchor_orders
+                ):
+                    counts["max_open_high_anchor_orders_blocked"] += 1
+                    source_stats[buy_source][
+                        "max_open_high_anchor_orders_blocked"
+                    ] += 1
+                    continue
+
             size_multiplier = safe_float(
                 event.get("risk_context_position_size_effective_multiplier")
             )
@@ -3103,6 +3143,9 @@ def simulate_approved_order_lifecycle(replay, snapshots):
         "duplicate_active_level": counts["duplicate_active_level"],
         "capital_or_inventory_blocked": counts["capital_or_inventory_blocked"],
         "bucket_inventory_blocked": counts["bucket_inventory_blocked"],
+        "max_open_high_anchor_orders_blocked": counts[
+            "max_open_high_anchor_orders_blocked"
+        ],
         "below_min_notional": counts["below_min_notional"],
         "fill_rate_after_placement": (
             round(fill_rate, 6) if fill_rate is not None else None
@@ -3125,6 +3168,7 @@ def simulate_approved_order_lifecycle(replay, snapshots):
             "Approved candidates become GTC limit buys; no fill is assumed until a captured price touches the limit.",
             "Sell targets include the configured profit margin plus round_trip_fee_pct, matching live target construction.",
             "Position sizing consumes simulated available cash and respects max_inventory_usd and min_buy_notional_usd.",
+            "High-band orders respect max_open_high_anchor_orders, including configured aged-sell exposure weighting.",
             "Fills occur at the configured limit or target price without favorable price improvement or slippage.",
         ],
     }
@@ -3914,6 +3958,9 @@ def build_strategy_comparison_rows(
             "simulation_bucket_inventory_blocked": simulation.get(
                 "bucket_inventory_blocked"
             ),
+            "simulation_max_open_high_anchor_orders_blocked": simulation.get(
+                "max_open_high_anchor_orders_blocked"
+            ),
             "simulation_by_source": json.dumps(
                 simulation.get("by_source") or {},
                 sort_keys=True,
@@ -4582,6 +4629,7 @@ def write_strategy_comparison_csv(comparison, output_path):
         "simulation_duplicate_active_level",
         "simulation_capital_or_inventory_blocked",
         "simulation_bucket_inventory_blocked",
+        "simulation_max_open_high_anchor_orders_blocked",
         "simulation_by_source",
         "simulation_filled_range_low",
         "simulation_closed_range_low",
@@ -4712,6 +4760,7 @@ def write_ranked_strategy_csv(comparison, output_path):
         "simulation_duplicate_active_level",
         "simulation_capital_or_inventory_blocked",
         "simulation_bucket_inventory_blocked",
+        "simulation_max_open_high_anchor_orders_blocked",
         "simulation_by_source",
         "simulation_filled_range_low",
         "simulation_closed_range_low",
