@@ -230,6 +230,20 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
         self.assertFalse(candidate["open_sell_hard_cap_enabled"])
         self.assertFalse(candidate["flow_hard_block_enabled"])
         self.assertEqual(candidate["max_open_sell_orders"], 999)
+        self.assertTrue(candidate["stale_level_reanchor_enabled"])
+        self.assertEqual(candidate["stale_level_reanchor_sources"], "range_low")
+        self.assertEqual(
+            candidate["stale_level_reanchor_weather_phases"],
+            "dip_leveling_entry",
+        )
+        self.assertTrue(candidate["stale_level_reanchor_require_weather"])
+        self.assertTrue(candidate["stale_level_reanchor_profit_guard_enabled"])
+        self.assertAlmostEqual(
+            candidate["entry_step_pct_by_source"]["range_low"],
+            0.0028,
+        )
+        self.assertAlmostEqual(candidate["profit_target_pct"], 0.009)
+        self.assertEqual(candidate["max_open_high_anchor_orders"], 2)
         weak_high_weather = weather_report()
         weak_high_weather["market_opportunity"][
             "entry_opportunity_score"
