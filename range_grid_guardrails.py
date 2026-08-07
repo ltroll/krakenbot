@@ -336,6 +336,18 @@ def validate_strategy_config(strategy_config):
                     errors.append(
                         f"entry_policy_by_source.{source}.allowed_phases must be a string or list"
                     )
+                if (
+                    "weather_bypassable_hard_safety_flags" in policy
+                    and not isinstance(
+                        policy["weather_bypassable_hard_safety_flags"],
+                        (str, list, tuple),
+                    )
+                ):
+                    errors.append(
+                        "entry_policy_by_source."
+                        f"{source}.weather_bypassable_hard_safety_flags "
+                        "must be a string or list"
+                    )
 
     return errors
 

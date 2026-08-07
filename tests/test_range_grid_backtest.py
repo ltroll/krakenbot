@@ -2086,6 +2086,59 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(candidate["level"], 103.0)
         self.assertTrue(candidate["stale_level_reanchor_applied"])
 
+    def test_evaluate_candidate_allows_safe_weather_source_health_bypass(self):
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            100.0,
+            action_recommendation="blocked",
+            strategy_modes=["low"],
+            strategy_overrides={
+                "source_entry_policy_enabled": True,
+                "entry_policy_by_source": {
+                    "range_low": {
+                        "authority": "price_first",
+                        "weather_bypassable_hard_safety_flags": (
+                            "source_health_block"
+                        ),
+                    }
+                },
+            },
+            risk_context={
+                "recommended_posture": "risk_off",
+                "hard_safety_flags": ["source_health_block"],
+                "weather_report": {
+                    "mode": "weather_report",
+                    "bot_decision_authority": "bot",
+                    "trade_permission": "bot_decides",
+                    "alert_level": "watch",
+                    "emergency_bell": False,
+                    "market_stability": {"stabilization_score": 0.7},
+                    "trend_pressure": {"falling_tape": False},
+                    "market_opportunity": {
+                        "cycle_phase": "dip_leveling_entry",
+                        "entry_opportunity_score": 0.65,
+                    },
+                },
+            },
+        )
+        snapshot["signal"]["payload"]["action_policy"] = {
+            "risk_off_blocks_longs": True,
+        }
+        candidate = {
+            "level": 100.0,
+            "buy_source": "range_low",
+            "strategy_mode": "low",
+        }
+
+        approved, reason = backtest.evaluate_candidate(
+            snapshot,
+            candidate,
+            100.0,
+        )
+
+        self.assertTrue(approved)
+        self.assertIsNone(reason)
+
     def test_evaluate_candidate_reanchor_keeps_max_above_level_cap(self):
         snapshot = make_snapshot(
             "2026-06-13T12:00:00+00:00",

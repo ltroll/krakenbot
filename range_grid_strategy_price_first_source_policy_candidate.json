@@ -13,7 +13,8 @@
       "position_size_multiplier": 0.75,
       "missing_weather_size_multiplier": 0.7,
       "falling_tape_size_multiplier": 0.35,
-      "hard_block_falling_tape": false
+      "hard_block_falling_tape": false,
+      "weather_bypassable_hard_safety_flags": "source_health_block"
     },
     "range_median": {
       "authority": "stabilization_preferred",
@@ -25,7 +26,8 @@
       "min_stabilization_score": 0.48,
       "min_entry_opportunity_score": 0.45,
       "max_exit_pressure_score": 0.5,
-      "min_hold_through_score": 0.35
+      "min_hold_through_score": 0.35,
+      "weather_bypassable_hard_safety_flags": "source_health_block"
     },
     "range_high_band": {
       "authority": "chop_confirmed",
@@ -41,9 +43,9 @@
     }
   },
   "dynamic_anchor_mode": true,
-  "dynamic_anchor_low_band_max": 0.6,
+  "dynamic_anchor_low_band_max": 0.35,
   "dynamic_anchor_high_band_min": 0.75,
-  "dynamic_anchor_midpoint_split": 0.62,
+  "dynamic_anchor_midpoint_split": 0.5,
   "dynamic_anchor_mid_mode": "median",
   "max_grid_size": 3,
   "entry_step_pct": 0.0028,

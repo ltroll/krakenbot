@@ -53,6 +53,7 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
             config,
             "range_low",
             action_recommendation="blocked",
+            action_policy={"risk_off_blocks_longs": True},
             weather_report=weather_report(falling_tape=True),
         )
 
@@ -83,6 +84,75 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
         self.assertFalse(decision["allowed"])
         self.assertFalse(decision["bypass_sentiment_gate"])
         self.assertEqual(decision["reason"], "source_policy_hard_risk")
+
+    def test_safe_weather_bypasses_only_configured_hard_safety_flags(self):
+        config = {
+            "source_entry_policy_enabled": True,
+            "entry_policy_by_source": {
+                "range_low": {
+                    "authority": "price_first",
+                    "weather_bypassable_hard_safety_flags": (
+                        "source_health_block"
+                    ),
+                }
+            },
+        }
+        source_health_risk = {
+            "recommended_posture": "risk_off",
+            "hard_safety_flags": ["source_health_block"],
+        }
+
+        allowed = source_entry_policy_decision(
+            config,
+            "range_low",
+            action_recommendation="blocked",
+            action_policy={"risk_off_blocks_longs": True},
+            risk_context=source_health_risk,
+            weather_report=weather_report(),
+        )
+        self.assertTrue(allowed["allowed"])
+        self.assertTrue(allowed["bypass_sentiment_gate"])
+
+        explicit_risk_off = source_entry_policy_decision(
+            config,
+            "range_low",
+            action_recommendation="risk_off",
+            risk_context=source_health_risk,
+            weather_report=weather_report(),
+        )
+        self.assertFalse(explicit_risk_off["allowed"])
+        self.assertEqual(
+            explicit_risk_off["reason"],
+            "source_policy_hard_risk",
+        )
+
+        mixed_flags = source_entry_policy_decision(
+            config,
+            "range_low",
+            action_recommendation="blocked",
+            risk_context={
+                **source_health_risk,
+                "hard_safety_flags": [
+                    "source_health_block",
+                    "exchange_connectivity_failed",
+                ],
+            },
+            weather_report=weather_report(),
+        )
+        self.assertFalse(mixed_flags["allowed"])
+        self.assertEqual(mixed_flags["reason"], "source_policy_hard_risk")
+
+        danger_weather = weather_report()
+        danger_weather["alert_level"] = "danger"
+        danger = source_entry_policy_decision(
+            config,
+            "range_low",
+            action_recommendation="blocked",
+            risk_context=source_health_risk,
+            weather_report=danger_weather,
+        )
+        self.assertFalse(danger["allowed"])
+        self.assertEqual(danger["reason"], "source_policy_hard_risk")
 
     def test_stabilization_preferred_allows_weak_probe_at_reduced_size(self):
         config = {
@@ -193,6 +263,7 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
                 "range_low": {
                     "authority": "guessing",
                     "position_size_multiplier": 1.5,
+                    "weather_bypassable_hard_safety_flags": 0.5,
                     "typo_field": 0.5,
                 }
             },
@@ -201,6 +272,9 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
         self.assertTrue(any("entry_step_pct_by_source.range_low" in error for error in errors))
         self.assertTrue(any("authority" in error for error in errors))
         self.assertTrue(any("position_size_multiplier" in error for error in errors))
+        self.assertTrue(
+            any("weather_bypassable_hard_safety_flags" in error for error in errors)
+        )
         self.assertTrue(any("typo_field" in error for error in errors))
 
     def test_candidate_profile_is_valid_paper_only_and_active_profile_is_unchanged(self):
@@ -244,6 +318,39 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
         )
         self.assertAlmostEqual(candidate["profit_target_pct"], 0.009)
         self.assertEqual(candidate["max_open_high_anchor_orders"], 2)
+        self.assertAlmostEqual(candidate["dynamic_anchor_low_band_max"], 0.35)
+        self.assertEqual(
+            candidate["entry_policy_by_source"]["range_low"][
+                "weather_bypassable_hard_safety_flags"
+            ],
+            "source_health_block",
+        )
+        self.assertEqual(
+            candidate["entry_policy_by_source"]["range_median"][
+                "weather_bypassable_hard_safety_flags"
+            ],
+            "source_health_block",
+        )
+        self.assertNotIn(
+            "weather_bypassable_hard_safety_flags",
+            candidate["entry_policy_by_source"]["range_high_band"],
+        )
+        strong_high_weather = weather_report()
+        high_with_source_health_block = source_entry_policy_decision(
+            candidate,
+            "range_high_band",
+            action_recommendation="blocked",
+            risk_context={
+                "recommended_posture": "risk_off",
+                "hard_safety_flags": ["source_health_block"],
+            },
+            weather_report=strong_high_weather,
+        )
+        self.assertFalse(high_with_source_health_block["allowed"])
+        self.assertEqual(
+            high_with_source_health_block["reason"],
+            "source_policy_hard_risk",
+        )
         weak_high_weather = weather_report()
         weak_high_weather["market_opportunity"][
             "entry_opportunity_score"
