@@ -26,6 +26,7 @@ ENTRY_POLICY_ALLOWED_FIELDS = ENTRY_POLICY_NUMERIC_FIELDS | {
     "authority",
     "allowed_phases",
     "hard_block_falling_tape",
+    "weather_bypassable_hard_safety_flags",
 }
 
 
@@ -109,31 +110,44 @@ def _weather_bot_decides(weather_report):
 
 def _hard_risk_blocked(
     action_recommendation,
-    action_policy,
+    _action_policy,
     risk_context,
     weather_report,
+    policy,
 ):
     weather_report = weather_report if isinstance(weather_report, dict) else {}
     risk_context = risk_context if isinstance(risk_context, dict) else {}
+    policy = policy if isinstance(policy, dict) else {}
     if weather_report.get("emergency_bell"):
         return True
     if str(weather_report.get("alert_level") or "").strip().lower() == "danger":
         return True
-    if str(action_recommendation or "").strip().lower() == "risk_off":
+    # A generic sentiment recommendation of "blocked" is not an emergency;
+    # source-specific authority may bypass it. Explicit risk_off never can.
+    normalized_action = str(action_recommendation or "").strip().lower()
+    if normalized_action == "risk_off":
         return True
-    if str(risk_context.get("recommended_posture") or "").strip().lower() in (
-        "risk_off",
-        "emergency_bell",
-    ):
+
+    hard_safety_flags = _tokens(risk_context.get("hard_safety_flags"))
+    bypassable_flags = _tokens(
+        policy.get("weather_bypassable_hard_safety_flags")
+    )
+    weather_bypasses_flags = bool(
+        hard_safety_flags
+        and _weather_bot_decides(weather_report)
+        and hard_safety_flags.issubset(bypassable_flags)
+    )
+
+    recommended_posture = str(
+        risk_context.get("recommended_posture") or ""
+    ).strip().lower()
+    if recommended_posture == "emergency_bell":
         return True
-    hard_safety_flags = risk_context.get("hard_safety_flags")
-    if isinstance(hard_safety_flags, list) and hard_safety_flags:
+    if recommended_posture == "risk_off" and not weather_bypasses_flags:
         return True
-    if isinstance(action_policy, dict) and action_policy.get("risk_off_blocks_longs"):
-        return str(action_recommendation or "").strip().lower() in (
-            "blocked",
-            "risk_off",
-        )
+    if hard_safety_flags and not weather_bypasses_flags:
+        return True
+
     return False
 
 
@@ -284,6 +298,7 @@ def source_entry_policy_decision(
         action_policy,
         risk_context,
         weather_report,
+        policy,
     ):
         return {
             "policy_enabled": True,
