@@ -369,6 +369,25 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
         self.assertEqual(weak_high["size_multiplier"], 0.0)
         self.assertNotIn("source_entry_policy_enabled", active)
 
+    def test_production_source_policy_profile_matches_proven_paper_candidate(self):
+        candidate_path = os.path.join(
+            ROOT,
+            "range_grid_strategy_price_first_source_policy_candidate.json",
+        )
+        production_path = os.path.join(
+            ROOT,
+            "range_grid_strategy_production_recovery_source_policy.json",
+        )
+        with open(candidate_path, encoding="utf-8") as handle:
+            candidate = json.load(handle)
+        with open(production_path, encoding="utf-8") as handle:
+            production = json.load(handle)
+
+        self.assertEqual(validate_strategy_config(production), [])
+        self.assertTrue(candidate.pop("paper_trading_enabled"))
+        self.assertFalse(production.pop("paper_trading_enabled"))
+        self.assertEqual(production, candidate)
+
 
 if __name__ == "__main__":
     unittest.main()
