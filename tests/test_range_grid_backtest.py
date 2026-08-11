@@ -585,7 +585,7 @@ class RangeGridBacktestTests(unittest.TestCase):
             confirmed_simulation["by_source"]["range_high_band"][
                 "placed_notional_usd"
             ],
-            39.6,
+            25.74,
         )
 
     def test_replay_applies_source_policy_size_and_entry_spacing(self):
@@ -1103,6 +1103,166 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(result["unfilled_entries"], 1)
         self.assertEqual(result["open_positions"], 0)
         self.assertEqual(result["net_return_on_starting_capital_pct"], 0.0)
+
+    def test_order_lifecycle_applies_low_band_minimum_order_floor(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                120_000.0,
+                strategy_overrides={
+                    "backtest_starting_cash_usd": 200.0,
+                    "max_inventory_usd": 1000.0,
+                    "min_buy_notional_usd": 8.0,
+                    "min_buy_volume_btc": 0.0001,
+                    "minimum_order_floor_enabled": True,
+                    "minimum_order_floor_sources": "range_low",
+                    "minimum_order_floor_usd": 8.0,
+                    "minimum_order_floor_cooldown_minutes": 60,
+                    "minimum_order_floor_cash_reserve_usd": 100.0,
+                },
+            )
+        ]
+        replay = {
+            "approved_events": [{
+                "captured_at": "2026-06-13T12:00:00+00:00",
+                "level": 120_000.0,
+                "buy_source": "range_low",
+                "effective_position_size_pct_before_inventory_pressure": 0.02,
+                "effective_max_inventory_usd": 1000.0,
+            }]
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(replay, snapshots)
+
+        self.assertEqual(result["orders_placed"], 1)
+        self.assertEqual(result["minimum_order_floor_applied"], 1)
+        self.assertEqual(result["ending_committed_inventory_usd"], 12.0)
+
+    def test_order_lifecycle_paces_floor_assisted_orders(self):
+        strategy = {
+            "backtest_starting_cash_usd": 200.0,
+            "max_inventory_usd": 1000.0,
+            "min_buy_notional_usd": 8.0,
+            "minimum_order_floor_enabled": True,
+            "minimum_order_floor_sources": "range_low",
+            "minimum_order_floor_usd": 8.0,
+            "minimum_order_floor_cooldown_minutes": 60,
+            "minimum_order_floor_cash_reserve_usd": 100.0,
+        }
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                95.0,
+                strategy_overrides=strategy,
+            ),
+            make_snapshot(
+                "2026-06-13T12:30:00+00:00",
+                95.0,
+                strategy_overrides=strategy,
+            ),
+        ]
+        replay = {
+            "approved_events": [
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "level": 100.0,
+                    "buy_source": "range_low",
+                    "effective_position_size_pct_before_inventory_pressure": 0.02,
+                    "effective_max_inventory_usd": 1000.0,
+                },
+                {
+                    "captured_at": "2026-06-13T12:30:00+00:00",
+                    "level": 99.0,
+                    "buy_source": "range_low",
+                    "effective_position_size_pct_before_inventory_pressure": 0.02,
+                    "effective_max_inventory_usd": 1000.0,
+                },
+            ]
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(replay, snapshots)
+
+        self.assertEqual(result["orders_placed"], 1)
+        self.assertEqual(result["minimum_order_floor_applied"], 1)
+        self.assertEqual(result["minimum_order_floor_cooldown_blocked"], 1)
+
+    def test_order_lifecycle_floor_preserves_cash_reserve(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                95.0,
+                strategy_overrides={
+                    "backtest_starting_cash_usd": 105.0,
+                    "max_inventory_usd": 1000.0,
+                    "min_buy_notional_usd": 8.0,
+                    "minimum_order_floor_enabled": True,
+                    "minimum_order_floor_sources": "range_low",
+                    "minimum_order_floor_usd": 8.0,
+                    "minimum_order_floor_cooldown_minutes": 60,
+                    "minimum_order_floor_cash_reserve_usd": 100.0,
+                },
+            )
+        ]
+        replay = {
+            "approved_events": [{
+                "captured_at": "2026-06-13T12:00:00+00:00",
+                "level": 100.0,
+                "buy_source": "range_low",
+                "effective_position_size_pct_before_inventory_pressure": 0.02,
+                "effective_max_inventory_usd": 1000.0,
+            }]
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(replay, snapshots)
+
+        self.assertEqual(result["orders_placed"], 0)
+        self.assertEqual(
+            result["minimum_order_floor_cash_reserve_blocked"],
+            1,
+        )
+
+    def test_order_lifecycle_recomputes_inventory_pressure(self):
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                95.0,
+                strategy_overrides={
+                    "backtest_starting_cash_usd": 200.0,
+                    "max_inventory_usd": 100.0,
+                    "inventory_hard_cap_enabled": False,
+                    "inventory_pressure_size_scaling_enabled": True,
+                    "inventory_pressure_start_usage_pct": 0.5,
+                    "inventory_pressure_min_size_multiplier": 0.25,
+                },
+            )
+        ]
+        replay = {
+            "approved_events": [
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "level": 100.0,
+                    "buy_source": "range_low",
+                    "effective_position_size_pct_before_inventory_pressure": 0.5,
+                    "effective_max_inventory_usd": 100.0,
+                },
+                {
+                    "captured_at": "2026-06-13T12:00:00+00:00",
+                    "level": 99.0,
+                    "buy_source": "range_low",
+                    "effective_position_size_pct_before_inventory_pressure": 0.5,
+                    "effective_max_inventory_usd": 100.0,
+                },
+            ]
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(replay, snapshots)
+
+        self.assertEqual(result["orders_placed"], 2)
+        self.assertAlmostEqual(
+            result["ending_committed_inventory_usd"],
+            112.5,
+            places=6,
+        )
 
     def test_order_lifecycle_realizes_profit_only_at_fee_inclusive_target(self):
         snapshots = [

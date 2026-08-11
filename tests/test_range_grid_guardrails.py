@@ -63,6 +63,38 @@ class RangeGridGuardrailsTests(unittest.TestCase):
         self.assertTrue(any("open_sell_hard_cap_enabled" in error for error in errors))
         self.assertTrue(any("flow_hard_block_enabled" in error for error in errors))
 
+    def test_validate_strategy_config_accepts_minimum_order_floor(self):
+        errors = guardrails.validate_strategy_config({
+            "minimum_order_floor_enabled": True,
+            "minimum_order_floor_sources": "range_low",
+            "minimum_order_floor_usd": 8.0,
+            "minimum_order_floor_cooldown_minutes": 60,
+            "minimum_order_floor_cash_reserve_usd": 100.0,
+        })
+
+        self.assertFalse(errors)
+
+    def test_validate_strategy_config_rejects_bad_minimum_order_floor(self):
+        errors = guardrails.validate_strategy_config({
+            "minimum_order_floor_enabled": "sometimes",
+            "minimum_order_floor_sources": "range_low,banana",
+            "minimum_order_floor_usd": 0,
+            "minimum_order_floor_cooldown_minutes": -1,
+            "minimum_order_floor_cash_reserve_usd": -1,
+        })
+
+        for field in (
+            "minimum_order_floor_enabled",
+            "minimum_order_floor_sources",
+            "minimum_order_floor_usd",
+            "minimum_order_floor_cooldown_minutes",
+            "minimum_order_floor_cash_reserve_usd",
+        ):
+            self.assertTrue(
+                any(field in error for error in errors),
+                msg=f"missing validation error for {field}: {errors}",
+            )
+
     def test_validate_strategy_config_rejects_out_of_bounds_execution_threshold(self):
         errors = guardrails.validate_strategy_config({
             "grid_anchor": "low,high",

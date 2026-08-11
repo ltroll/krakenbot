@@ -18,6 +18,7 @@ from range_grid_source_policy import (
     source_entry_policy_decision,
     source_entry_step_pct,
 )
+from range_grid_order_sizing import minimum_order_floor_decision
 from signal_normalizer import normalize_signal_payload
 
 
@@ -2842,6 +2843,13 @@ def simulate_approved_order_lifecycle(replay, snapshots):
             if configured_max_inventory_usd != float("inf")
             else 1000.0
         )
+    starting_deployed_inventory_usd = max(
+        0.0,
+        safe_float(
+            first_config.get("backtest_starting_deployed_inventory_usd")
+        )
+        or 0.0,
+    )
     raw_bucket_caps = first_config.get("max_inventory_usd_by_bucket")
     bucket_caps = {}
     if bucket_inventory_hard_caps_enabled and isinstance(raw_bucket_caps, dict):
@@ -2862,6 +2870,7 @@ def simulate_approved_order_lifecycle(replay, snapshots):
     max_drawdown_pct = 0.0
     counts = Counter()
     source_stats = defaultdict(Counter)
+    last_minimum_order_floor_at_by_source = {}
 
     def committed_inventory_usd():
         return sum(order["entry_notional_usd"] for order in pending_orders) + sum(
@@ -2962,6 +2971,15 @@ def simulate_approved_order_lifecycle(replay, snapshots):
                 continue
 
             config = strategy_payload(snapshot)
+            if (
+                event.get(
+                    "modeled_stale_level_reanchor_profit_guard_allowed"
+                )
+                is False
+            ):
+                counts["modeled_profit_guard_blocked"] += 1
+                source_stats[buy_source]["modeled_profit_guard_blocked"] += 1
+                continue
             max_open_high_anchor_orders = int(
                 safe_float(config.get("max_open_high_anchor_orders")) or 0
             )
@@ -3002,21 +3020,70 @@ def simulate_approved_order_lifecycle(replay, snapshots):
                     ] += 1
                     continue
 
-            size_multiplier = safe_float(
-                event.get("risk_context_position_size_effective_multiplier")
+            effective_position_size_pct = safe_float(
+                event.get(
+                    "effective_position_size_pct_before_inventory_pressure"
+                )
             )
-            if size_multiplier is None:
-                size_multiplier = 1.0
-            position_size_pct = safe_float(config.get("position_size_pct"))
-            if position_size_pct is None:
-                position_size_pct = 0.10
-            position_size_pct = max(0.0, position_size_pct)
+            event_effective_max_inventory_usd = safe_float(
+                event.get("effective_max_inventory_usd")
+            )
+            if (
+                event_effective_max_inventory_usd is None
+                or event_effective_max_inventory_usd <= 0
+            ):
+                event_effective_max_inventory_usd = max_inventory_usd
+            if effective_position_size_pct is None:
+                size_multiplier = safe_float(
+                    event.get(
+                        "risk_context_position_size_effective_multiplier"
+                    )
+                )
+                if size_multiplier is None:
+                    size_multiplier = 1.0
+                position_size_pct = safe_float(config.get("position_size_pct"))
+                if position_size_pct is None:
+                    position_size_pct = 0.10
+                effective_position_size_pct = (
+                    max(0.0, position_size_pct)
+                    * max(0.0, size_multiplier)
+                )
+            simulated_deployed_inventory_usd = (
+                starting_deployed_inventory_usd + committed_inventory_usd()
+            )
+            inventory_pressure = inventory_pressure_adjustment(
+                simulated_deployed_inventory_usd,
+                event_effective_max_inventory_usd,
+                config,
+            )
+            stale_reanchor_size_multiplier = safe_float(
+                event.get("modeled_stale_level_reanchor_size_multiplier")
+            )
+            if stale_reanchor_size_multiplier is None:
+                stale_reanchor_size_multiplier = 1.0
+            stale_reanchor_size_multiplier = max(
+                0.0,
+                stale_reanchor_size_multiplier,
+            )
             requested_notional = (
-                available_cash_usd * position_size_pct * max(0.0, size_multiplier)
+                available_cash_usd
+                * max(0.0, effective_position_size_pct)
+                * inventory_pressure["size_multiplier"]
+                * stale_reanchor_size_multiplier
             )
-            remaining_inventory_capacity = max_inventory_usd - committed_inventory_usd()
+            remaining_inventory_capacity = (
+                event_effective_max_inventory_usd
+                - simulated_deployed_inventory_usd
+                if inventory_hard_cap_enabled
+                else float("inf")
+            )
             bucket = buy_source_bucket(buy_source)
             bucket_cap = bucket_caps.get(bucket)
+            if bucket_cap is not None:
+                bucket_cap = min(
+                    bucket_cap,
+                    event_effective_max_inventory_usd,
+                )
             remaining_bucket_capacity = (
                 bucket_cap - committed_bucket_inventory_usd(bucket)
                 if bucket_cap is not None
@@ -3040,9 +3107,53 @@ def simulate_approved_order_lifecycle(replay, snapshots):
                 counts["capital_or_inventory_blocked"] += 1
                 source_stats[buy_source]["capital_or_inventory_blocked"] += 1
                 continue
+            min_buy_volume = max(
+                0.0,
+                safe_float(config.get("min_buy_volume_asset"))
+                or safe_float(config.get("min_buy_volume_btc"))
+                or 0.0,
+            )
+            minimum_floor = minimum_order_floor_decision(
+                config,
+                buy_source=buy_source,
+                available_usd=available_cash_usd,
+                calculated_notional_usd=entry_notional,
+                min_buy_notional_usd=min_notional,
+                order_price=entry_price,
+                min_buy_volume_asset=min_buy_volume,
+                now=captured_at,
+                last_floor_at_by_source=(
+                    last_minimum_order_floor_at_by_source
+                ),
+            )
+            if minimum_floor["applied"]:
+                entry_notional = minimum_floor["floor_notional_usd"]
+                volume = max(
+                    entry_notional / entry_price,
+                    min_buy_volume,
+                )
+                entry_notional = volume * entry_price
+            if (
+                entry_notional > remaining_inventory_capacity
+                or entry_notional > remaining_bucket_capacity
+            ):
+                counts["capital_or_inventory_blocked"] += 1
+                source_stats[buy_source]["capital_or_inventory_blocked"] += 1
+                continue
             if entry_notional < min_notional:
-                counts["below_min_notional"] += 1
-                source_stats[buy_source]["below_min_notional"] += 1
+                floor_reason = minimum_floor.get("reason")
+                count_key = (
+                    f"minimum_order_floor_{floor_reason}_blocked"
+                    if floor_reason in ("cash_reserve", "cooldown")
+                    else "below_min_notional"
+                )
+                counts[count_key] += 1
+                source_stats[buy_source][count_key] += 1
+                continue
+            volume = entry_notional / entry_price
+            if volume < min_buy_volume:
+                counts["below_min_volume"] += 1
+                source_stats[buy_source]["below_min_volume"] += 1
                 continue
 
             profit_target_pct = approved_event_profit_target_pct(snapshot, event)
@@ -3056,7 +3167,18 @@ def simulate_approved_order_lifecycle(replay, snapshots):
                 "strategy_mode": event.get("strategy_mode"),
                 "entry_price": entry_price,
                 "entry_notional_usd": entry_notional,
-                "volume": entry_notional / entry_price,
+                "volume": volume,
+                "minimum_order_floor_applied": minimum_floor["applied"],
+                "minimum_order_floor_reason": minimum_floor["reason"],
+                "calculated_entry_notional_usd": minimum_floor[
+                    "calculated_notional_usd"
+                ],
+                "inventory_pressure_usage_ratio": inventory_pressure[
+                    "usage_ratio"
+                ],
+                "inventory_pressure_size_multiplier": inventory_pressure[
+                    "size_multiplier"
+                ],
                 "profit_target_pct": profit_target_pct,
                 "round_trip_fee_pct": round_trip_fee_pct,
                 "sell_target_price": entry_price * (
@@ -3067,6 +3189,12 @@ def simulate_approved_order_lifecycle(replay, snapshots):
             counts["orders_placed"] += 1
             source_stats[buy_source]["orders_placed"] += 1
             source_stats[buy_source]["placed_notional_usd"] += entry_notional
+            if minimum_floor["applied"]:
+                counts["minimum_order_floor_applied"] += 1
+                source_stats[buy_source]["minimum_order_floor_applied"] += 1
+                last_minimum_order_floor_at_by_source[buy_source] = (
+                    captured_at.isoformat()
+                )
             if price <= entry_price:
                 order["filled_at"] = captured_at.isoformat()
                 open_positions.append(order)
@@ -3133,6 +3261,10 @@ def simulate_approved_order_lifecycle(replay, snapshots):
 
     return {
         "starting_cash_usd": round(starting_cash_usd, 8),
+        "starting_deployed_inventory_usd": round(
+            starting_deployed_inventory_usd,
+            8,
+        ),
         "ending_equity_usd": round(ending_equity_usd, 8),
         "approved_candidates": counts["approved_candidates"],
         "orders_placed": counts["orders_placed"],
@@ -3147,6 +3279,19 @@ def simulate_approved_order_lifecycle(replay, snapshots):
             "max_open_high_anchor_orders_blocked"
         ],
         "below_min_notional": counts["below_min_notional"],
+        "below_min_volume": counts["below_min_volume"],
+        "minimum_order_floor_applied": counts[
+            "minimum_order_floor_applied"
+        ],
+        "minimum_order_floor_cooldown_blocked": counts[
+            "minimum_order_floor_cooldown_blocked"
+        ],
+        "minimum_order_floor_cash_reserve_blocked": counts[
+            "minimum_order_floor_cash_reserve_blocked"
+        ],
+        "modeled_profit_guard_blocked": counts[
+            "modeled_profit_guard_blocked"
+        ],
         "fill_rate_after_placement": (
             round(fill_rate, 6) if fill_rate is not None else None
         ),
@@ -3167,7 +3312,10 @@ def simulate_approved_order_lifecycle(replay, snapshots):
         "assumptions": [
             "Approved candidates become GTC limit buys; no fill is assumed until a captured price touches the limit.",
             "Sell targets include the configured profit margin plus round_trip_fee_pct, matching live target construction.",
-            "Position sizing consumes simulated available cash and respects max_inventory_usd and min_buy_notional_usd.",
+            "Position sizing applies the live sentiment regime, smoothed risk, risk-context, source-policy, flow, leveling, and evolving inventory-pressure multipliers.",
+            "The configured low-band minimum-order floor is modeled after all gates, including its cash reserve and cooldown.",
+            "Position sizing consumes simulated available cash and respects effective max inventory, bucket inventory, minimum notional, and minimum volume constraints.",
+            "backtest_starting_deployed_inventory_usd affects sizing and capacity but is not included in simulated P&L.",
             "High-band orders respect max_open_high_anchor_orders, including configured aged-sell exposure weighting.",
             "Fills occur at the configured limit or target price without favorable price improvement or slippage.",
         ],
@@ -3219,6 +3367,8 @@ def summarize_potential_from_approved_events(replay, snapshots):
             )
             potential["stale_level_reanchor_group"] = reanchor_key
             modeled_profit_guard_key = "not_applicable"
+            event["modeled_stale_level_reanchor_profit_guard_allowed"] = None
+            event["modeled_stale_level_reanchor_size_multiplier"] = 1.0
             if event.get("stale_level_reanchor_applied") and strategy_bool(
                 config,
                 "stale_level_reanchor_profit_guard_enabled",
@@ -3273,45 +3423,6 @@ def summarize_potential_from_approved_events(replay, snapshots):
                     allowed = not fail_closed
                     reason = "insufficient_modeled_profit_samples"
                     projected_avg = None
-                    weather_report = {
-                        "mode": "weather_report",
-                        "bot_decision_authority": "bot",
-                        "trade_permission": "bot_decides",
-                        "alert_level": event.get("weather_alert_level"),
-                        "emergency_bell": safe_bool(
-                            event.get("weather_emergency_bell")
-                        ),
-                        "market_stability": {
-                            "stabilization_score": event.get(
-                                "weather_stabilization_score"
-                            ),
-                        },
-                        "trend_pressure": {
-                            "falling_tape": safe_bool(
-                                event.get("weather_falling_tape")
-                            ),
-                        },
-                        "market_opportunity": {
-                            "cycle_phase": event.get(
-                                "weather_opportunity_phase"
-                            ),
-                            "entry_opportunity_score": event.get(
-                                "weather_entry_opportunity_score"
-                            ),
-                        },
-                    }
-                    bypass = low_dip_leveling_profit_guard_bypass(
-                        config,
-                        event.get("buy_source"),
-                        weather_report,
-                    )
-                    if not allowed and bypass.get("allowed"):
-                        allowed = True
-                        reason = bypass.get("reason")
-                        size_multiplier *= bypass.get("size_multiplier") or 1.0
-                        potential[
-                            "risk_context_position_size_effective_multiplier"
-                        ] = size_multiplier
                 else:
                     projected_avg = (
                         (avg_return * sample_count) + assumed_return
@@ -3323,12 +3434,39 @@ def summarize_potential_from_approved_events(replay, snapshots):
                         else "projected_modeled_avg_return_below_target"
                     )
 
+                bypass_multiplier = 1.0
+                if not allowed:
+                    weather_report = weather_report_payload(
+                        risk_context_payload(signal_payload(snapshot))
+                    )
+                    bypass = low_dip_leveling_profit_guard_bypass(
+                        config,
+                        event.get("buy_source"),
+                        weather_report,
+                    )
+                    if bypass.get("allowed"):
+                        allowed = True
+                        reason = bypass.get("reason")
+                        bypass_multiplier = (
+                            safe_float(bypass.get("size_multiplier")) or 1.0
+                        )
+                        size_multiplier *= bypass_multiplier
+                        potential[
+                            "risk_context_position_size_effective_multiplier"
+                        ] = size_multiplier
+
                 modeled_profit_guard_key = "allowed" if allowed else "blocked"
                 modeled_reanchor_profit_guard_counts[modeled_profit_guard_key] += 1
                 if reason:
                     modeled_reanchor_profit_guard_reason_counts[reason] += 1
                 potential["modeled_stale_level_reanchor_profit_guard_allowed"] = (
                     allowed
+                )
+                event[
+                    "modeled_stale_level_reanchor_profit_guard_allowed"
+                ] = allowed
+                event["modeled_stale_level_reanchor_size_multiplier"] = (
+                    bypass_multiplier
                 )
                 potential["modeled_stale_level_reanchor_profit_guard_reason"] = (
                     reason
@@ -3960,6 +4098,22 @@ def build_strategy_comparison_rows(
             ),
             "simulation_max_open_high_anchor_orders_blocked": simulation.get(
                 "max_open_high_anchor_orders_blocked"
+            ),
+            "simulation_below_min_notional": simulation.get(
+                "below_min_notional"
+            ),
+            "simulation_below_min_volume": simulation.get("below_min_volume"),
+            "simulation_minimum_order_floor_applied": simulation.get(
+                "minimum_order_floor_applied"
+            ),
+            "simulation_minimum_order_floor_cooldown_blocked": simulation.get(
+                "minimum_order_floor_cooldown_blocked"
+            ),
+            "simulation_minimum_order_floor_cash_reserve_blocked": (
+                simulation.get("minimum_order_floor_cash_reserve_blocked")
+            ),
+            "simulation_modeled_profit_guard_blocked": simulation.get(
+                "modeled_profit_guard_blocked"
             ),
             "simulation_by_source": json.dumps(
                 simulation.get("by_source") or {},
@@ -4630,6 +4784,12 @@ def write_strategy_comparison_csv(comparison, output_path):
         "simulation_capital_or_inventory_blocked",
         "simulation_bucket_inventory_blocked",
         "simulation_max_open_high_anchor_orders_blocked",
+        "simulation_below_min_notional",
+        "simulation_below_min_volume",
+        "simulation_minimum_order_floor_applied",
+        "simulation_minimum_order_floor_cooldown_blocked",
+        "simulation_minimum_order_floor_cash_reserve_blocked",
+        "simulation_modeled_profit_guard_blocked",
         "simulation_by_source",
         "simulation_filled_range_low",
         "simulation_closed_range_low",
@@ -4761,6 +4921,12 @@ def write_ranked_strategy_csv(comparison, output_path):
         "simulation_capital_or_inventory_blocked",
         "simulation_bucket_inventory_blocked",
         "simulation_max_open_high_anchor_orders_blocked",
+        "simulation_below_min_notional",
+        "simulation_below_min_volume",
+        "simulation_minimum_order_floor_applied",
+        "simulation_minimum_order_floor_cooldown_blocked",
+        "simulation_minimum_order_floor_cash_reserve_blocked",
+        "simulation_modeled_profit_guard_blocked",
         "simulation_by_source",
         "simulation_filled_range_low",
         "simulation_closed_range_low",
@@ -5222,6 +5388,124 @@ def risk_context_position_size_adjustment(config, risk_context):
     }
 
 
+def replay_sentiment_regime(config, signal):
+    execution_signal = safe_float(signal.get("execution_signal"))
+    if execution_signal is None:
+        execution_signal = 0.0
+    execution_threshold = strategy_float(
+        config,
+        "execution_signal_threshold",
+        0.0,
+    )
+    defensive_threshold = strategy_float(
+        config,
+        "sentiment_defensive_threshold",
+        max(0.03, execution_threshold),
+    )
+    risk_on_threshold = strategy_float(
+        config,
+        "sentiment_risk_on_threshold",
+        0.12,
+    )
+    action_recommendation = str(
+        signal.get("action_recommendation") or "neutral"
+    ).strip().lower()
+    action_policy = signal.get("action_policy")
+    operating_mode = str(
+        config.get("operating_mode", "range_plus_llm") or "range_plus_llm"
+    ).strip().lower()
+    control_mode = normalize_sentiment_control_mode(
+        config.get("sentiment_control_mode"),
+        operating_mode,
+    )
+    risk_modulated_core_override = (
+        execution_signal < execution_threshold
+        and control_mode == "risk_modulated"
+        and operating_mode in ("range_plus_llm", "range_only")
+        and action_recommendation in ("blocked", "contrarian_watch")
+        and not is_risk_off_block(action_recommendation, action_policy)
+    )
+
+    if execution_signal < execution_threshold and not risk_modulated_core_override:
+        return {
+            "name": "paused",
+            "position_size_multiplier": strategy_float(
+                config,
+                "sentiment_paused_size_multiplier",
+                0.0,
+            ),
+            "inventory_multiplier": strategy_float(
+                config,
+                "sentiment_paused_inventory_multiplier",
+                0.0,
+            ),
+            "open_sell_multiplier": strategy_float(
+                config,
+                "sentiment_paused_open_sell_multiplier",
+                0.0,
+            ),
+        }
+    if execution_signal < defensive_threshold or risk_modulated_core_override:
+        return {
+            "name": (
+                "risk_modulated_defensive"
+                if risk_modulated_core_override
+                else "defensive"
+            ),
+            "position_size_multiplier": strategy_float(
+                config,
+                "sentiment_defensive_size_multiplier",
+                0.65,
+            ),
+            "inventory_multiplier": strategy_float(
+                config,
+                "sentiment_defensive_inventory_multiplier",
+                0.7,
+            ),
+            "open_sell_multiplier": strategy_float(
+                config,
+                "sentiment_defensive_open_sell_multiplier",
+                0.75,
+            ),
+        }
+    if execution_signal >= risk_on_threshold:
+        return {
+            "name": "risk_on",
+            "position_size_multiplier": strategy_float(
+                config,
+                "sentiment_risk_on_size_multiplier",
+                1.2,
+            ),
+            "inventory_multiplier": strategy_float(
+                config,
+                "sentiment_risk_on_inventory_multiplier",
+                1.2,
+            ),
+            "open_sell_multiplier": strategy_float(
+                config,
+                "sentiment_risk_on_open_sell_multiplier",
+                1.25,
+            ),
+        }
+    return {
+        "name": "neutral",
+        "position_size_multiplier": 1.0,
+        "inventory_multiplier": 1.0,
+        "open_sell_multiplier": 1.0,
+    }
+
+
+def replay_smoothed_risk_multiplier(config, signal):
+    floor = strategy_float(config, "risk_multiplier_floor", 0.75)
+    ceiling = strategy_float(config, "risk_multiplier_ceiling", 1.15)
+    lower = min(floor, ceiling)
+    upper = max(floor, ceiling)
+    raw = safe_float(signal.get("smoothed_risk_multiplier"))
+    if raw is None:
+        raw = 1.0
+    return max(lower, min(upper, raw))
+
+
 def find_llm_target(signal, price, llm_target_proximity_pct):
     targets = signal.get("target_prices")
     if not isinstance(targets, list):
@@ -5393,18 +5677,27 @@ def build_candidates(snapshot, price):
             realized_volatility_pct,
             config,
         )
-    effective_max_inventory_usd = safe_float(config.get("max_inventory_usd")) or float("inf")
+    regime = replay_sentiment_regime(config, signal)
+    smoothed_risk_multiplier = replay_smoothed_risk_multiplier(config, signal)
+    risk_context_size_adjustment = risk_context_position_size_adjustment(
+        config,
+        risk_context,
+    )
+    configured_max_inventory_usd = safe_float(config.get("max_inventory_usd"))
+    effective_max_inventory_usd = (
+        configured_max_inventory_usd
+        * max(0.0, regime["inventory_multiplier"])
+        * smoothed_risk_multiplier
+        * max(0.0, risk_context_size_adjustment["effective_multiplier"])
+        if configured_max_inventory_usd is not None
+        else float("inf")
+    )
     deployed_inventory_usd = safe_float(state_info.get("deployed_inventory_usd")) or 0.0
     inventory_pressure = inventory_pressure_adjustment(
         deployed_inventory_usd,
         effective_max_inventory_usd,
         config,
     )
-    risk_context_size_adjustment = risk_context_position_size_adjustment(
-        config,
-        risk_context,
-    )
-
     result = {
         "freshness_allows_trading": freshness_allows_trading,
         "freshness_block_reason": freshness_block_reason,
@@ -5422,6 +5715,15 @@ def build_candidates(snapshot, price):
         "action_recommendation": action_recommendation,
         "strategy_modes": strategy_modes,
         "effective_entry_step_pct": effective_step_pct,
+        "sentiment_regime": regime["name"],
+        "sentiment_regime_position_size_multiplier": (
+            regime["position_size_multiplier"]
+        ),
+        "sentiment_regime_inventory_multiplier": (
+            regime["inventory_multiplier"]
+        ),
+        "smoothed_risk_multiplier": smoothed_risk_multiplier,
+        "effective_max_inventory_usd": effective_max_inventory_usd,
         "inventory_pressure_usage_ratio": inventory_pressure["usage_ratio"],
         "inventory_pressure_size_multiplier": inventory_pressure["size_multiplier"],
         "risk_context_position_sizing_enabled": (
@@ -5973,6 +6275,45 @@ def replay_from_snapshots(snapshots):
             if source_policy_size_multiplier is None:
                 source_policy_size_multiplier = 1.0
             effective_size_multiplier *= source_policy_size_multiplier
+            flow_pressure = safe_float(signal.get("flow_pressure"))
+            flow_control = flow_adjustment(
+                strategy_payload(snapshot),
+                flow_pressure,
+                candidate["buy_source"],
+            )
+            base_position_size_pct = safe_float(
+                strategy_payload(snapshot).get("position_size_pct")
+            )
+            if base_position_size_pct is None:
+                base_position_size_pct = 0.10
+            effective_position_size_pct_before_inventory_pressure = (
+                max(0.0, base_position_size_pct)
+                * max(
+                    0.0,
+                    safe_float(
+                        built.get(
+                            "sentiment_regime_position_size_multiplier"
+                        )
+                    )
+                    or 0.0,
+                )
+                * max(
+                    0.0,
+                    safe_float(built.get("smoothed_risk_multiplier")) or 0.0,
+                )
+                * max(
+                    0.0,
+                    safe_float(
+                        built.get(
+                            "risk_context_position_size_effective_multiplier"
+                        )
+                    )
+                    or 0.0,
+                )
+                * max(0.0, leveling_size_multiplier)
+                * max(0.0, source_policy_size_multiplier)
+                * max(0.0, flow_control["size_multiplier"])
+            )
             cooldown = buy_cooldown_status(
                 strategy_payload(snapshot),
                 candidate["buy_source"],
@@ -6029,6 +6370,36 @@ def replay_from_snapshots(snapshots):
                     ),
                     "inventory_pressure_size_multiplier": built.get(
                         "inventory_pressure_size_multiplier"
+                    ),
+                    "sentiment_regime": built.get("sentiment_regime"),
+                    "sentiment_regime_position_size_multiplier": built.get(
+                        "sentiment_regime_position_size_multiplier"
+                    ),
+                    "sentiment_regime_inventory_multiplier": built.get(
+                        "sentiment_regime_inventory_multiplier"
+                    ),
+                    "smoothed_risk_multiplier": built.get(
+                        "smoothed_risk_multiplier"
+                    ),
+                    "effective_max_inventory_usd": built.get(
+                        "effective_max_inventory_usd"
+                    ),
+                    "flow_control_size_multiplier": flow_control[
+                        "size_multiplier"
+                    ],
+                    "effective_position_size_pct_before_inventory_pressure": (
+                        effective_position_size_pct_before_inventory_pressure
+                    ),
+                    "simulated_snapshot_effective_position_size_pct": (
+                        effective_position_size_pct_before_inventory_pressure
+                        * (
+                            safe_float(
+                                built.get(
+                                    "inventory_pressure_size_multiplier"
+                                )
+                            )
+                            or 0.0
+                        )
                     ),
                     "risk_context_position_sizing_enabled": built.get(
                         "risk_context_position_sizing_enabled"

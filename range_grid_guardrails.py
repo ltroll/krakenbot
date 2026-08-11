@@ -81,6 +81,7 @@ def validate_strategy_config(strategy_config):
         "sell_backlog_hard_block_enabled",
         "open_sell_hard_cap_enabled",
         "flow_hard_block_enabled",
+        "minimum_order_floor_enabled",
     )
     for field in boolean_fields:
         if field in strategy_config and not isinstance(
@@ -98,6 +99,7 @@ def validate_strategy_config(strategy_config):
         "position_size_pct",
         "min_buy_notional_usd",
         "min_buy_volume_btc",
+        "minimum_order_floor_usd",
         "price_check_interval_seconds",
         "range_refresh_interval_minutes",
         "max_open_sell_orders",
@@ -134,6 +136,8 @@ def validate_strategy_config(strategy_config):
         "stale_level_reanchor_max_above_level_pct",
         "stale_level_reanchor_profit_lookback_hours",
         "stale_level_reanchor_profit_min_samples",
+        "minimum_order_floor_cooldown_minutes",
+        "minimum_order_floor_cash_reserve_usd",
     )
     for field in non_negative_numeric_fields:
         value = strategy_config.get(field)
@@ -245,6 +249,25 @@ def validate_strategy_config(strategy_config):
                     continue
                 if numeric <= 0:
                     errors.append(f"max_inventory_usd_by_bucket.{bucket} must be > 0")
+
+    floor_sources = strategy_config.get("minimum_order_floor_sources")
+    if floor_sources is not None:
+        if isinstance(floor_sources, str):
+            parsed_floor_sources = floor_sources.split(",")
+        elif isinstance(floor_sources, (list, tuple)):
+            parsed_floor_sources = floor_sources
+        else:
+            parsed_floor_sources = []
+            errors.append(
+                "minimum_order_floor_sources must be a string or list"
+            )
+        for source in parsed_floor_sources:
+            normalized_source = str(source or "").strip().lower()
+            if normalized_source not in VALID_BUY_SOURCES:
+                errors.append(
+                    "minimum_order_floor_sources contains unsupported source: "
+                    f"{source}"
+                )
 
     source_numeric_maps = {
         "sell_target_offset_pct_by_source": ("numeric", None),

@@ -42,6 +42,7 @@ from range_grid_order_safety import (
     order_execution,
     order_limit_price,
 )
+from range_grid_order_sizing import minimum_order_floor_decision
 from range_grid_source_policy import (
     source_entry_policy_decision,
     source_entry_step_pct,
@@ -2800,6 +2801,7 @@ def load_state():
         "last_range_refresh": None,
         "last_buy_at": None,
         "last_buy_at_by_source": {},
+        "last_minimum_order_floor_at_by_source": {},
         "last_activity_summary_at": None,
         "last_sell_extension_shadow_at_by_txid": {},
         "last_high_anchor_buy_at": None,
@@ -2821,6 +2823,10 @@ def load_state():
             "buy_volume_filled": 0.0,
             "sell_volume_filled": 0.0,
             "buy_order_rejections": 0,
+            "buy_candidates_skipped_by_reason": {},
+            "minimum_order_floor_orders_placed": 0,
+            "minimum_order_floor_orders_placed_by_source": {},
+            "minimum_order_floor_blocks_by_reason": {},
             "realized_gross_pnl": 0.0,
             "realized_estimated_net_pnl": 0.0,
             "approved_counts_by_source": {},
@@ -2865,10 +2871,13 @@ def normalize_state(state):
     state.setdefault("processed_fills", {})
     state.setdefault("pending_order_intents", {})
     state.setdefault("last_alerts", {})
+    state.setdefault("last_minimum_order_floor_at_by_source", {})
     if not isinstance(state["pending_order_intents"], dict):
         state["pending_order_intents"] = {}
     if not isinstance(state["last_alerts"], dict):
         state["last_alerts"] = {}
+    if not isinstance(state["last_minimum_order_floor_at_by_source"], dict):
+        state["last_minimum_order_floor_at_by_source"] = {}
     state["consecutive_loop_errors"] = int(state.get("consecutive_loop_errors", 0) or 0)
     state["consecutive_private_api_failures"] = int(
         state.get("consecutive_private_api_failures", 0) or 0
@@ -2891,6 +2900,10 @@ def normalize_state(state):
         "buy_volume_filled": 0.0,
         "sell_volume_filled": 0.0,
         "buy_order_rejections": 0,
+        "buy_candidates_skipped_by_reason": {},
+        "minimum_order_floor_orders_placed": 0,
+        "minimum_order_floor_orders_placed_by_source": {},
+        "minimum_order_floor_blocks_by_reason": {},
         "realized_gross_pnl": 0.0,
         "realized_estimated_net_pnl": 0.0,
         "approved_counts_by_source": {},
@@ -3936,6 +3949,14 @@ def record_buy_cooldown_timestamp(buy_source, timestamp):
     source_map = state.setdefault("last_buy_at_by_source", {})
     source_map[buy_source] = timestamp
     source_map[buy_source_bucket(buy_source)] = timestamp
+
+
+def record_minimum_order_floor_timestamp(buy_source, timestamp):
+    source_map = state.setdefault(
+        "last_minimum_order_floor_at_by_source",
+        {},
+    )
+    source_map[str(buy_source or "unknown")] = timestamp
 
 
 def llm_sell_cooldown_remaining_minutes(now):
@@ -6153,6 +6174,7 @@ def main():
         message="Range Grid Average bot starting",
         **instance_identity,
         config_file=CONFIG_FILE,
+        strategy_profile=STRATEGY_PROFILE,
         operating_mode=operating_mode,
         paper_trading_enabled=paper_trading_enabled,
         risk_context_shadow_buy_enabled=risk_context_shadow_buy_enabled,
@@ -6168,6 +6190,26 @@ def main():
         min_buy_notional_usd=min_buy_notional_usd,
         min_buy_volume_asset=min_buy_volume_asset,
         min_buy_volume_btc=min_buy_volume_btc,
+        minimum_order_floor_enabled=profile_bool(
+            "minimum_order_floor_enabled",
+            False,
+        ),
+        minimum_order_floor_sources=profile_str(
+            "minimum_order_floor_sources",
+            "range_low",
+        ),
+        minimum_order_floor_usd=profile_float(
+            "minimum_order_floor_usd",
+            min_buy_notional_usd,
+        ),
+        minimum_order_floor_cooldown_minutes=profile_float(
+            "minimum_order_floor_cooldown_minutes",
+            0.0,
+        ),
+        minimum_order_floor_cash_reserve_usd=profile_float(
+            "minimum_order_floor_cash_reserve_usd",
+            0.0,
+        ),
         execution_signal_threshold=execution_signal_threshold,
         llm_target_proximity_pct=llm_target_proximity_pct,
         llm_target_min_signal=llm_target_min_signal,
@@ -6466,6 +6508,7 @@ def main():
             cycle_id = now.isoformat()
             actions = []
             deduped_candidates = []
+            cycle_candidate_skip_reason_counts = {}
             active_strategy_modes = list(strategy_modes)
 
             # Periodically resync tracked state against Kraken as source of truth.
@@ -8523,6 +8566,26 @@ def main():
                             source_policy_size_multiplier
                         ),
                     }
+                    minimum_floor = {
+                        "enabled": strategy_bool_with_fallback(
+                            route_config,
+                            strategy_config,
+                            "minimum_order_floor_enabled",
+                            False,
+                        ),
+                        "eligible_source": False,
+                        "applied": False,
+                        "reason": "not_evaluated",
+                        "calculated_notional_usd": 0.0,
+                        "floor_notional_usd": candidate_min_buy_notional_usd,
+                        "cash_reserve_usd": 0.0,
+                        "cooldown_minutes": 0.0,
+                        "cooldown_remaining_minutes": 0.0,
+                    }
+                    minimum_floor_config = {
+                        **strategy_config,
+                        **route_config,
+                    }
                     above_last_sell_breakout_bypass = (
                         allow_above_last_sell_for_candidate(
                             route_config,
@@ -8737,9 +8800,58 @@ def main():
 
                     if (
                         skip_reason is None
+                        and (
+                            trade_notional_usd
+                            < candidate_min_buy_notional_usd
+                            or volume < candidate_min_buy_volume_btc
+                        )
+                    ):
+                        minimum_floor = minimum_order_floor_decision(
+                            minimum_floor_config,
+                            buy_source=buy_source,
+                            available_usd=available_usd,
+                            calculated_notional_usd=trade_notional_usd,
+                            min_buy_notional_usd=(
+                                candidate_min_buy_notional_usd
+                            ),
+                            order_price=level,
+                            min_buy_volume_asset=(
+                                candidate_min_buy_volume_btc
+                            ),
+                            now=now,
+                            last_floor_at_by_source=state.get(
+                                "last_minimum_order_floor_at_by_source",
+                                {},
+                            ),
+                        )
+                        if minimum_floor["applied"]:
+                            trade_notional_usd = minimum_floor[
+                                "floor_notional_usd"
+                            ]
+                            volume = max(
+                                trade_notional_usd / level,
+                                candidate_min_buy_volume_btc,
+                            )
+                            trade_notional_usd = level * volume
+                            projected_inventory_usd = (
+                                deployed_inventory_usd + trade_notional_usd
+                            )
+                            projected_bucket_inventory_usd = (
+                                bucket_inventory_usd + trade_notional_usd
+                            )
+
+                    if (
+                        skip_reason is None
                         and trade_notional_usd < candidate_min_buy_notional_usd
                     ):
-                        skip_reason = "below_min_notional"
+                        floor_reason = minimum_floor.get("reason")
+                        skip_reason = (
+                            "minimum_order_floor_" + floor_reason
+                            if minimum_floor.get("enabled")
+                            and minimum_floor.get("eligible_source")
+                            and floor_reason in ("cash_reserve", "cooldown")
+                            else "below_min_notional"
+                        )
 
                     if (
                         skip_reason is None
@@ -8758,7 +8870,44 @@ def main():
                         skip_reason = "bucket_max_inventory_usd"
 
                     if skip_reason is None and volume < candidate_min_buy_volume_btc:
-                        skip_reason = "below_min_volume"
+                        floor_reason = minimum_floor.get("reason")
+                        skip_reason = (
+                            "minimum_order_floor_" + floor_reason
+                            if minimum_floor.get("enabled")
+                            and minimum_floor.get("eligible_source")
+                            and floor_reason in ("cash_reserve", "cooldown")
+                            else "below_min_volume"
+                        )
+
+                    minimum_order_floor_log_fields = {
+                        "minimum_order_floor_enabled": minimum_floor.get(
+                            "enabled"
+                        ),
+                        "minimum_order_floor_applied": minimum_floor.get(
+                            "applied"
+                        ),
+                        "minimum_order_floor_reason": minimum_floor.get(
+                            "reason"
+                        ),
+                        "minimum_order_floor_calculated_notional_usd": (
+                            minimum_floor.get("calculated_notional_usd")
+                        ),
+                        "minimum_order_floor_usd": minimum_floor.get(
+                            "floor_notional_usd"
+                        ),
+                        "minimum_order_floor_min_volume_notional_usd": (
+                            minimum_floor.get("min_volume_notional_usd")
+                        ),
+                        "minimum_order_floor_cash_reserve_usd": (
+                            minimum_floor.get("cash_reserve_usd")
+                        ),
+                        "minimum_order_floor_cooldown_minutes": (
+                            minimum_floor.get("cooldown_minutes")
+                        ),
+                        "minimum_order_floor_cooldown_remaining_minutes": (
+                            minimum_floor.get("cooldown_remaining_minutes")
+                        ),
+                    }
 
                     candidate_sell_backlog_log_fields = {
                         "sell_backlog_count": candidate_sell_backlog["count"],
@@ -8785,6 +8934,27 @@ def main():
                     }
 
                     if skip_reason is not None:
+                        increment_source_stat(
+                            state["stats"],
+                            "buy_candidates_skipped_by_reason",
+                            skip_reason,
+                        )
+                        cycle_candidate_skip_reason_counts[skip_reason] = (
+                            int(
+                                cycle_candidate_skip_reason_counts.get(
+                                    skip_reason,
+                                    0,
+                                )
+                                or 0
+                            )
+                            + 1
+                        )
+                        if skip_reason.startswith("minimum_order_floor_"):
+                            increment_source_stat(
+                                state["stats"],
+                                "minimum_order_floor_blocks_by_reason",
+                                skip_reason,
+                            )
                         low_support_shadow = low_support_opportunity_shadow(
                             route_config,
                             strategy_config,
@@ -8825,6 +8995,7 @@ def main():
                             action_policy_reason=action_policy.get("reason"),
                             **sentiment_risk_fields,
                             **source_policy_log_fields,
+                            **minimum_order_floor_log_fields,
                             signal_status=signal_status,
                             freshness_allows_trading=freshness_allows_trading,
                             freshness_block_reason=freshness_block_reason,
@@ -9344,6 +9515,7 @@ def main():
                         ),
                         buy_source=buy_source,
                         bucket_name=bucket_name,
+                        **minimum_order_floor_log_fields,
                         bucket_inventory_usd=round(bucket_inventory_usd, 8),
                         bucket_inventory_cap_usd=round(bucket_cap_usd, 8),
                         high_anchor_order_count=high_anchor_order_count,
@@ -9524,6 +9696,7 @@ def main():
                             execution_signal=execution_signal,
                             buy_source=buy_source,
                             **source_policy_log_fields,
+                            **minimum_order_floor_log_fields,
                             sell_pct_override=active_sell_pct_override,
                             above_last_sell_breakout_bypass=(
                                 above_last_sell_breakout_bypass
@@ -9592,6 +9765,7 @@ def main():
                             execution_signal=execution_signal,
                             buy_source=buy_source,
                             **source_policy_log_fields,
+                            **minimum_order_floor_log_fields,
                             sell_pct_override=active_sell_pct_override,
                             above_last_sell_breakout_bypass=(
                                 above_last_sell_breakout_bypass
@@ -9626,6 +9800,19 @@ def main():
                         reserved_buy_usd += level * volume
                         available_usd = max(0.0, usd - reserved_buy_usd)
                         record_buy_cooldown_timestamp(buy_source, cycle_id)
+                        if minimum_floor.get("applied"):
+                            record_minimum_order_floor_timestamp(
+                                buy_source,
+                                cycle_id,
+                            )
+                            state["stats"][
+                                "minimum_order_floor_orders_placed"
+                            ] += 1
+                            increment_source_stat(
+                                state["stats"],
+                                "minimum_order_floor_orders_placed_by_source",
+                                buy_source,
+                            )
                         save_state(state)
                         continue
 
@@ -9649,6 +9836,12 @@ def main():
                         "source_entry_policy_reason": source_policy.get("reason"),
                         "source_entry_policy_size_multiplier": (
                             source_policy_size_multiplier
+                        ),
+                        "minimum_order_floor_applied": minimum_floor.get(
+                            "applied"
+                        ),
+                        "minimum_order_floor_usd": minimum_floor.get(
+                            "floor_notional_usd"
                         ),
                         "anchor_strategy_router_anchor": route_anchor,
                         "anchor_strategy_router_strategy_label": (
@@ -9771,6 +9964,19 @@ def main():
                             high_anchor_buy_cooldown_minutes
                         )
                     record_buy_cooldown_timestamp(buy_source, cycle_id)
+                    if minimum_floor.get("applied"):
+                        record_minimum_order_floor_timestamp(
+                            buy_source,
+                            cycle_id,
+                        )
+                        state["stats"][
+                            "minimum_order_floor_orders_placed"
+                        ] += 1
+                        increment_source_stat(
+                            state["stats"],
+                            "minimum_order_floor_orders_placed_by_source",
+                            buy_source,
+                        )
                     state["stats"]["buy_orders_placed"] += 1
                     increment_source_stat(
                         state["stats"],
@@ -9821,6 +10027,7 @@ def main():
                         **stale_reanchor_profit_guard_log_fields(stale_reanchor),
                         buy_source=buy_source,
                         **source_policy_log_fields,
+                        **minimum_order_floor_log_fields,
                         sell_pct_override=active_sell_pct_override,
                         buy_cooldown_minutes=(
                             buy_cooldown["global_cooldown_minutes"]
@@ -9896,6 +10103,7 @@ def main():
                         trade_notional_usd=round(level * volume, 8),
                         buy_source=buy_source,
                         **source_policy_log_fields,
+                        **minimum_order_floor_log_fields,
                         sell_pct_override=active_sell_pct_override,
                         buy_cooldown_minutes=(
                             buy_cooldown["global_cooldown_minutes"]
@@ -10147,6 +10355,10 @@ def main():
                             "last_buy_at_by_source",
                             {},
                         ),
+                        last_minimum_order_floor_at_by_source=state.get(
+                            "last_minimum_order_floor_at_by_source",
+                            {},
+                        ),
                         last_sell_price=state.get("last_sell_price"),
                         last_sell_at=state.get("last_sell_at"),
                         last_high_anchor_buy_at=state.get(
@@ -10182,6 +10394,27 @@ def main():
                         ),
                         sell_orders_filled_by_source=state["stats"].get(
                             "sell_orders_filled_by_source",
+                            {},
+                        ),
+                        buy_candidates_skipped_by_reason=state["stats"].get(
+                            "buy_candidates_skipped_by_reason",
+                            {},
+                        ),
+                        cycle_candidate_skip_reason_counts=(
+                            cycle_candidate_skip_reason_counts
+                        ),
+                        minimum_order_floor_orders_placed=state["stats"].get(
+                            "minimum_order_floor_orders_placed",
+                            0,
+                        ),
+                        minimum_order_floor_orders_placed_by_source=(
+                            state["stats"].get(
+                                "minimum_order_floor_orders_placed_by_source",
+                                {},
+                            )
+                        ),
+                        minimum_order_floor_blocks_by_reason=state["stats"].get(
+                            "minimum_order_floor_blocks_by_reason",
                             {},
                         ),
                         anchor_strategy_router_enabled=(
@@ -10364,6 +10597,9 @@ def main():
                     bucket: round(value, 8)
                     for bucket, value in inventory_usd_by_bucket(price).items()
                 },
+                cycle_candidate_skip_reason_counts=(
+                    cycle_candidate_skip_reason_counts
+                ),
                 buy_orders_placed=state["stats"]["buy_orders_placed"],
                 buy_orders_filled=state["stats"]["buy_orders_filled"],
                 sell_orders_placed=state["stats"]["sell_orders_placed"],
@@ -10482,7 +10718,28 @@ def main():
                         "sell_orders_filled_by_source",
                         {}
                     ),
+                    "buy_candidates_skipped_by_reason": state["stats"].get(
+                        "buy_candidates_skipped_by_reason",
+                        {},
+                    ),
+                    "minimum_order_floor_orders_placed": state["stats"].get(
+                        "minimum_order_floor_orders_placed",
+                        0,
+                    ),
+                    "minimum_order_floor_orders_placed_by_source": (
+                        state["stats"].get(
+                            "minimum_order_floor_orders_placed_by_source",
+                            {},
+                        )
+                    ),
+                    "minimum_order_floor_blocks_by_reason": state["stats"].get(
+                        "minimum_order_floor_blocks_by_reason",
+                        {},
+                    ),
                 },
+                "cycle_candidate_skip_reason_counts": (
+                    cycle_candidate_skip_reason_counts
+                ),
                 "execution_quality": execution_quality,
                 "actions": actions or ["no_action"],
             })

@@ -384,6 +384,17 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
             production = json.load(handle)
 
         self.assertEqual(validate_strategy_config(production), [])
+        self.assertTrue(production["minimum_order_floor_enabled"])
+        self.assertEqual(production["minimum_order_floor_sources"], "range_low")
+        self.assertEqual(production["minimum_order_floor_usd"], 8.0)
+        self.assertEqual(
+            production["minimum_order_floor_cooldown_minutes"],
+            60,
+        )
+        self.assertEqual(
+            production["minimum_order_floor_cash_reserve_usd"],
+            100.0,
+        )
         self.assertTrue(candidate.pop("paper_trading_enabled"))
         self.assertFalse(production.pop("paper_trading_enabled"))
         self.assertEqual(production, candidate)
