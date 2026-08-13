@@ -50,6 +50,44 @@ class RangeGridBotLoggingTests(unittest.TestCase):
 
         self.assertEqual(collisions, [])
 
+    def test_runtime_identity_fields_are_not_passed_twice(self):
+        tree = self._bot_tree()
+
+        identity_function = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "runtime_identity"
+        )
+        identity_keys = {
+            key.value
+            for node in ast.walk(identity_function)
+            if isinstance(node, ast.Dict)
+            for key in node.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+
+        collisions = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            expands_identity = any(
+                keyword.arg is None
+                and isinstance(keyword.value, ast.Name)
+                and keyword.value.id == "instance_identity"
+                for keyword in node.keywords
+            )
+            if not expands_identity:
+                continue
+            explicit_keys = {
+                keyword.arg for keyword in node.keywords if keyword.arg is not None
+            }
+            duplicate_keys = sorted(identity_keys & explicit_keys)
+            if duplicate_keys:
+                collisions.append((node.lineno, duplicate_keys))
+
+        self.assertEqual(collisions, [])
+
     def test_live_kraken_order_and_ticker_paths_use_configured_pair(self):
         tree = self._bot_tree()
         violations = []

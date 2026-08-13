@@ -6174,7 +6174,6 @@ def main():
         message="Range Grid Average bot starting",
         **instance_identity,
         config_file=CONFIG_FILE,
-        strategy_profile=STRATEGY_PROFILE,
         operating_mode=operating_mode,
         paper_trading_enabled=paper_trading_enabled,
         risk_context_shadow_buy_enabled=risk_context_shadow_buy_enabled,
