@@ -109,6 +109,25 @@ class RangeGridBotLoggingTests(unittest.TestCase):
 
         self.assertEqual(violations, [])
 
+    def test_live_flow_control_receives_effective_route_config(self):
+        tree = self._bot_tree()
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "flow_adjustment"
+        ]
+
+        self.assertTrue(
+            any(
+                len(call.args) == 3
+                and isinstance(call.args[2], ast.Name)
+                and call.args[2].id == "route_config"
+                for call in calls
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

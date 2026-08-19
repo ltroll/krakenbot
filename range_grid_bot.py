@@ -35,6 +35,7 @@ from range_grid_guardrails import (
     summarize_sell_backlog,
     validate_strategy_config,
 )
+from range_grid_effective_strategy import resolve_effective_strategy
 from range_grid_order_safety import (
     allocate_position_costs,
     atomic_write_json,
@@ -507,6 +508,13 @@ if strategy_config_errors:
         "Invalid strategy configuration: "
         + "; ".join(strategy_config_errors)
     )
+base_effective_strategy = resolve_effective_strategy(
+    strategy_config,
+    base_label=STRATEGY_PROFILE,
+)
+base_strategy_fingerprint = base_effective_strategy[
+    "effective_fingerprint"
+]
 bucket_inventory_caps_config = strategy_config.get("max_inventory_usd_by_bucket", {})
 if not isinstance(bucket_inventory_caps_config, dict):
     bucket_inventory_caps_config = {}
@@ -1312,9 +1320,38 @@ def load_anchor_strategy_routes(force=False):
                 )
                 continue
 
+            buy_source = {
+                "low": "range_low",
+                "median": "range_median",
+                "high": "range_high_band",
+            }[anchor]
+            effective_strategy = resolve_effective_strategy(
+                strategy_config,
+                strategy_payload,
+                buy_source=buy_source,
+                base_label=STRATEGY_PROFILE,
+                route_label=selected.get("strategy_label"),
+                route_file=selected.get("strategy_file"),
+            )
+            effective_errors = validate_strategy_config(
+                effective_strategy["payload"]
+            )
+            if effective_errors:
+                log_event(
+                    "ANCHOR_STRATEGY_ROUTE_SKIPPED",
+                    anchor=anchor,
+                    strategy_label=selected.get("strategy_label"),
+                    reason="invalid_effective_strategy_payload",
+                    validation_errors=effective_errors,
+                    router_file=path,
+                )
+                continue
+
             route = dict(selected)
             route["anchor"] = anchor
-            route["strategy_config"] = strategy_payload
+            route["route_strategy_config"] = strategy_payload
+            route["strategy_config"] = effective_strategy["payload"]
+            route["effective_strategy"] = effective_strategy
             routes[anchor] = route
     except Exception as exc:
         error = str(exc)
@@ -1345,6 +1382,12 @@ def load_anchor_strategy_routes(force=False):
     return routes
 
 
+def base_effective_strategy_for_source(buy_source):
+    resolved = dict(base_effective_strategy)
+    resolved["buy_source"] = buy_source
+    return resolved
+
+
 def anchor_strategy_route_for_source(buy_source):
     anchor = anchor_for_buy_source(buy_source)
     if not anchor or not anchor_strategy_router_enabled:
@@ -1352,6 +1395,9 @@ def anchor_strategy_route_for_source(buy_source):
             "anchor": anchor,
             "route": None,
             "block_reason": None,
+            "effective_strategy": base_effective_strategy_for_source(
+                buy_source
+            ),
         }
 
     routes = load_anchor_strategy_routes()
@@ -1364,6 +1410,42 @@ def anchor_strategy_route_for_source(buy_source):
         "anchor": anchor,
         "route": route,
         "block_reason": block_reason,
+        "effective_strategy": (
+            route.get("effective_strategy")
+            if route
+            else base_effective_strategy_for_source(buy_source)
+        ),
+    }
+
+
+def effective_strategy_status_snapshot():
+    base_metadata = {
+        key: value
+        for key, value in base_effective_strategy.items()
+        if key != "payload"
+    }
+    routes = {}
+    for anchor, route in sorted(
+        (anchor_strategy_router_cache.get("routes") or {}).items()
+    ):
+        effective_strategy = route.get("effective_strategy")
+        if not isinstance(effective_strategy, dict):
+            continue
+        routes[anchor] = effective_strategy
+    return {
+        "base": base_metadata,
+        "routes": routes,
+    }
+
+
+def effective_strategy_route_fingerprints():
+    return {
+        anchor: (route.get("effective_strategy") or {}).get(
+            "effective_fingerprint"
+        )
+        for anchor, route in sorted(
+            (anchor_strategy_router_cache.get("routes") or {}).items()
+        )
     }
 
 
@@ -5312,7 +5394,33 @@ def sentiment_buy_permissions(
     }
 
 
-def flow_adjustment(flow_pressure, buy_source):
+def flow_adjustment(flow_pressure, buy_source, config=None):
+    active_config = config or strategy_config
+    candidate_flow_defensive_threshold = strategy_float(
+        active_config,
+        "flow_defensive_threshold",
+        flow_defensive_threshold,
+    )
+    candidate_flow_block_threshold = strategy_float(
+        active_config,
+        "flow_block_threshold",
+        flow_block_threshold,
+    )
+    candidate_flow_defensive_size_multiplier = strategy_float(
+        active_config,
+        "flow_defensive_size_multiplier",
+        flow_defensive_size_multiplier,
+    )
+    candidate_flow_block_high_only = strategy_bool(
+        active_config,
+        "flow_block_high_only",
+        flow_block_high_only,
+    )
+    candidate_flow_block_llm_only_below = strategy_float(
+        active_config,
+        "flow_block_llm_only_below",
+        flow_block_llm_only_below,
+    )
     if flow_pressure is None:
         return {
             "size_multiplier": 1.0,
@@ -5320,23 +5428,26 @@ def flow_adjustment(flow_pressure, buy_source):
             "reason": None
         }
 
-    if flow_pressure <= flow_block_llm_only_below and buy_source == "llm_target":
+    if (
+        flow_pressure <= candidate_flow_block_llm_only_below
+        and buy_source == "llm_target"
+    ):
         return {
-            "size_multiplier": flow_defensive_size_multiplier,
+            "size_multiplier": candidate_flow_defensive_size_multiplier,
             "block_buy": False,
             "reason": "flow_llm_only"
         }
 
     flow_hard_block_enabled = strategy_bool(
-        strategy_config,
+        active_config,
         "flow_hard_block_enabled",
         True,
     )
 
-    if flow_pressure <= flow_block_threshold:
-        if flow_block_high_only:
+    if flow_pressure <= candidate_flow_block_threshold:
+        if candidate_flow_block_high_only:
             return {
-                "size_multiplier": flow_defensive_size_multiplier,
+                "size_multiplier": candidate_flow_defensive_size_multiplier,
                 "block_buy": (
                     flow_hard_block_enabled
                     and buy_source == "range_high_band"
@@ -5348,7 +5459,7 @@ def flow_adjustment(flow_pressure, buy_source):
                 )
             }
         return {
-            "size_multiplier": flow_defensive_size_multiplier,
+            "size_multiplier": candidate_flow_defensive_size_multiplier,
             "block_buy": flow_hard_block_enabled,
             "reason": (
                 "flow_block_all"
@@ -5357,9 +5468,9 @@ def flow_adjustment(flow_pressure, buy_source):
             )
         }
 
-    if flow_pressure <= flow_defensive_threshold:
+    if flow_pressure <= candidate_flow_defensive_threshold:
         return {
-            "size_multiplier": flow_defensive_size_multiplier,
+            "size_multiplier": candidate_flow_defensive_size_multiplier,
             "block_buy": (
                 flow_hard_block_enabled
                 and buy_source == "range_high_band"
@@ -6176,6 +6287,10 @@ def main():
         config_file=CONFIG_FILE,
         operating_mode=operating_mode,
         paper_trading_enabled=paper_trading_enabled,
+        base_strategy_fingerprint=base_strategy_fingerprint,
+        effective_strategy_composition_mode=(
+            base_effective_strategy["composition_mode"]
+        ),
         risk_context_shadow_buy_enabled=risk_context_shadow_buy_enabled,
         grid_anchor=grid_anchor,
         configured_strategy_modes=configured_strategy_modes,
@@ -6494,6 +6609,7 @@ def main():
             router_file=anchor_strategy_router_cache.get("path"),
             route_count=len(routes),
             anchors=sorted(routes),
+            route_fingerprints=effective_strategy_route_fingerprints(),
             error=anchor_strategy_router_cache.get("error"),
             fail_closed=anchor_strategy_router_fail_closed,
         )
@@ -8186,7 +8302,12 @@ def main():
                         {
                             "level": llm_target["buy_price"],
                             "sell_pct_override": llm_target["sell_pct"],
-                            "buy_source": "llm_target"
+                            "buy_source": "llm_target",
+                            "effective_strategy": (
+                                base_effective_strategy_for_source(
+                                    "llm_target"
+                                )
+                            ),
                         }
                     ]
                 else:
@@ -8324,6 +8445,9 @@ def main():
                                     "anchor_router_block_reason": (
                                         route_context["block_reason"]
                                     ),
+                                    "effective_strategy": route_context[
+                                        "effective_strategy"
+                                    ],
                                     "route_strategy_config": route_config,
                                     "route_entry_step_pct": route_entry_step_pct,
                                 }
@@ -8381,7 +8505,10 @@ def main():
                     level = candidate["level"]
                     active_sell_pct_override = candidate["sell_pct_override"]
                     buy_source = candidate["buy_source"]
-                    route_config = candidate.get("route_strategy_config") or strategy_config
+                    effective_strategy = candidate.get(
+                        "effective_strategy"
+                    ) or base_effective_strategy_for_source(buy_source)
+                    route_config = effective_strategy["payload"]
                     route = candidate.get("anchor_router_route")
                     route_anchor = candidate.get("anchor_router_anchor")
                     route_block_reason = candidate.get(
@@ -8500,7 +8627,11 @@ def main():
                         bucket_name,
                         candidate_effective_max_inventory_usd
                     )
-                    flow_control = flow_adjustment(flow_pressure, buy_source)
+                    flow_control = flow_adjustment(
+                        flow_pressure,
+                        buy_source,
+                        route_config,
+                    )
                     original_level = level
                     stale_reanchor = {"allowed": False}
                     key = str(level)
@@ -8563,6 +8694,20 @@ def main():
                         ),
                         "source_entry_policy_size_multiplier": (
                             source_policy_size_multiplier
+                        ),
+                    }
+                    effective_strategy_log_fields = {
+                        "effective_strategy_fingerprint": (
+                            effective_strategy["effective_fingerprint"]
+                        ),
+                        "base_strategy_fingerprint": effective_strategy[
+                            "base_fingerprint"
+                        ],
+                        "route_strategy_fingerprint": effective_strategy[
+                            "route_fingerprint"
+                        ],
+                        "effective_strategy_composition_mode": (
+                            effective_strategy["composition_mode"]
                         ),
                     }
                     minimum_floor = {
@@ -8994,6 +9139,7 @@ def main():
                             action_policy_reason=action_policy.get("reason"),
                             **sentiment_risk_fields,
                             **source_policy_log_fields,
+                            **effective_strategy_log_fields,
                             **minimum_order_floor_log_fields,
                             signal_status=signal_status,
                             freshness_allows_trading=freshness_allows_trading,
@@ -9695,6 +9841,7 @@ def main():
                             execution_signal=execution_signal,
                             buy_source=buy_source,
                             **source_policy_log_fields,
+                            **effective_strategy_log_fields,
                             **minimum_order_floor_log_fields,
                             sell_pct_override=active_sell_pct_override,
                             above_last_sell_breakout_bypass=(
@@ -9764,6 +9911,7 @@ def main():
                             execution_signal=execution_signal,
                             buy_source=buy_source,
                             **source_policy_log_fields,
+                            **effective_strategy_log_fields,
                             **minimum_order_floor_log_fields,
                             sell_pct_override=active_sell_pct_override,
                             above_last_sell_breakout_bypass=(
@@ -9849,6 +9997,18 @@ def main():
                         "anchor_strategy_router_strategy_file": (
                             route.get("strategy_file") if route else None
                         ),
+                        "effective_strategy_fingerprint": effective_strategy[
+                            "effective_fingerprint"
+                        ],
+                        "base_strategy_fingerprint": effective_strategy[
+                            "base_fingerprint"
+                        ],
+                        "route_strategy_fingerprint": effective_strategy[
+                            "route_fingerprint"
+                        ],
+                        "effective_strategy_composition_mode": (
+                            effective_strategy["composition_mode"]
+                        ),
                     }
                     buy_resp, buy_submission_recovered = submit_limit_order(
                         "buy",
@@ -9891,6 +10051,7 @@ def main():
                             anchor_strategy_router_strategy_file=(
                                 route.get("strategy_file") if route else None
                             ),
+                            **effective_strategy_log_fields,
                             error=(
                                 None if not buy_resp
                                 else buy_resp.get("error")
@@ -9925,6 +10086,7 @@ def main():
                             anchor_strategy_router_strategy_file=(
                                 route.get("strategy_file") if route else None
                             ),
+                            **effective_strategy_log_fields,
                             error=(
                                 None if not buy_resp
                                 else buy_resp.get("error")
@@ -10026,6 +10188,7 @@ def main():
                         **stale_reanchor_profit_guard_log_fields(stale_reanchor),
                         buy_source=buy_source,
                         **source_policy_log_fields,
+                        **effective_strategy_log_fields,
                         **minimum_order_floor_log_fields,
                         sell_pct_override=active_sell_pct_override,
                         buy_cooldown_minutes=(
@@ -10102,6 +10265,7 @@ def main():
                         trade_notional_usd=round(level * volume, 8),
                         buy_source=buy_source,
                         **source_policy_log_fields,
+                        **effective_strategy_log_fields,
                         **minimum_order_floor_log_fields,
                         sell_pct_override=active_sell_pct_override,
                         buy_cooldown_minutes=(
@@ -10423,6 +10587,10 @@ def main():
                         anchor_strategy_router_route_count=len(
                             anchor_strategy_router_cache.get("routes") or {}
                         ),
+                        base_strategy_fingerprint=base_strategy_fingerprint,
+                        anchor_strategy_router_route_fingerprints=(
+                            effective_strategy_route_fingerprints()
+                        ),
                         **weather_status_fields(risk_context),
                     )
                     state["last_activity_summary_at"] = cycle_id
@@ -10625,6 +10793,8 @@ def main():
                 "operating_mode": operating_mode,
                 "sentiment_control_mode": sentiment_control_mode,
                 "strategy_profile": STRATEGY_PROFILE,
+                "base_strategy_fingerprint": base_strategy_fingerprint,
+                "effective_strategy": effective_strategy_status_snapshot(),
                 "grid_anchor": grid_anchor,
                 "configured_strategy_modes": configured_strategy_modes,
                 "strategy_modes": active_strategy_modes,

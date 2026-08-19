@@ -528,6 +528,10 @@ def status_snapshot():
         "timestamp": raw_status.get("timestamp"),
         "operating_mode": raw_status.get("operating_mode"),
         "strategy_profile": raw_status.get("strategy_profile"),
+        "base_strategy_fingerprint": raw_status.get(
+            "base_strategy_fingerprint"
+        ),
+        "effective_strategy": raw_status.get("effective_strategy"),
         "grid_anchor": raw_status.get("grid_anchor"),
         "configured_strategy_modes": raw_status.get("configured_strategy_modes"),
         "strategy_modes": raw_status.get("strategy_modes"),
@@ -883,6 +887,9 @@ def build_snapshot():
             "sha256": strategy["sha256"],
             "payload": strategy["payload"],
         },
+        "effective_strategy": (
+            (status.get("summary") or {}).get("effective_strategy")
+        ),
         "state": {
             "ok": state["ok"],
             "error": state["error"],

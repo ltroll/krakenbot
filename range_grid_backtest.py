@@ -14,6 +14,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
+from range_grid_effective_strategy import resolve_effective_strategy
 from range_grid_source_policy import (
     source_entry_policy_decision,
     source_entry_step_pct,
@@ -408,6 +409,17 @@ def snapshot_with_strategy(snapshot, strategy_label, strategy_path, strategy_pay
     context["grid_anchor"] = strategy_payload.get("grid_anchor")
     context["strategy_modes"] = strategy_modes_from_payload(strategy_payload)
     cloned["strategy_context"] = context
+    cloned["effective_strategy"] = resolve_effective_strategy(
+        strategy_payload,
+        base_label=strategy_label,
+    )
+    runtime_status = cloned.get("runtime_status")
+    if isinstance(runtime_status, dict):
+        runtime_status = copy.deepcopy(runtime_status)
+        summary = runtime_status.get("summary")
+        if isinstance(summary, dict):
+            summary.pop("effective_strategy", None)
+        cloned["runtime_status"] = runtime_status
     return cloned
 
 
@@ -1568,6 +1580,42 @@ def strategy_payload(snapshot):
     return payload if isinstance(payload, dict) else {}
 
 
+def effective_strategy_record(snapshot, buy_source=None):
+    effective = snapshot.get("effective_strategy")
+    if not isinstance(effective, dict):
+        runtime = runtime_status_summary(snapshot)
+        effective = runtime.get("effective_strategy")
+    if isinstance(effective, dict) and buy_source:
+        anchor = {
+            "range_low": "low",
+            "range_mean": "median",
+            "range_median": "median",
+            "range_high_band": "high",
+        }.get(str(buy_source))
+        routes = effective.get("routes")
+        if anchor and isinstance(routes, dict):
+            route = routes.get(anchor)
+            if isinstance(route, dict) and isinstance(
+                route.get("payload"),
+                dict,
+            ):
+                return route
+    if isinstance(effective, dict) and isinstance(
+        effective.get("payload"),
+        dict,
+    ):
+        return effective
+    return resolve_effective_strategy(
+        strategy_payload(snapshot),
+        buy_source=buy_source,
+        base_label=(snapshot.get("strategy_profile") or {}).get("label"),
+    )
+
+
+def effective_strategy_payload(snapshot, buy_source=None):
+    return effective_strategy_record(snapshot, buy_source)["payload"]
+
+
 def strategy_context(snapshot):
     context = snapshot.get("strategy_context") or {}
     return context if isinstance(context, dict) else {}
@@ -2469,7 +2517,7 @@ def sell_backlog_effective_count(snapshot):
 
 
 def approved_event_profit_target_pct(snapshot, event):
-    config = strategy_payload(snapshot)
+    config = effective_strategy_payload(snapshot, event.get("buy_source"))
     signal = signal_payload(snapshot)
     return effective_sell_profit_target_pct(
         config,
@@ -2482,7 +2530,7 @@ def approved_event_profit_target_pct(snapshot, event):
 
 def infer_live_only_blockers(snapshot, event):
     blockers = []
-    config = strategy_payload(snapshot)
+    config = effective_strategy_payload(snapshot, event.get("buy_source"))
     state_info = state_summary(snapshot)
     runtime_status = runtime_status_summary(snapshot)
     captured_at = snapshot_timestamp(snapshot)
@@ -2734,9 +2782,10 @@ def simulate_missed_opportunity(snapshot, event, snapshots, snapshot_price_index
 
     hold_end = entry_time + timedelta(hours=BACKTEST_POTENTIAL_MAX_HOLD_HOURS)
     target_profit_pct = approved_event_profit_target_pct(snapshot, event)
+    config = effective_strategy_payload(snapshot, event.get("buy_source"))
     round_trip_fee_pct = max(
         0.0,
-        safe_float(strategy_payload(snapshot).get("round_trip_fee_pct")) or 0.0,
+        safe_float(config.get("round_trip_fee_pct")) or 0.0,
     )
     target_price_move_pct = target_profit_pct + round_trip_fee_pct
     target_return_pct = target_price_move_pct * 100.0
@@ -2970,7 +3019,7 @@ def simulate_approved_order_lifecycle(replay, snapshots):
                 source_stats[buy_source]["duplicate_active_level"] += 1
                 continue
 
-            config = strategy_payload(snapshot)
+            config = effective_strategy_payload(snapshot, buy_source)
             if (
                 event.get(
                     "modeled_stale_level_reanchor_profit_guard_allowed"
@@ -3349,7 +3398,10 @@ def summarize_potential_from_approved_events(replay, snapshots):
         )
         if potential:
             event_time = parse_iso8601(event.get("captured_at"))
-            config = strategy_payload(snapshot)
+            config = effective_strategy_payload(
+                snapshot,
+                event.get("buy_source"),
+            )
             size_multiplier = safe_float(
                 event.get("risk_context_position_size_effective_multiplier")
             )
@@ -3807,7 +3859,7 @@ def summarize_missed_price_above_opportunities(replay, snapshots):
         snapshot = snapshot_by_timestamp.get(event.get("captured_at"))
         if not snapshot:
             continue
-        config = strategy_payload(snapshot)
+        config = effective_strategy_payload(snapshot, event.get("buy_source"))
         playable, filter_reason = missed_price_above_opportunity_filter(
             config,
             event,
@@ -5616,8 +5668,9 @@ def build_candidates(snapshot, price):
         buy_source = source_by_mode.get(strategy_mode)
         if buy_source is None:
             continue
+        source_config = effective_strategy_payload(snapshot, buy_source)
         decision = source_entry_policy_decision(
-            config,
+            source_config,
             buy_source,
             action_recommendation=action_recommendation,
             action_policy=action_policy,
@@ -5666,16 +5719,17 @@ def build_candidates(snapshot, price):
         config,
     )
 
-    def effective_source_step(buy_source):
+    def effective_source_step(buy_source, source_config):
         source_base_step = source_entry_step_pct(
-            config,
+            source_config,
             buy_source,
             base_entry_step_pct,
+            config,
         )
         return effective_entry_step_pct(
             source_base_step,
             realized_volatility_pct,
-            config,
+            source_config,
         )
     regime = replay_sentiment_regime(config, signal)
     smoothed_risk_multiplier = replay_smoothed_risk_multiplier(config, signal)
@@ -5809,44 +5863,100 @@ def build_candidates(snapshot, price):
 
     candidate_levels = []
     if llm_buy_allowed:
+        llm_effective_strategy = effective_strategy_record(
+            snapshot,
+            "llm_target",
+        )
         candidate_levels = [{
             "level": llm_target["buy_price"],
             "sell_pct_override": llm_target["sell_pct"],
             "buy_source": "llm_target",
             "strategy_mode": "llm_target",
+            "effective_strategy": llm_effective_strategy,
         }]
     else:
         for strategy_mode in strategy_modes:
             if strategy_mode == "mean" and mean is not None:
                 buy_source = "range_mean"
-                candidate_step_pct = effective_source_step(buy_source)
-                grid = compute_grid(mean, candidate_step_pct, max_grid_size)
+                source_config = effective_strategy_payload(
+                    snapshot,
+                    buy_source,
+                )
+                candidate_step_pct = effective_source_step(
+                    buy_source,
+                    source_config,
+                )
+                source_grid_size = int(
+                    source_config.get("max_grid_size", max_grid_size)
+                )
+                grid = compute_grid(mean, candidate_step_pct, source_grid_size)
                 sell_pct_override = None
             elif strategy_mode == "median" and median is not None:
                 buy_source = "range_median"
-                candidate_step_pct = effective_source_step(buy_source)
-                grid = compute_grid(median, candidate_step_pct, max_grid_size)
+                source_config = effective_strategy_payload(
+                    snapshot,
+                    buy_source,
+                )
+                candidate_step_pct = effective_source_step(
+                    buy_source,
+                    source_config,
+                )
+                source_grid_size = int(
+                    source_config.get("max_grid_size", max_grid_size)
+                )
+                grid = compute_grid(
+                    median,
+                    candidate_step_pct,
+                    source_grid_size,
+                )
                 sell_pct_override = None
             elif strategy_mode == "high":
                 if not allow_high_anchor:
                     continue
                 buy_source = "range_high_band"
-                candidate_step_pct = effective_source_step(buy_source)
+                source_config = effective_strategy_payload(
+                    snapshot,
+                    buy_source,
+                )
+                candidate_step_pct = effective_source_step(
+                    buy_source,
+                    source_config,
+                )
                 grid = compute_high_anchor_grid(
                     high,
                     price,
                     candidate_step_pct,
-                    safe_float(config.get("high_anchor_breakout_extension_pct"))
+                    safe_float(
+                        source_config.get(
+                            "high_anchor_breakout_extension_pct"
+                        )
+                    )
                     or 0.0,
                     weather_high_anchor_tailwind(weather_report),
                 )
-                sell_pct_override = safe_float(config.get("high_anchor_profit_target_pct"))
+                sell_pct_override = safe_float(
+                    source_config.get("high_anchor_profit_target_pct")
+                )
             else:
                 buy_source = "range_low"
-                candidate_step_pct = effective_source_step(buy_source)
-                grid = compute_grid(low, candidate_step_pct, max_grid_size)
+                source_config = effective_strategy_payload(
+                    snapshot,
+                    buy_source,
+                )
+                candidate_step_pct = effective_source_step(
+                    buy_source,
+                    source_config,
+                )
+                source_grid_size = int(
+                    source_config.get("max_grid_size", max_grid_size)
+                )
+                grid = compute_grid(low, candidate_step_pct, source_grid_size)
                 sell_pct_override = None
 
+            source_effective_strategy = effective_strategy_record(
+                snapshot,
+                buy_source,
+            )
             for level in grid:
                 candidate_levels.append({
                     "level": level,
@@ -5854,6 +5964,7 @@ def build_candidates(snapshot, price):
                     "buy_source": buy_source,
                     "strategy_mode": strategy_mode,
                     "effective_entry_step_pct": candidate_step_pct,
+                    "effective_strategy": source_effective_strategy,
                 })
 
     deduped_candidates = []
@@ -5872,7 +5983,13 @@ def build_candidates(snapshot, price):
 
 
 def evaluate_candidate(snapshot, candidate, price):
-    config = strategy_payload(snapshot)
+    effective_strategy = candidate.get("effective_strategy")
+    if not isinstance(effective_strategy, dict):
+        effective_strategy = effective_strategy_record(
+            snapshot,
+            candidate.get("buy_source"),
+        )
+    config = effective_strategy["payload"]
     state_info = state_summary(snapshot)
     state_data = state_payload(snapshot)
     signal = signal_payload(snapshot)
@@ -6231,8 +6348,15 @@ def replay_from_snapshots(snapshots):
             summary["raw_candidates"] += 1
             candidate_counts_by_source[candidate["buy_source"]] += 1
             candidate_counts_by_strategy_mode[candidate["strategy_mode"]] += 1
+            source_effective_strategy = candidate.get("effective_strategy")
+            if not isinstance(source_effective_strategy, dict):
+                source_effective_strategy = effective_strategy_record(
+                    snapshot,
+                    candidate["buy_source"],
+                )
+            source_config = source_effective_strategy["payload"]
             leveling_size_multiplier = high_band_leveling_size_multiplier(
-                strategy_payload(snapshot),
+                source_config,
                 candidate["buy_source"],
                 weather_report_payload(
                     risk_context_payload(signal_payload(snapshot))
@@ -6249,7 +6373,7 @@ def replay_from_snapshots(snapshots):
             leveling_bypass_blocked = (
                 candidate["buy_source"] == "range_high_band"
                 and weather_leveling_blocks_high_band_bypass(
-                    strategy_payload(snapshot),
+                    source_config,
                     weather_report_payload(
                         risk_context_payload(signal_payload(snapshot))
                     ),
@@ -6277,12 +6401,12 @@ def replay_from_snapshots(snapshots):
             effective_size_multiplier *= source_policy_size_multiplier
             flow_pressure = safe_float(signal.get("flow_pressure"))
             flow_control = flow_adjustment(
-                strategy_payload(snapshot),
+                source_config,
                 flow_pressure,
                 candidate["buy_source"],
             )
             base_position_size_pct = safe_float(
-                strategy_payload(snapshot).get("position_size_pct")
+                source_config.get("position_size_pct")
             )
             if base_position_size_pct is None:
                 base_position_size_pct = 0.10
@@ -6314,15 +6438,47 @@ def replay_from_snapshots(snapshots):
                 * max(0.0, source_policy_size_multiplier)
                 * max(0.0, flow_control["size_multiplier"])
             )
+            source_effective_max_inventory_usd = safe_float(
+                source_config.get("max_inventory_usd")
+            )
+            if source_effective_max_inventory_usd is None:
+                source_effective_max_inventory_usd = float("inf")
+            else:
+                source_effective_max_inventory_usd *= max(
+                    0.0,
+                    safe_float(
+                        built.get("sentiment_regime_inventory_multiplier")
+                    )
+                    or 0.0,
+                )
+                source_effective_max_inventory_usd *= max(
+                    0.0,
+                    safe_float(built.get("smoothed_risk_multiplier")) or 0.0,
+                )
+                source_effective_max_inventory_usd *= max(
+                    0.0,
+                    safe_float(
+                        built.get(
+                            "risk_context_position_size_effective_multiplier"
+                        )
+                    )
+                    or 0.0,
+                )
+            source_inventory_pressure = inventory_pressure_adjustment(
+                safe_float(state_summary(snapshot).get("deployed_inventory_usd"))
+                or 0.0,
+                source_effective_max_inventory_usd,
+                source_config,
+            )
             cooldown = buy_cooldown_status(
-                strategy_payload(snapshot),
+                source_config,
                 candidate["buy_source"],
                 snapshot_timestamp(snapshot),
                 last_replay_buy_at,
                 last_replay_buy_at_by_source,
             )
             sell_fill_cooldown = buy_cooldown_after_sell_fill_status(
-                strategy_payload(snapshot),
+                source_config,
                 candidate["buy_source"],
                 weather_report_payload(
                     risk_context_payload(signal_payload(snapshot))
@@ -6365,11 +6521,11 @@ def replay_from_snapshots(snapshots):
                         "effective_entry_step_pct",
                         built.get("effective_entry_step_pct"),
                     ),
-                    "inventory_pressure_usage_ratio": built.get(
-                        "inventory_pressure_usage_ratio"
-                    ),
-                    "inventory_pressure_size_multiplier": built.get(
-                        "inventory_pressure_size_multiplier"
+                    "inventory_pressure_usage_ratio": source_inventory_pressure[
+                        "usage_ratio"
+                    ],
+                    "inventory_pressure_size_multiplier": (
+                        source_inventory_pressure["size_multiplier"]
                     ),
                     "sentiment_regime": built.get("sentiment_regime"),
                     "sentiment_regime_position_size_multiplier": built.get(
@@ -6381,8 +6537,8 @@ def replay_from_snapshots(snapshots):
                     "smoothed_risk_multiplier": built.get(
                         "smoothed_risk_multiplier"
                     ),
-                    "effective_max_inventory_usd": built.get(
-                        "effective_max_inventory_usd"
+                    "effective_max_inventory_usd": (
+                        source_effective_max_inventory_usd
                     ),
                     "flow_control_size_multiplier": flow_control[
                         "size_multiplier"
@@ -6392,14 +6548,7 @@ def replay_from_snapshots(snapshots):
                     ),
                     "simulated_snapshot_effective_position_size_pct": (
                         effective_position_size_pct_before_inventory_pressure
-                        * (
-                            safe_float(
-                                built.get(
-                                    "inventory_pressure_size_multiplier"
-                                )
-                            )
-                            or 0.0
-                        )
+                        * source_inventory_pressure["size_multiplier"]
                     ),
                     "risk_context_position_sizing_enabled": built.get(
                         "risk_context_position_sizing_enabled"
@@ -6425,6 +6574,18 @@ def replay_from_snapshots(snapshots):
                     ),
                     "source_entry_policy_size_multiplier": (
                         source_policy_size_multiplier
+                    ),
+                    "effective_strategy_fingerprint": (
+                        source_effective_strategy["effective_fingerprint"]
+                    ),
+                    "base_strategy_fingerprint": source_effective_strategy[
+                        "base_fingerprint"
+                    ],
+                    "route_strategy_fingerprint": source_effective_strategy[
+                        "route_fingerprint"
+                    ],
+                    "effective_strategy_composition_mode": (
+                        source_effective_strategy["composition_mode"]
                     ),
                     "buy_cooldown_remaining_minutes": round(
                         cooldown["remaining_minutes"],
@@ -6503,11 +6664,14 @@ def replay_from_snapshots(snapshots):
                         "effective_entry_step_pct",
                         built.get("effective_entry_step_pct"),
                     ),
-                    "inventory_pressure_usage_ratio": built.get(
-                        "inventory_pressure_usage_ratio"
+                    "inventory_pressure_usage_ratio": source_inventory_pressure[
+                        "usage_ratio"
+                    ],
+                    "inventory_pressure_size_multiplier": (
+                        source_inventory_pressure["size_multiplier"]
                     ),
-                    "inventory_pressure_size_multiplier": built.get(
-                        "inventory_pressure_size_multiplier"
+                    "effective_max_inventory_usd": (
+                        source_effective_max_inventory_usd
                     ),
                     "risk_context_position_sizing_enabled": built.get(
                         "risk_context_position_sizing_enabled"
@@ -6533,6 +6697,18 @@ def replay_from_snapshots(snapshots):
                     ),
                     "source_entry_policy_size_multiplier": (
                         source_policy_size_multiplier
+                    ),
+                    "effective_strategy_fingerprint": (
+                        source_effective_strategy["effective_fingerprint"]
+                    ),
+                    "base_strategy_fingerprint": source_effective_strategy[
+                        "base_fingerprint"
+                    ],
+                    "route_strategy_fingerprint": source_effective_strategy[
+                        "route_fingerprint"
+                    ],
+                    "effective_strategy_composition_mode": (
+                        source_effective_strategy["composition_mode"]
                     ),
                     "buy_cooldown_remaining_minutes": round(
                         cooldown["remaining_minutes"],

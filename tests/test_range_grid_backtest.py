@@ -2157,6 +2157,129 @@ class RangeGridBacktestTests(unittest.TestCase):
             [93.1, 91.2],
         )
 
+    def test_build_candidates_uses_captured_route_for_source(self):
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            95.0,
+            action_recommendation="watch_only",
+            strategy_modes=["low"],
+        )
+        base = snapshot["strategy_profile"]["payload"]
+        routed = backtest.resolve_effective_strategy(
+            base,
+            {
+                "entry_step_pct_by_source": {"range_low": 0.02},
+                "max_grid_size": 1,
+            },
+            buy_source="range_low",
+            base_label="production.json",
+            route_label="low-route",
+        )
+        snapshot["effective_strategy"] = {
+            "base": {
+                key: value
+                for key, value in backtest.resolve_effective_strategy(
+                    base,
+                    base_label="production.json",
+                ).items()
+                if key != "payload"
+            },
+            "routes": {"low": routed},
+        }
+
+        result = backtest.build_candidates(snapshot, 95.0)
+
+        self.assertEqual(
+            [round(candidate["level"], 2) for candidate in result["raw_candidates"]],
+            [93.1],
+        )
+        candidate = result["raw_candidates"][0]
+        self.assertEqual(candidate["effective_entry_step_pct"], 0.02)
+        self.assertEqual(
+            candidate["effective_strategy"]["effective_fingerprint"],
+            routed["effective_fingerprint"],
+        )
+
+    def test_route_applies_only_to_matching_source(self):
+        snapshot = make_snapshot(
+            "2026-06-12T12:00:00+00:00",
+            100.1,
+            action_recommendation="bullish_allowed",
+            strategy_modes=["median"],
+            strategy_overrides={
+                "momentum_entry_tolerance_pct": 0.0,
+                "prevent_buy_above_last_sell": False,
+            },
+        )
+        base = snapshot["strategy_profile"]["payload"]
+        low_route = backtest.resolve_effective_strategy(
+            base,
+            {"momentum_entry_tolerance_pct": 0.002},
+            buy_source="range_low",
+            base_label="production.json",
+            route_label="low-route",
+        )
+        snapshot["effective_strategy"] = {
+            "routes": {"low": low_route},
+        }
+        candidate = {
+            "level": 100.0,
+            "buy_source": "range_median",
+            "strategy_mode": "median",
+        }
+
+        approved, reason = backtest.evaluate_candidate(snapshot, candidate, 100.1)
+        fallback = backtest.effective_strategy_record(snapshot, "range_median")
+
+        self.assertFalse(approved)
+        self.assertEqual(reason, "price_above_level")
+        self.assertIsNone(fallback["route_fingerprint"])
+        self.assertEqual(
+            fallback["effective_fingerprint"],
+            fallback["base_fingerprint"],
+        )
+
+    def test_snapshot_strategy_comparison_discards_production_routes(self):
+        snapshot = make_snapshot(
+            "2026-06-12T12:00:00+00:00",
+            100.0,
+        )
+        snapshot["effective_strategy"] = {
+            "routes": {
+                "low": backtest.resolve_effective_strategy(
+                    snapshot["strategy_profile"]["payload"],
+                    {"position_size_pct": 0.01},
+                    buy_source="range_low",
+                )
+            }
+        }
+        snapshot["runtime_status"]["summary"]["effective_strategy"] = (
+            snapshot["effective_strategy"]
+        )
+        comparison_payload = {
+            **snapshot["strategy_profile"]["payload"],
+            "position_size_pct": 0.17,
+        }
+
+        variant = backtest.snapshot_with_strategy(
+            snapshot,
+            "comparison",
+            "/tmp/comparison.json",
+            comparison_payload,
+        )
+
+        self.assertEqual(
+            variant["effective_strategy"]["payload"]["position_size_pct"],
+            0.17,
+        )
+        self.assertIsNone(
+            variant["effective_strategy"]["route_fingerprint"]
+        )
+        self.assertNotIn(
+            "effective_strategy",
+            variant["runtime_status"]["summary"],
+        )
+
     def test_evaluate_candidate_allows_median_momentum_entry_tolerance(self):
         snapshot = make_snapshot(
             "2026-06-12T12:00:00+00:00",
