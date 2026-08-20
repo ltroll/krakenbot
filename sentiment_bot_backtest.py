@@ -22,7 +22,7 @@ except ModuleNotFoundError:
 
 
 ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-load_dotenv(dotenv_path=ENV_FILE, override=True)
+load_dotenv(dotenv_path=ENV_FILE, override=False)
 
 DEFAULT_SNAPSHOT_FILE = os.getenv(
     "SENTIMENT_BACKTEST_SNAPSHOT_FILE",
@@ -263,13 +263,25 @@ def open_order_count(snapshot, side):
     state = state_payload(snapshot)
     key = "open_buy_orders" if side == "buy" else "open_sell_orders"
     orders = state.get(key)
-    return len(orders) if isinstance(orders, list) else 0
+    count = len(orders) if isinstance(orders, list) else 0
+    intents = state.get("pending_order_intents")
+    if isinstance(intents, list):
+        count += sum(
+            1
+            for intent in intents
+            if isinstance(intent, dict) and intent.get("side") == side
+        )
+    return count
 
 
 def current_inventory_usd(snapshot, price):
     state = state_payload(snapshot)
     total = 0.0
-    for key in ("open_buy_orders", "open_sell_orders"):
+    for key in (
+        "open_buy_orders",
+        "open_sell_orders",
+        "pending_profit_sells",
+    ):
         orders = state.get(key)
         if not isinstance(orders, list):
             continue
@@ -282,6 +294,13 @@ def current_inventory_usd(snapshot, price):
                 or price
             )
             total += order_price * (safe_float(order.get("volume")) or 0.0)
+    intents = state.get("pending_order_intents")
+    if isinstance(intents, list):
+        for intent in intents:
+            if not isinstance(intent, dict) or intent.get("side") != "buy":
+                continue
+            intent_price = safe_float(intent.get("price")) or price
+            total += intent_price * (safe_float(intent.get("volume")) or 0.0)
     return total
 
 
@@ -378,9 +397,28 @@ def weighted_signal(signal, config):
     if smoothed is None:
         smoothed = raw_signal
     confidence = safe_float(signal.get("confidence")) or 0.0
-    if config_bool(config, "confidence_weighting", True):
-        return smoothed * confidence, smoothed, confidence, raw_signal
-    return smoothed, smoothed, confidence, raw_signal
+    weighted = (
+        smoothed * confidence
+        if config_bool(config, "confidence_weighting", True)
+        else smoothed
+    )
+    price_regime = (
+        signal.get("price_regime")
+        if isinstance(signal.get("price_regime"), dict)
+        else {}
+    )
+    volatility = safe_float(
+        price_regime.get("realized_volatility_24h_pct")
+    )
+    cutoff = config_float(config, "volatility_cutoff", 0.0025)
+    if (
+        config_bool(config, "volatility_dampening", True)
+        and cutoff > 0
+        and volatility is not None
+        and volatility > cutoff
+    ):
+        weighted *= clamp(cutoff / volatility, 0.0, 1.0)
+    return weighted, smoothed, confidence, raw_signal
 
 
 def dynamic_target_profit_pct(signal, config, weighted):
@@ -490,25 +528,47 @@ def signal_gate_failure(signal, config, at_time):
     signal_status = signal.get("signal_status")
     freshness_state = signal_freshness_state(signal, at_time)
     contract = freshness_contract(signal)
+    age = signal_age_minutes(signal, at_time)
+    weather_decides = weather_report_bot_decides(signal)
+    if age is None:
+        return "signal_timestamp_missing"
     if (
-        signal_status
-        and signal_status != "fresh"
+        signal_status != "fresh"
         and not contract
-        and not weather_report_bot_decides(signal)
+        and not weather_decides
     ):
         return "signal_not_fresh"
     if freshness_state == "stale":
         return "signal_too_old"
     if (
         config_bool(config, "require_bot_action_allowed", True)
-        and signal.get("bot_action_allowed") is False
-        and not weather_report_bot_decides(signal)
+        and signal.get("bot_action_allowed") is not True
+        and not weather_decides
     ):
         return "bot_action_not_allowed"
     max_age = config_float(config, "max_signal_age_minutes", 30)
-    age = signal_age_minutes(signal, at_time)
     if not contract and max_age > 0 and age is not None and age > max_age:
         return "signal_too_old"
+    if not contract:
+        source_status = signal.get("source_status")
+        if not isinstance(source_status, dict):
+            return "critical_source_status_missing"
+        critical_sources = [
+            source.strip()
+            for source in str(
+                config.get(
+                    "critical_source_statuses",
+                    "market_data,price_regime,kraken_flow",
+                )
+            ).split(",")
+            if source.strip()
+        ]
+        for source in critical_sources:
+            status = source_status.get(source)
+            if not isinstance(status, dict):
+                return "critical_source_status_missing"
+            if status.get("status") not in ("fresh", "not_configured"):
+                return "critical_source_not_fresh"
     return None
 
 
@@ -855,8 +915,34 @@ def evaluate_snapshot(snapshot, variant, strict_high_guard_pct, account_usd, str
     gate_failure = signal_gate_failure(signal, config, at_time)
     if gate_failure:
         return hold(gate_failure, snapshot, price, signal, config, weighted, risk_view)
+    if confidence < config_float(config, "confidence_threshold", 0.45):
+        return hold(
+            "confidence_below_threshold",
+            snapshot,
+            price,
+            signal,
+            config,
+            weighted,
+            risk_view,
+        )
     if risk_usable and risk_view.get("weather_emergency_bell"):
         return hold("weather_emergency_bell", snapshot, price, signal, config, weighted, risk_view)
+    if risk_usable:
+        risk_buy_score = risk_view.get("risk_adjusted_buy_score")
+        if (
+            risk_buy_score is None
+            or risk_buy_score
+            < config_float(config, "risk_context_min_buy_score", 0.50)
+        ):
+            return hold(
+                "risk_context_buy_score_below_min",
+                snapshot,
+                price,
+                signal,
+                config,
+                weighted,
+                risk_view,
+            )
 
     target_candidates = target_limit_orders(signal, config, price, 1.0)
     allow_target_limit = mean_reversion_setup_allowed(signal, config) and bool(target_candidates)
@@ -959,6 +1045,7 @@ def base_event(status, reason, snapshot, price, signal, config, weighted=None, r
     risk_view = risk_view or {}
     price_regime = signal.get("price_regime") if isinstance(signal.get("price_regime"), dict) else {}
     freshness = freshness_contract(signal)
+    age_minutes = signal_age_minutes(signal, at_time) if at_time and signal else None
     return {
         "status": status,
         "reason": reason,
@@ -968,8 +1055,8 @@ def base_event(status, reason, snapshot, price, signal, config, weighted=None, r
         "execution_signal": safe_float(signal.get("execution_signal")),
         "confidence": safe_float(signal.get("confidence")),
         "signal_age_minutes": (
-            round(signal_age_minutes(signal, at_time), 4)
-            if at_time and signal
+            round(age_minutes, 4)
+            if age_minutes is not None
             else None
         ),
         "signal_status": signal.get("signal_status"),

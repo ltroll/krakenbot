@@ -20,7 +20,7 @@ from signal_normalizer import normalize_signal_payload
 
 
 ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-load_dotenv(dotenv_path=ENV_FILE, override=True)
+load_dotenv(dotenv_path=ENV_FILE, override=False)
 
 CONFIG_FILE = os.getenv("SENTIMENT_CONFIG_FILE", "sentiment_bot_config.json")
 STRATEGY_PROFILE = os.getenv(
@@ -279,6 +279,25 @@ def normalize_order_map(order_map):
     return orders
 
 
+def normalize_pending_order_intents(intent_map):
+    intents = []
+    if not isinstance(intent_map, dict):
+        return intents
+    for client_order_id, intent in intent_map.items():
+        if not isinstance(intent, dict):
+            continue
+        intents.append({
+            "client_order_id": client_order_id,
+            "side": intent.get("side"),
+            "ordertype": intent.get("ordertype"),
+            "volume": safe_float(intent.get("volume")),
+            "price": safe_float(intent.get("price")),
+            "created_at": intent.get("created_at"),
+            "intent_key": intent.get("intent_key"),
+        })
+    return intents
+
+
 def state_snapshot():
     result = read_json_source(STATE_FILE)
     if not result["ok"] or not isinstance(result["payload"], dict):
@@ -289,10 +308,16 @@ def state_snapshot():
             "summary": None,
             "open_buy_orders": [],
             "open_sell_orders": [],
+            "pending_profit_sells": [],
+            "pending_order_intents": [],
         }
     raw = result["payload"]
     open_buy_orders = normalize_order_map(raw.get("open_buy_orders"))
     open_sell_orders = normalize_order_map(raw.get("open_sell_orders"))
+    pending_profit_sells = normalize_order_map(raw.get("pending_profit_sells"))
+    pending_order_intents = normalize_pending_order_intents(
+        raw.get("pending_order_intents")
+    )
     return {
         "ok": True,
         "error": None,
@@ -304,10 +329,14 @@ def state_snapshot():
             "last_sell_at": raw.get("last_sell_at"),
             "open_buy_count": len(open_buy_orders),
             "open_sell_count": len(open_sell_orders),
+            "pending_profit_sell_count": len(pending_profit_sells),
+            "pending_order_intent_count": len(pending_order_intents),
             "stats": raw.get("stats"),
         },
         "open_buy_orders": open_buy_orders,
         "open_sell_orders": open_sell_orders,
+        "pending_profit_sells": pending_profit_sells,
+        "pending_order_intents": pending_order_intents,
     }
 
 

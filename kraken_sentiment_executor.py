@@ -15,6 +15,7 @@ import math
 import os
 import sys
 import time
+import uuid
 from urllib.parse import urlencode
 from datetime import datetime, timezone
 
@@ -22,16 +23,21 @@ import requests
 from dotenv import load_dotenv
 
 from fee_config import effective_round_trip_fee_pct
+from range_grid_order_safety import (
+    atomic_write_json,
+    load_json_with_backup,
+    order_execution,
+)
 from risk_context import derive_risk_context
 ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-load_dotenv(dotenv_path=ENV_FILE, override=True)
+load_dotenv(dotenv_path=ENV_FILE, override=False)
 
 # ----------------------
 # CONFIG
 # ----------------------
 
 
-def parse_cli_args():
+def parse_cli_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Run the Kraken sentiment executor service."
     )
@@ -135,14 +141,14 @@ def parse_cli_args():
     )
     parser.set_defaults(backtest_require_policy_beats_baseline=None)
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.run_backtest and args.buynow:
         parser.error("--run-backtest and --buynow cannot be used together")
 
     return args
 
 
-CLI_ARGS = parse_cli_args()
+CLI_ARGS = parse_cli_args(None if __name__ == "__main__" else [])
 
 CONFIG_FILE = (
     os.getenv("SENTIMENT_CONFIG_FILE")
@@ -159,6 +165,11 @@ STATE_FILE = (
     os.getenv("SENTIMENT_STATE_FILE")
     or os.getenv("BOT_STATE_FILE")
     or "sentiment_state.json"
+)
+STATE_BACKUP_FILE = (
+    os.getenv("SENTIMENT_STATE_BACKUP_FILE")
+    or os.getenv("BOT_STATE_BACKUP_FILE")
+    or f"{STATE_FILE}.bak"
 )
 LOG_FILE = (
     os.getenv("SENTIMENT_TRADE_LOG_FILE")
@@ -231,6 +242,12 @@ def infer_asset_id_from_pair(pair):
 SELECTED_SIGNAL_ASSET_ID = (
     SIGNAL_ASSET_ID or infer_asset_id_from_pair(KRAKEN_PAIR)
 ).upper()
+SENTIMENT_CLIENT_ORDER_PREFIX = "ks" + hashlib.sha256(
+    (
+        f"{KRAKEN_PAIR}|{SELECTED_SIGNAL_ASSET_ID}|"
+        f"{os.path.abspath(STATE_FILE)}"
+    ).encode("utf-8")
+).hexdigest()[:4]
 
 
 def key_fingerprint(value):
@@ -420,7 +437,16 @@ PRICE_CHECK_INTERVAL_SECONDS = profile_int("price_check_interval_seconds", 60)
 MIN_TRADE_USD = profile_float("min_trade_usd", 30)
 CONF_THRESHOLD = profile_float("confidence_threshold", 0.45)
 CONFIDENCE_WEIGHTING = profile_bool("confidence_weighting", True)
-DRY_RUN = profile_bool("dry_run", False)
+VOLATILITY_DAMPENING = profile_bool("volatility_dampening", True)
+VOLATILITY_CUTOFF = profile_float("volatility_cutoff", 0.0025)
+_DRY_RUN_ENV = os.getenv("SENTIMENT_DRY_RUN")
+if _DRY_RUN_ENV is None:
+    _DRY_RUN_ENV = os.getenv("DRY_RUN")
+DRY_RUN = (
+    parse_bool(_DRY_RUN_ENV)
+    if _DRY_RUN_ENV is not None
+    else profile_bool("dry_run", False)
+)
 SHADOW_TRADES_ENABLED = env_profile_bool(
     "SENTIMENT_SHADOW_TRADES_ENABLED",
     "shadow_trades_enabled",
@@ -1132,23 +1158,37 @@ def load_state():
             "buy_orders_placed": 0,
             "buy_orders_filled": 0,
             "sell_orders_placed": 0,
-            "sell_orders_filled": 0
+            "sell_orders_filled": 0,
+            "buy_partial_fill_events": 0,
+            "sell_partial_fill_events": 0,
         },
         "last_nonce": 0,
         "last_trade_at": None,
         "trade_history": [],
         "open_buy_orders": {},
         "open_sell_orders": {},
+        "pending_profit_sells": {},
+        "pending_order_intents": {},
         "last_sell_price": None,
         "last_sell_at": None,
         "kraken_private_paused_until": None
     }
 
-    if not os.path.exists(STATE_FILE):
+    loaded_state, source, recovery_errors = load_json_with_backup(
+        STATE_FILE,
+        STATE_BACKUP_FILE,
+    )
+    if loaded_state is None:
         return default
 
-    with open(STATE_FILE, encoding="utf-8") as f:
-        state = json.load(f)
+    state = loaded_state
+    if source == "backup":
+        log_event(
+            "STATE_RECOVERED_FROM_BACKUP",
+            state_file=os.path.abspath(STATE_FILE),
+            backup_file=os.path.abspath(STATE_BACKUP_FILE),
+            recovery_errors=recovery_errors,
+        )
 
     for key, default_value in default.items():
         state.setdefault(key, default_value)
@@ -1166,17 +1206,16 @@ def load_state():
         state["open_buy_orders"] = {}
     if not isinstance(state.get("open_sell_orders"), dict):
         state["open_sell_orders"] = {}
+    if not isinstance(state.get("pending_profit_sells"), dict):
+        state["pending_profit_sells"] = {}
+    if not isinstance(state.get("pending_order_intents"), dict):
+        state["pending_order_intents"] = {}
 
     return state
 
 
 def save_state(state):
-    state_dir = os.path.dirname(STATE_FILE)
-    if state_dir:
-        os.makedirs(state_dir, exist_ok=True)
-
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
+    atomic_write_json(STATE_FILE, state, STATE_BACKUP_FILE)
 
 
 state = load_state()
@@ -1578,6 +1617,207 @@ def order_fill_summary(order):
         "fill_fee": order.get("fee"),
         "fill_price": order.get("price")
     }
+
+
+def new_client_order_id(side):
+    side_token = "b" if side == "buy" else "s"
+    return f"{SENTIMENT_CLIENT_ORDER_PREFIX}{side_token}{uuid.uuid4().hex[:11]}"
+
+
+def kraken_order_client_id(order):
+    if not isinstance(order, dict):
+        return None
+
+    description = order.get("descr")
+    candidates = [
+        order.get("cl_ord_id"),
+        order.get("cl_ordid"),
+        order.get("clOrdId"),
+    ]
+    if isinstance(description, dict):
+        candidates.extend([
+            description.get("cl_ord_id"),
+            description.get("cl_ordid"),
+            description.get("clOrdId"),
+        ])
+
+    for value in candidates:
+        normalized = str(value or "").strip()
+        if normalized:
+            return normalized
+    return None
+
+
+def pending_intent_for(side, intent_key=None):
+    for client_order_id, intent in state.get("pending_order_intents", {}).items():
+        if not isinstance(intent, dict) or intent.get("side") != side:
+            continue
+        if intent_key is None or intent.get("intent_key") == intent_key:
+            return client_order_id, intent
+    return None, None
+
+
+def begin_order_intent(
+    side,
+    ordertype,
+    price,
+    volume,
+    cycle_id,
+    *,
+    intent_key=None,
+    order_state=None,
+):
+    if side == "buy":
+        existing_id, existing = pending_intent_for("buy")
+    else:
+        existing_id, existing = pending_intent_for(side, intent_key)
+    if existing is not None:
+        log_event(
+            "ORDER_SUBMISSION_DEFERRED_PENDING_INTENT",
+            side=side,
+            client_order_id=existing_id,
+            intent_key=intent_key,
+            created_at=existing.get("created_at"),
+        )
+        return None
+
+    client_order_id = new_client_order_id(side)
+    state["pending_order_intents"][client_order_id] = {
+        "side": side,
+        "ordertype": ordertype,
+        "price": price,
+        "volume": volume,
+        "cycle_id": cycle_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "intent_key": intent_key,
+        "order_state": dict(order_state or {}),
+    }
+    save_state(state)
+    return client_order_id
+
+
+def complete_order_intent(client_order_id):
+    if client_order_id:
+        state.get("pending_order_intents", {}).pop(client_order_id, None)
+
+
+def recover_order_by_client_id(client_order_id, created_at=None):
+    if not client_order_id:
+        return None, None, False
+
+    response = safe_kraken_private(
+        "OPEN_ORDERS_CLIENT_ID_RECOVERY",
+        "/0/private/OpenOrders",
+    )
+    open_orders = (
+        response.get("result", {}).get("open", {})
+        if isinstance(response, dict)
+        else {}
+    ) or {}
+    open_lookup_complete = isinstance(response, dict) and "result" in response
+    for txid, order in open_orders.items():
+        if kraken_order_client_id(order) == client_order_id:
+            return txid, order, True
+
+    closed_data = None
+    created_at_dt = parse_iso8601(created_at)
+    if created_at_dt is not None:
+        closed_data = {"start": max(0, int(created_at_dt.timestamp()) - 60)}
+    response = safe_kraken_private(
+        "CLOSED_ORDERS_CLIENT_ID_RECOVERY",
+        "/0/private/ClosedOrders",
+        closed_data,
+    )
+    closed_orders = (
+        response.get("result", {}).get("closed", {})
+        if isinstance(response, dict)
+        else {}
+    ) or {}
+    closed_lookup_complete = isinstance(response, dict) and "result" in response
+    for txid, order in closed_orders.items():
+        if kraken_order_client_id(order) == client_order_id:
+            return txid, order, True
+
+    return None, None, open_lookup_complete and closed_lookup_complete
+
+
+def adopt_recovered_order_intent(client_order_id, intent, txid):
+    side = intent.get("side")
+    order_state = dict(intent.get("order_state") or {})
+    order_state.update({
+        "txid": txid,
+        "client_order_id": client_order_id,
+        "submission_recovered": True,
+    })
+    if side == "buy":
+        order_state["trade_id"] = order_state.get("trade_id") or txid
+        state["open_buy_orders"][txid] = order_state
+        state["stats"]["buy_orders_placed"] += 1
+        state["stats"]["trades_executed"] += 1
+        state["last_trade_at"] = (
+            intent.get("created_at")
+            or datetime.now(timezone.utc).isoformat()
+        )
+        state["trade_history"].append({
+            "ts": state["last_trade_at"],
+            "cycle_id": intent.get("cycle_id"),
+            "dry_run": False,
+            "side": "buy",
+            "ordertype": intent.get("ordertype"),
+            "volume": intent.get("volume"),
+            "price": intent.get("price"),
+            "txid": txid,
+            "client_order_id": client_order_id,
+            "submission_recovered": True,
+        })
+        state["trade_history"] = state["trade_history"][-250:]
+    elif side == "sell":
+        order_state["trade_id"] = order_state.get("trade_id") or txid
+        state["open_sell_orders"][txid] = order_state
+        buy_txid = order_state.get("buy_txid")
+        if buy_txid:
+            state["pending_profit_sells"].pop(str(buy_txid), None)
+        state["stats"]["sell_orders_placed"] += 1
+    else:
+        return False
+
+    complete_order_intent(client_order_id)
+    save_state(state)
+    log_event(
+        "ORDER_SUBMISSION_RECOVERED",
+        side=side,
+        txid=txid,
+        client_order_id=client_order_id,
+        intent_key=intent.get("intent_key"),
+    )
+    return True
+
+
+def reconcile_pending_order_intents():
+    unresolved = state.get("pending_order_intents", {})
+    for client_order_id, intent in list(unresolved.items()):
+        if not isinstance(intent, dict):
+            unresolved.pop(client_order_id, None)
+            save_state(state)
+            continue
+
+        txid, _, lookup_complete = recover_order_by_client_id(
+            client_order_id,
+            intent.get("created_at"),
+        )
+        if txid:
+            adopt_recovered_order_intent(client_order_id, intent, txid)
+            continue
+        if lookup_complete:
+            unresolved.pop(client_order_id, None)
+            save_state(state)
+            log_event(
+                "ORDER_INTENT_CLEARED_NOT_FOUND",
+                side=intent.get("side"),
+                client_order_id=client_order_id,
+                intent_key=intent.get("intent_key"),
+                created_at=intent.get("created_at"),
+            )
 
 
 # ----------------------
@@ -2075,6 +2315,13 @@ def run_buynow():
         )
         return 0
 
+    if pending_intent_for("buy")[1] is not None:
+        console(
+            "BUYNOW_PENDING: submission outcome is being reconciled by "
+            "client order id"
+        )
+        return 2
+
     console("BUYNOW_ERROR: order was not submitted")
     return 1
 
@@ -2220,6 +2467,21 @@ def normalize_signal(signal):
     }
 
 
+def apply_volatility_dampening(weighted_signal, sentiment):
+    if not VOLATILITY_DAMPENING or VOLATILITY_CUTOFF <= 0:
+        return weighted_signal, 1.0, None
+
+    price_regime = sentiment.get("price_regime", {})
+    volatility = numeric_or_none(
+        price_regime.get("realized_volatility_24h_pct")
+    )
+    if volatility is None or volatility <= VOLATILITY_CUTOFF:
+        return weighted_signal, 1.0, volatility
+
+    multiplier = clamp(VOLATILITY_CUTOFF / volatility, 0.0, 1.0)
+    return weighted_signal * multiplier, multiplier, volatility
+
+
 def smooth_signal(current_signal):
     prev1, prev2 = state["signal_memory"]
     smoothed = (
@@ -2237,31 +2499,6 @@ def smooth_signal(current_signal):
 # ----------------------
 # ORDER EXECUTION
 # ----------------------
-
-
-def fill_values(order, fallback_volume=None, fallback_price=None):
-    if not order:
-        return {
-            "volume": fallback_volume,
-            "price": fallback_price,
-            "cost": None,
-            "fee": None
-        }
-
-    fill_volume = float(order.get("vol_exec") or order.get("vol") or 0)
-    fill_cost = float(order.get("cost") or 0)
-    fill_fee = float(order.get("fee") or 0)
-    fill_price = float(order.get("price") or 0)
-
-    if fill_price <= 0 and fill_cost > 0 and fill_volume > 0:
-        fill_price = fill_cost / fill_volume
-
-    return {
-        "volume": fill_volume or fallback_volume,
-        "price": fill_price or fallback_price,
-        "cost": fill_cost or None,
-        "fee": fill_fee or None
-    }
 
 
 def sell_target_price(buy_price, target_profit_pct=None):
@@ -2317,7 +2554,17 @@ def log_shadow_buy_plan(
     )
 
 
-def place_market_buy(volume, cycle_id):
+def place_market_buy(
+    volume,
+    cycle_id,
+    target_profit_pct=None,
+    reference_price=None,
+):
+    profit_pct = (
+        TARGET_PROFIT_PCT
+        if target_profit_pct is None
+        else target_profit_pct
+    )
     if DRY_RUN:
         state["stats"]["dry_run_trades"] += 1
         state["stats"]["buy_orders_placed"] += 1
@@ -2347,6 +2594,25 @@ def place_market_buy(volume, cycle_id):
         )
         return {"dry_run": True}
 
+    order_state = {
+        "volume": volume,
+        "price": reference_price,
+        "ordertype": "market",
+        "target_profit_pct": profit_pct,
+        "round_trip_fee_pct": ROUND_TRIP_FEE_PCT,
+        "placed_at": cycle_id,
+    }
+    client_order_id = begin_order_intent(
+        "buy",
+        "market",
+        None,
+        volume,
+        cycle_id,
+        order_state=order_state,
+    )
+    if client_order_id is None:
+        return None
+
     result = safe_kraken_private(
         "BUY",
         "/0/private/AddOrder",
@@ -2354,17 +2620,18 @@ def place_market_buy(volume, cycle_id):
             "pair": KRAKEN_PAIR,
             "type": "buy",
             "ordertype": "market",
-            "volume": volume
+            "volume": volume,
+            "cl_ord_id": client_order_id,
         }
     )
 
     if not result:
         log_trade_activity(
-            "BUY_ORDER_REJECTED",
+            "BUY_ORDER_SUBMISSION_UNCONFIRMED",
             cycle_id=cycle_id,
             side="buy",
             ordertype="market",
-            reason="api_no_result",
+            reason="pending_client_order_id_reconciliation",
             volume=volume
         )
         return result
@@ -2372,10 +2639,30 @@ def place_market_buy(volume, cycle_id):
     if result:
         txids = result.get("result", {}).get("txid", [])
         txid = txids[0] if txids else None
-        fill = order_fill_summary(query_order(txid)) if txid else {}
+        if not txid:
+            log_event(
+                "ORDER_SUBMISSION_AMBIGUOUS",
+                cycle_id=cycle_id,
+                side="buy",
+                ordertype="market",
+                client_order_id=client_order_id,
+                reason="missing_txid",
+            )
+            return None
+
         state["stats"]["trades_executed"] += 1
         state["stats"]["buy_orders_placed"] += 1
         state["last_trade_at"] = datetime.now(timezone.utc).isoformat()
+        state["open_buy_orders"][txid] = {
+            **order_state,
+            "txid": txid,
+            "trade_id": txid,
+            "client_order_id": client_order_id,
+        }
+        complete_order_intent(client_order_id)
+        save_state(state)
+        order_details = query_order(txid)
+        fill = order_fill_summary(order_details)
         record_trade_history(
             {
                 "ts": state["last_trade_at"],
@@ -2384,6 +2671,7 @@ def place_market_buy(volume, cycle_id):
                 "side": "buy",
                 "volume": volume,
                 "txid": txid,
+                "client_order_id": client_order_id,
                 **fill
             }
         )
@@ -2394,6 +2682,7 @@ def place_market_buy(volume, cycle_id):
             side="buy",
             volume=volume,
             txid=txid,
+            client_order_id=client_order_id,
             **fill,
             result=result.get("result")
         )
@@ -2404,9 +2693,11 @@ def place_market_buy(volume, cycle_id):
             ordertype="market",
             volume=volume,
             txid=txid,
+            client_order_id=client_order_id,
             **fill
         )
         result["fill"] = fill
+        result["order"] = order_details
 
     return result
 
@@ -2464,12 +2755,33 @@ def place_limit_buy(price, volume, cycle_id, target_profit_pct=None, post_only=F
         )
         return {"dry_run": True}
 
+    order_state = {
+        "volume": buy_volume,
+        "price": buy_price,
+        "post_only": post_only,
+        "ordertype": "limit",
+        "target_profit_pct": profit_pct,
+        "round_trip_fee_pct": ROUND_TRIP_FEE_PCT,
+        "placed_at": cycle_id,
+    }
+    client_order_id = begin_order_intent(
+        "buy",
+        "limit",
+        buy_price,
+        buy_volume,
+        cycle_id,
+        order_state=order_state,
+    )
+    if client_order_id is None:
+        return None
+
     order_payload = {
         "pair": KRAKEN_PAIR,
         "type": "buy",
         "ordertype": "limit",
         "price": str(buy_price),
-        "volume": str(buy_volume)
+        "volume": str(buy_volume),
+        "cl_ord_id": client_order_id,
     }
     if post_only:
         order_payload["oflags"] = "post"
@@ -2482,11 +2794,11 @@ def place_limit_buy(price, volume, cycle_id, target_profit_pct=None, post_only=F
 
     if not result:
         log_trade_activity(
-            "BUY_ORDER_REJECTED",
+            "BUY_ORDER_SUBMISSION_UNCONFIRMED",
             cycle_id=cycle_id,
             side="buy",
             ordertype="limit",
-            reason="api_no_result",
+            reason="pending_client_order_id_reconciliation",
             price=buy_price,
             volume=buy_volume,
             post_only=post_only,
@@ -2499,14 +2811,14 @@ def place_limit_buy(price, volume, cycle_id, target_profit_pct=None, post_only=F
         txid = txids[0] if txids else None
         if not txid:
             log_event(
-                "ORDER_REJECTED",
+                "ORDER_SUBMISSION_AMBIGUOUS",
                 cycle_id=cycle_id,
                 side="buy",
                 reason="missing_txid",
                 result=result.get("result")
             )
             log_trade_activity(
-                "BUY_ORDER_REJECTED",
+                "BUY_ORDER_SUBMISSION_UNCONFIRMED",
                 cycle_id=cycle_id,
                 side="buy",
                 ordertype="limit",
@@ -2515,21 +2827,18 @@ def place_limit_buy(price, volume, cycle_id, target_profit_pct=None, post_only=F
                 volume=buy_volume,
                 result=result.get("result")
             )
-            return result
+            return None
 
         state["stats"]["trades_executed"] += 1
         state["stats"]["buy_orders_placed"] += 1
         state["last_trade_at"] = datetime.now(timezone.utc).isoformat()
         state["open_buy_orders"][txid] = {
+            **order_state,
             "txid": txid,
-            "volume": buy_volume,
-            "price": buy_price,
-            "post_only": post_only,
-            "target_profit_pct": profit_pct,
-            "round_trip_fee_pct": ROUND_TRIP_FEE_PCT,
-            "placed_at": cycle_id,
-            "trade_id": txid
+            "trade_id": txid,
+            "client_order_id": client_order_id,
         }
+        complete_order_intent(client_order_id)
         save_state(state)
         record_trade_history(
             {
@@ -2543,7 +2852,8 @@ def place_limit_buy(price, volume, cycle_id, target_profit_pct=None, post_only=F
                 "post_only": post_only,
                 "target_profit_pct": profit_pct,
                 "round_trip_fee_pct": ROUND_TRIP_FEE_PCT,
-                "txid": txid
+                "txid": txid,
+                "client_order_id": client_order_id,
             }
         )
         log_and_console(
@@ -2558,6 +2868,7 @@ def place_limit_buy(price, volume, cycle_id, target_profit_pct=None, post_only=F
             round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
             gross_target_pct=profit_pct + ROUND_TRIP_FEE_PCT,
             txid=txid,
+            client_order_id=client_order_id,
             result=result.get("result")
         )
         log_trade_activity(
@@ -2572,6 +2883,7 @@ def place_limit_buy(price, volume, cycle_id, target_profit_pct=None, post_only=F
             round_trip_fee_pct=ROUND_TRIP_FEE_PCT,
             gross_target_pct=profit_pct + ROUND_TRIP_FEE_PCT,
             txid=txid,
+            client_order_id=client_order_id,
             trade_id=txid,
             result=result.get("result")
         )
@@ -2637,6 +2949,29 @@ def place_limit_sell(
         )
         return {"dry_run": True}
 
+    order_state = {
+        "volume": sell_volume,
+        "buy_price": buy_price,
+        "sell_price": sell_price,
+        "buy_txid": buy_txid,
+        "target_profit_pct": target_profit_pct,
+        "round_trip_fee_pct": ROUND_TRIP_FEE_PCT,
+        "placed_at": cycle_id,
+        "trade_id": buy_txid,
+    }
+    intent_key = str(buy_txid) if buy_txid else None
+    client_order_id = begin_order_intent(
+        "sell",
+        "limit",
+        sell_price,
+        sell_volume,
+        cycle_id,
+        intent_key=intent_key,
+        order_state=order_state,
+    )
+    if client_order_id is None:
+        return None
+
     result = safe_kraken_private(
         "SELL",
         "/0/private/AddOrder",
@@ -2645,17 +2980,18 @@ def place_limit_sell(
             "type": "sell",
             "ordertype": "limit",
             "price": str(sell_price),
-            "volume": str(sell_volume)
+            "volume": str(sell_volume),
+            "cl_ord_id": client_order_id,
         }
     )
 
     if not result:
         log_trade_activity(
-            "SELL_ORDER_REJECTED",
+            "SELL_ORDER_SUBMISSION_UNCONFIRMED",
             cycle_id=cycle_id,
             side="sell",
             ordertype="limit",
-            reason="api_no_result",
+            reason="pending_client_order_id_reconciliation",
             price=sell_price,
             volume=sell_volume,
             buy_price=buy_price,
@@ -2669,14 +3005,14 @@ def place_limit_sell(
         txid = txids[0] if txids else None
         if not txid:
             log_event(
-                "ORDER_REJECTED",
+                "ORDER_SUBMISSION_AMBIGUOUS",
                 cycle_id=cycle_id,
                 side="sell",
                 reason="missing_txid",
                 result=result.get("result")
             )
             log_trade_activity(
-                "SELL_ORDER_REJECTED",
+                "SELL_ORDER_SUBMISSION_UNCONFIRMED",
                 cycle_id=cycle_id,
                 side="sell",
                 ordertype="limit",
@@ -2687,26 +3023,25 @@ def place_limit_sell(
                 buy_txid=buy_txid,
                 result=result.get("result")
             )
-            return result
+            return None
 
         state["stats"]["sell_orders_placed"] += 1
         state["open_sell_orders"][txid] = {
+            **order_state,
             "txid": txid,
-            "volume": sell_volume,
-            "buy_price": buy_price,
-            "sell_price": sell_price,
-            "buy_txid": buy_txid,
-            "target_profit_pct": target_profit_pct,
-            "round_trip_fee_pct": ROUND_TRIP_FEE_PCT,
-            "placed_at": cycle_id,
-            "trade_id": buy_txid or txid
+            "trade_id": buy_txid or txid,
+            "client_order_id": client_order_id,
         }
+        if buy_txid:
+            state["pending_profit_sells"].pop(str(buy_txid), None)
+        complete_order_intent(client_order_id)
         save_state(state)
         log_and_console(
             "SELL_ORDER_PLACED",
             message=f"sell {sell_volume} @ {sell_price}",
             cycle_id=cycle_id,
             txid=txid,
+            client_order_id=client_order_id,
             volume=sell_volume,
             price=sell_price,
             buy_price=buy_price,
@@ -2725,6 +3060,7 @@ def place_limit_sell(
             side="sell",
             ordertype="limit",
             txid=txid,
+            client_order_id=client_order_id,
             trade_id=buy_txid or txid,
             volume=sell_volume,
             price=sell_price,
@@ -3300,6 +3636,16 @@ def weather_report_bot_decides(sentiment):
     )
 
 
+def confidence_gate_failure(confidence):
+    if confidence >= CONF_THRESHOLD:
+        return None
+    return {
+        "reason": "confidence_below_threshold",
+        "confidence": confidence,
+        "confidence_threshold": CONF_THRESHOLD,
+    }
+
+
 def signal_gate_failure(sentiment, now):
     if not USE_SIGNAL_STATUS_GATES:
         return None
@@ -3308,11 +3654,18 @@ def signal_gate_failure(sentiment, now):
     age_minutes = signal_age_minutes(sentiment, now)
     freshness_state = signal_freshness_state(sentiment, now)
     contract = freshness_contract(sentiment)
+    weather_decides = weather_report_bot_decides(sentiment)
+    if age_minutes is None:
+        return {
+            "reason": "signal_timestamp_missing",
+            "signal_status": signal_status,
+            "bot_action_allowed": sentiment.get("bot_action_allowed"),
+            "source_status_result": "processed_at_missing",
+        }
     if (
-        signal_status
-        and signal_status != "fresh"
+        signal_status != "fresh"
         and not contract
-        and not weather_report_bot_decides(sentiment)
+        and not weather_decides
     ):
         return {
             "reason": "signal_not_fresh",
@@ -3331,8 +3684,8 @@ def signal_gate_failure(sentiment, now):
 
     if (
         REQUIRE_BOT_ACTION_ALLOWED
-        and sentiment.get("bot_action_allowed") is False
-        and not weather_report_bot_decides(sentiment)
+        and sentiment.get("bot_action_allowed") is not True
+        and not weather_decides
     ):
         return {
             "reason": "bot_action_not_allowed",
@@ -3357,11 +3710,18 @@ def signal_gate_failure(sentiment, now):
 
     source_status = sentiment.get("source_status", {})
     for source in CRITICAL_SOURCE_STATUSES:
-        status = source_status.get(source, {})
+        status = source_status.get(source)
         if not isinstance(status, dict):
+            if not contract:
+                return {
+                    "reason": "critical_source_status_missing",
+                    "signal_status": signal_status,
+                    "bot_action_allowed": sentiment.get("bot_action_allowed"),
+                    "source_status_result": f"{source}:missing",
+                }
             continue
         if (
-            status.get("status") not in (None, "fresh", "not_configured")
+            status.get("status") not in ("fresh", "not_configured")
             and not contract
         ):
             return {
@@ -3527,7 +3887,66 @@ def current_inventory_usd(current_price):
         (order.get("buy_price") or current_price) * (order.get("volume") or 0)
         for order in state["open_sell_orders"].values()
     )
-    return open_buy_notional + open_sell_notional
+    pending_sell_notional = sum(
+        (order.get("buy_price") or current_price) * (order.get("volume") or 0)
+        for order in state.get("pending_profit_sells", {}).values()
+    )
+    pending_buy_notional = sum(
+        (intent.get("price") or current_price) * (intent.get("volume") or 0)
+        for intent in state.get("pending_order_intents", {}).values()
+        if isinstance(intent, dict) and intent.get("side") == "buy"
+    )
+    return (
+        open_buy_notional
+        + open_sell_notional
+        + pending_sell_notional
+        + pending_buy_notional
+    )
+
+
+def open_sell_for_buy(buy_txid):
+    buy_txid = str(buy_txid)
+    return next(
+        (
+            order
+            for order in state.get("open_sell_orders", {}).values()
+            if str(order.get("buy_txid")) == buy_txid
+        ),
+        None,
+    )
+
+
+def retry_pending_profit_sells(cycle_id):
+    for pending_key, pending in list(
+        state.get("pending_profit_sells", {}).items()
+    ):
+        buy_txid = pending.get("buy_txid") or pending_key
+        if open_sell_for_buy(buy_txid):
+            state["pending_profit_sells"].pop(pending_key, None)
+            save_state(state)
+            continue
+        if pending_intent_for("sell", str(buy_txid))[1] is not None:
+            continue
+
+        volume = round_volume(pending.get("volume") or 0)
+        min_volume = get_min_order_volume()
+        if volume <= 0 or (min_volume and volume < min_volume):
+            log_event(
+                "PROFIT_SELL_DEFERRED_BELOW_MIN_VOLUME",
+                cycle_id=cycle_id,
+                buy_txid=buy_txid,
+                volume=volume,
+                min_volume=min_volume,
+            )
+            continue
+
+        place_profit_sell_for_buy(
+            cycle_id,
+            buy_txid,
+            pending.get("buy_price"),
+            volume,
+            pending.get("target_profit_pct"),
+        )
 
 
 def place_profit_sell_for_buy(
@@ -3588,74 +4007,100 @@ def process_open_buy_orders(cycle_id):
             continue
 
         order_status = status.get("status")
-        if order_status == "closed":
-            fill = fill_values(
-                status,
-                fallback_volume=order.get("volume"),
-                fallback_price=order.get("price")
-            )
+        if order_status not in ("closed", "canceled", "expired"):
+            continue
+
+        execution = order_execution(
+            status,
+            fallback_volume=order.get("volume"),
+            fallback_price=order.get("price"),
+        )
+        executed_volume = execution["executed_volume"]
+        fill_price = execution["average_price"] or order.get("price")
+        del state["open_buy_orders"][txid]
+
+        if executed_volume > 0 and fill_price:
             state["stats"]["buy_orders_filled"] += 1
-            del state["open_buy_orders"][txid]
-            save_state(state)
+            if execution["remaining_volume"] > 0:
+                state["stats"].setdefault("buy_partial_fill_events", 0)
+                state["stats"]["buy_partial_fill_events"] += 1
+            state["pending_profit_sells"][str(txid)] = {
+                "buy_txid": txid,
+                "buy_price": fill_price,
+                "volume": executed_volume,
+                "target_profit_pct": order.get(
+                    "target_profit_pct",
+                    TARGET_PROFIT_PCT,
+                ),
+                "round_trip_fee_pct": order.get(
+                    "round_trip_fee_pct",
+                    ROUND_TRIP_FEE_PCT,
+                ),
+                "queued_at": cycle_id,
+                "source_order_status": order_status,
+                "buy_fee": execution["fee"],
+                "buy_cost": execution["cost"],
+            }
+        save_state(state)
+
+        if executed_volume > 0 and fill_price:
+            event = (
+                "BUY_ORDER_FILLED"
+                if execution["remaining_volume"] <= 0
+                else "BUY_ORDER_PARTIALLY_FILLED"
+            )
             log_and_console(
-                "BUY_ORDER_FILLED",
-                message=f"buy filled @ {round_price(fill['price'])}",
+                event,
+                message=f"buy filled {executed_volume} @ {round_price(fill_price)}",
                 cycle_id=cycle_id,
                 txid=txid,
-                volume=fill["volume"],
-                price=fill["price"],
-                cost=fill["cost"],
-                fee=fill["fee"]
+                order_status=order_status,
+                volume=executed_volume,
+                remaining_volume=execution["remaining_volume"],
+                price=fill_price,
+                cost=execution["cost"],
+                fee=execution["fee"],
             )
             log_trade_activity(
-                "BUY_ORDER_FILLED",
+                event,
                 cycle_id=cycle_id,
                 side="buy",
                 txid=txid,
                 trade_id=order.get("trade_id") or txid,
-                volume=fill["volume"],
-                price=fill["price"],
-                cost=fill["cost"],
-                fee=fill["fee"],
+                order_status=order_status,
+                volume=executed_volume,
+                remaining_volume=execution["remaining_volume"],
+                price=fill_price,
+                cost=execution["cost"],
+                fee=execution["fee"],
                 target_profit_pct=order.get("target_profit_pct"),
-                round_trip_fee_pct=order.get("round_trip_fee_pct")
+                round_trip_fee_pct=order.get("round_trip_fee_pct"),
             )
-            place_profit_sell_for_buy(
-                cycle_id,
-                txid,
-                fill["price"],
-                fill["volume"],
-                order.get("target_profit_pct")
-            )
-        elif order_status in ("canceled", "expired"):
-            del state["open_buy_orders"][txid]
-            save_state(state)
+            retry_pending_profit_sells(cycle_id)
+
+        if order_status in ("canceled", "expired"):
             log_and_console(
                 "ORDER_" + order_status.upper(),
                 message=f"buy order {order_status}",
                 cycle_id=cycle_id,
                 txid=txid,
-                side="buy"
-            )
-            log_trade_activity(
-                "BUY_ORDER_" + order_status.upper(),
-                cycle_id=cycle_id,
                 side="buy",
-                txid=txid,
-                trade_id=order.get("trade_id") or txid,
-                price=order.get("price"),
-                volume=order.get("volume"),
-                order_status=order_status
+                executed_volume=executed_volume,
+                remaining_volume=execution["remaining_volume"],
             )
             notify_order_tracker(
                 trade_id=order.get("trade_id") or txid,
                 side="buy",
-                price=order.get("price"),
-                quantity=order.get("volume"),
+                price=fill_price or order.get("price"),
+                quantity=executed_volume or order.get("volume"),
                 order_id=txid,
+                fee=execution["fee"] or None,
                 timestamp=cycle_id,
-                notes=f"order_status={order_status}",
-                status=order_status
+                notes=(
+                    f"order_status={order_status};"
+                    f"executed_volume={executed_volume}"
+                ),
+                status=order_status,
             )
 
 
@@ -3668,75 +4113,109 @@ def process_open_sell_orders(cycle_id):
             continue
 
         order_status = status.get("status")
-        if order_status == "closed":
-            fill = fill_values(
-                status,
-                fallback_volume=order.get("volume"),
-                fallback_price=order.get("sell_price")
-            )
+        if order_status not in ("closed", "canceled", "expired"):
+            continue
+
+        execution = order_execution(
+            status,
+            fallback_volume=order.get("volume"),
+            fallback_price=order.get("sell_price"),
+        )
+        executed_volume = execution["executed_volume"]
+        remaining_volume = execution["remaining_volume"]
+        fill_price = execution["average_price"] or order.get("sell_price")
+        del state["open_sell_orders"][txid]
+
+        if executed_volume > 0:
             state["stats"]["sell_orders_filled"] += 1
-            state["last_sell_price"] = fill["price"] or order.get("sell_price")
+            state["last_sell_price"] = fill_price
             state["last_sell_at"] = cycle_id
-            del state["open_sell_orders"][txid]
-            save_state(state)
+            if remaining_volume > 0:
+                state["stats"].setdefault("sell_partial_fill_events", 0)
+                state["stats"]["sell_partial_fill_events"] += 1
+
+        buy_txid = order.get("buy_txid") or f"remaining-{txid}"
+        if remaining_volume > 0:
+            state["pending_profit_sells"][str(buy_txid)] = {
+                "buy_txid": buy_txid,
+                "buy_price": order.get("buy_price"),
+                "volume": remaining_volume,
+                "target_profit_pct": order.get("target_profit_pct"),
+                "round_trip_fee_pct": order.get(
+                    "round_trip_fee_pct",
+                    ROUND_TRIP_FEE_PCT,
+                ),
+                "queued_at": cycle_id,
+                "source_order_status": order_status,
+                "replacement_sell_price": order.get("sell_price"),
+            }
+        save_state(state)
+
+        if executed_volume > 0:
+            event = (
+                "SELL_ORDER_FILLED"
+                if remaining_volume <= 0
+                else "SELL_ORDER_PARTIALLY_FILLED"
+            )
             log_and_console(
-                "SELL_ORDER_FILLED",
-                message=f"sell filled @ {round_price(state['last_sell_price'])}",
+                event,
+                message=f"sell filled {executed_volume} @ {round_price(fill_price)}",
                 cycle_id=cycle_id,
                 txid=txid,
-                volume=fill["volume"],
-                price=state["last_sell_price"],
-                cost=fill["cost"],
-                fee=fill["fee"],
-                buy_price=order.get("buy_price")
+                order_status=order_status,
+                volume=executed_volume,
+                remaining_volume=remaining_volume,
+                price=fill_price,
+                cost=execution["cost"],
+                fee=execution["fee"],
+                buy_price=order.get("buy_price"),
             )
             log_trade_activity(
-                "SELL_ORDER_FILLED",
+                event,
                 cycle_id=cycle_id,
                 side="sell",
                 txid=txid,
                 trade_id=order.get("trade_id") or order.get("buy_txid") or txid,
-                volume=fill["volume"],
-                price=state["last_sell_price"],
-                cost=fill["cost"],
-                fee=fill["fee"],
+                order_status=order_status,
+                volume=executed_volume,
+                remaining_volume=remaining_volume,
+                price=fill_price,
+                cost=execution["cost"],
+                fee=execution["fee"],
                 buy_price=order.get("buy_price"),
                 buy_txid=order.get("buy_txid"),
                 target_profit_pct=order.get("target_profit_pct"),
-                round_trip_fee_pct=order.get("round_trip_fee_pct")
+                round_trip_fee_pct=order.get("round_trip_fee_pct"),
             )
-        elif order_status in ("canceled", "expired"):
-            del state["open_sell_orders"][txid]
-            save_state(state)
+
+        if order_status in ("canceled", "expired"):
             log_and_console(
                 "ORDER_" + order_status.upper(),
                 message=f"sell order {order_status}",
                 cycle_id=cycle_id,
                 txid=txid,
-                side="sell"
-            )
-            log_trade_activity(
-                "SELL_ORDER_" + order_status.upper(),
-                cycle_id=cycle_id,
                 side="sell",
-                txid=txid,
-                trade_id=order.get("trade_id") or order.get("buy_txid") or txid,
-                price=order.get("sell_price"),
-                volume=order.get("volume"),
-                buy_price=order.get("buy_price"),
-                buy_txid=order.get("buy_txid"),
-                order_status=order_status
+                executed_volume=executed_volume,
+                remaining_volume=remaining_volume,
             )
             notify_order_tracker(
                 trade_id=order.get("trade_id") or order.get("buy_txid") or txid,
                 side="sell",
-                price=order.get("sell_price"),
-                quantity=order.get("volume"),
+                price=fill_price or order.get("sell_price"),
+                quantity=executed_volume or order.get("volume"),
                 order_id=txid,
+                fee=execution["fee"] or None,
                 timestamp=cycle_id,
-                notes=f"order_status={order_status}",
-                status=order_status
+                notes=(
+                    f"order_status={order_status};"
+                    f"executed_volume={executed_volume};"
+                    f"remaining_volume={remaining_volume}"
+                ),
+                status=order_status,
             )
+
+        if remaining_volume > 0:
+            retry_pending_profit_sells(cycle_id)
 
 
 def maybe_handle_submitted_buy(
@@ -3782,9 +4261,15 @@ def maybe_handle_submitted_buy(
     txids = result_payload.get("txid", [])
     txid = txids[0] if txids else None
     fill = result.get("fill", {})
+    order_details = result.get("order")
 
-    fill_volume = float(fill.get("fill_volume") or 0)
-    fill_price = float(fill.get("fill_price") or 0)
+    execution = order_execution(
+        order_details,
+        fallback_volume=volume,
+        fallback_price=price,
+    )
+    fill_volume = execution["executed_volume"]
+    fill_price = execution["average_price"] or 0
     order_status = fill.get("order_status")
 
     if txid:
@@ -3805,6 +4290,18 @@ def maybe_handle_submitted_buy(
 
     if txid and order_status == "closed" and fill_volume > 0 and fill_price > 0:
         state["stats"]["buy_orders_filled"] += 1
+        state["open_buy_orders"].pop(txid, None)
+        state["pending_profit_sells"][str(txid)] = {
+            "buy_txid": txid,
+            "buy_price": fill_price,
+            "volume": fill_volume,
+            "target_profit_pct": profit_pct,
+            "round_trip_fee_pct": ROUND_TRIP_FEE_PCT,
+            "queued_at": cycle_id,
+            "source_order_status": order_status,
+            "buy_fee": execution["fee"],
+            "buy_cost": execution["cost"],
+        }
         save_state(state)
         log_trade_activity(
             "BUY_ORDER_FILLED",
@@ -3814,30 +4311,27 @@ def maybe_handle_submitted_buy(
             trade_id=txid,
             volume=fill_volume,
             price=fill_price,
-            fee=fill.get("fill_fee"),
-            cost=fill.get("fill_cost"),
+            fee=execution["fee"],
+            cost=execution["cost"],
             target_profit_pct=profit_pct,
             round_trip_fee_pct=ROUND_TRIP_FEE_PCT
         )
-        place_profit_sell_for_buy(
-            cycle_id,
-            txid,
-            fill_price,
-            fill_volume,
-            profit_pct
-        )
+        retry_pending_profit_sells(cycle_id)
         return
 
     if txid:
-        state["open_buy_orders"][txid] = {
-            "txid": txid,
-            "volume": volume,
-            "price": price,
-            "target_profit_pct": profit_pct,
-            "round_trip_fee_pct": ROUND_TRIP_FEE_PCT,
-            "placed_at": cycle_id,
-            "trade_id": txid
-        }
+        state["open_buy_orders"].setdefault(
+            txid,
+            {
+                "txid": txid,
+                "volume": volume,
+                "price": price,
+                "target_profit_pct": profit_pct,
+                "round_trip_fee_pct": ROUND_TRIP_FEE_PCT,
+                "placed_at": cycle_id,
+                "trade_id": txid,
+            },
+        )
         save_state(state)
 
 
@@ -3853,8 +4347,19 @@ def run_cycle():
         skip_cycle("missing_price", cycle_id)
         return
 
+    reconcile_pending_order_intents()
     process_open_buy_orders(cycle_id)
     process_open_sell_orders(cycle_id)
+    retry_pending_profit_sells(cycle_id)
+
+    if state.get("pending_order_intents"):
+        skip_cycle(
+            "pending_order_reconciliation",
+            cycle_id,
+            price=price,
+            pending_order_intent_count=len(state["pending_order_intents"]),
+        )
+        return
 
     signal = load_signal()
     if signal is None:
@@ -3865,10 +4370,18 @@ def run_cycle():
     raw_signal = sentiment["execution_signal"]
     confidence = sentiment["confidence"]
     smoothed_signal = smooth_signal(raw_signal)
-    weighted_signal = (
+    pre_volatility_weighted_signal = (
         smoothed_signal * confidence
         if CONFIDENCE_WEIGHTING
         else smoothed_signal
+    )
+    (
+        weighted_signal,
+        volatility_dampening_multiplier,
+        realized_volatility,
+    ) = apply_volatility_dampening(
+        pre_volatility_weighted_signal,
+        sentiment,
     )
     age_minutes = signal_age_minutes(sentiment, now)
     risk_multiplier = numeric_or_none(sentiment.get("risk_multiplier"))
@@ -3906,8 +4419,14 @@ def run_cycle():
         price=price,
         execution_signal=raw_signal,
         smoothed_signal=smoothed_signal,
+        pre_volatility_weighted_signal=pre_volatility_weighted_signal,
         weighted_signal=weighted_signal,
         confidence=confidence,
+        confidence_threshold=CONF_THRESHOLD,
+        volatility_dampening=VOLATILITY_DAMPENING,
+        volatility_cutoff=VOLATILITY_CUTOFF,
+        volatility_dampening_multiplier=volatility_dampening_multiplier,
+        realized_volatility_24h_pct=realized_volatility,
         asset_sentiment=sentiment.get("asset_sentiment"),
         liquidity_risk=sentiment.get("liquidity_risk"),
         btc_relative_strength=sentiment.get("btc_relative_strength"),
@@ -4020,6 +4539,20 @@ def run_cycle():
         )
         return
 
+    confidence_failure = confidence_gate_failure(confidence)
+    if confidence_failure is not None:
+        skip_cycle(
+            confidence_failure.pop("reason"),
+            cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            volatility_dampening_multiplier=volatility_dampening_multiplier,
+            **confidence_failure,
+        )
+        return
+
     if risk_context_usable:
         should_pause, risk_block_reason = risk_context_trade_pause(risk_view)
         if should_pause:
@@ -4036,6 +4569,24 @@ def run_cycle():
                 contributor_count=sentiment.get("contributor_count"),
                 bot_action_allowed=sentiment.get("bot_action_allowed"),
                 **risk_view
+            )
+            return
+
+        risk_buy_score = risk_view.get("risk_adjusted_buy_score")
+        if (
+            risk_buy_score is None
+            or risk_buy_score < RISK_CONTEXT_MIN_BUY_SCORE
+        ):
+            skip_cycle(
+                "risk_context_buy_score_below_min",
+                cycle_id,
+                price=price,
+                execution_signal=raw_signal,
+                smoothed_signal=smoothed_signal,
+                weighted_signal=weighted_signal,
+                confidence=confidence,
+                risk_context_min_buy_score=RISK_CONTEXT_MIN_BUY_SCORE,
+                **risk_view,
             )
             return
 
@@ -4418,14 +4969,34 @@ def run_cycle():
                 if isinstance(result_payload, dict)
                 else []
             )
+            submission_pending = (
+                not result
+                and pending_intent_for("buy")[1] is not None
+            )
             append_decision_csv(
-                "trade_executed" if result else "trade_rejected",
+                (
+                    "trade_executed"
+                    if result
+                    else (
+                        "trade_pending_reconciliation"
+                        if submission_pending
+                        else "trade_rejected"
+                    )
+                ),
                 cycle_id=cycle_id,
                 side="buy",
                 reason=(
                     "dry_run"
                     if DRY_RUN
-                    else ("limit_submitted" if result else "rejected")
+                    else (
+                        "limit_submitted"
+                        if result
+                        else (
+                            "pending_reconciliation"
+                            if submission_pending
+                            else "rejected"
+                        )
+                    )
                 ),
                 volume=volume,
                 price=target_price,
@@ -4586,15 +5157,44 @@ def run_cycle():
         **risk_view
     )
 
-    result = place_market_buy(volume, cycle_id)
+    result = place_market_buy(
+        volume,
+        cycle_id,
+        target_profit_pct=target_profit_pct,
+        reference_price=price,
+    )
     result_payload = result.get("result") if isinstance(result, dict) else None
     fill = result.get("fill", {}) if isinstance(result, dict) else {}
     txids = result_payload.get("txid", []) if isinstance(result_payload, dict) else []
+    submission_pending = (
+        not result
+        and pending_intent_for("buy")[1] is not None
+    )
     append_decision_csv(
-        "trade_executed" if result else "trade_rejected",
+        (
+            "trade_executed"
+            if result
+            else (
+                "trade_pending_reconciliation"
+                if submission_pending
+                else "trade_rejected"
+            )
+        ),
         cycle_id=cycle_id,
         side="buy",
-        reason="dry_run" if DRY_RUN else ("submitted" if result else "rejected"),
+        reason=(
+            "dry_run"
+            if DRY_RUN
+            else (
+                "submitted"
+                if result
+                else (
+                    "pending_reconciliation"
+                    if submission_pending
+                    else "rejected"
+                )
+            )
+        ),
         volume=volume,
         price=price,
         trade_value=trade_value,
@@ -4630,6 +5230,23 @@ def run_cycle():
         price,
         target_profit_pct
     )
+
+    if submission_pending:
+        log_event(
+            "CYCLE_SUMMARY",
+            cycle_id=cycle_id,
+            price=price,
+            execution_signal=raw_signal,
+            smoothed_signal=smoothed_signal,
+            weighted_signal=weighted_signal,
+            confidence=confidence,
+            side="hold",
+            reason="pending_order_reconciliation",
+            pending_order_intent_count=len(state["pending_order_intents"]),
+            deployed_inventory_usd=current_inventory_usd(price),
+            dry_run=DRY_RUN,
+        )
+        return
 
     log_event(
         "CYCLE_SUMMARY",
@@ -4683,6 +5300,7 @@ def main():
         config_file=CONFIG_FILE,
         strategy_profile=STRATEGY_PROFILE,
         state_file=STATE_FILE,
+        state_backup_file=STATE_BACKUP_FILE,
         log_file=LOG_FILE,
         trade_log_rotate_max_bytes=LOG_ROTATE_MAX_BYTES,
         trade_log_rotate_retention=LOG_ROTATE_RETENTION,
@@ -4690,6 +5308,7 @@ def main():
         shadow_trades_enabled=SHADOW_TRADES_ENABLED,
         pair=KRAKEN_PAIR,
         signal_asset_id=SELECTED_SIGNAL_ASSET_ID,
+        client_order_prefix=SENTIMENT_CLIENT_ORDER_PREFIX,
         signal_url=LLM_SIGNAL_URL,
         kraken_api_url=KRAKEN_API_URL,
         kraken_key_fingerprint=key_fingerprint(KRAKEN_API_KEY),
@@ -4702,6 +5321,8 @@ def main():
         min_trade_usd=MIN_TRADE_USD,
         confidence_threshold=CONF_THRESHOLD,
         confidence_weighting=CONFIDENCE_WEIGHTING,
+        volatility_dampening=VOLATILITY_DAMPENING,
+        volatility_cutoff=VOLATILITY_CUTOFF,
         execution_buffer_pct=EXECUTION_BUFFER_PCT,
         rebalance_cooldown_minutes=REBALANCE_COOLDOWN_MINUTES,
         cooldown_override_signal_abs=COOLDOWN_OVERRIDE_SIGNAL_ABS,

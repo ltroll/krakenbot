@@ -93,7 +93,7 @@ def load_json_with_backup(path, backup_path=None):
 
     if errors:
         raise StateRecoveryError(
-            "Unable to load range-grid state or backup: "
+            "Unable to load state or backup: "
             + "; ".join(
                 f"{entry['source']}={entry['error']}" for entry in errors
             )
