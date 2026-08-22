@@ -119,6 +119,19 @@ in recovery while the architecture work proceeds.
 
 ## Verification log
 
+### 2026-08-22 — Live sell repricing disabled
+
+- Added a fail-closed live sell-repricing control; omitted configuration now
+  means disabled.
+- The production recovery profile explicitly disables sell repricing.
+- Existing exchange orders are not canceled, amended, or recreated during
+  deployment; their current Kraken prices remain unchanged.
+- Sell-extension analysis remains shadow-only and cannot amend an order.
+- Added regression coverage proving the disabled guard dominates the live
+  `AMEND_SELL` path and production cannot enable it accidentally.
+- `python -m unittest discover -s tests`: 268 tests passed.
+- Python compilation and `git diff --check` passed.
+
 ### 2026-08-19 — P0 effective-strategy contract
 
 - Added deterministic deep route-over-base composition with stable SHA-256

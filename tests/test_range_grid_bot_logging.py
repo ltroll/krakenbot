@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 import unittest
 
@@ -127,6 +128,83 @@ class RangeGridBotLoggingTests(unittest.TestCase):
                 for call in calls
             )
         )
+
+    def test_sell_repricing_is_fail_closed_and_guards_live_amend(self):
+        tree = self._bot_tree()
+        assignment = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "sell_repricing_enabled"
+                for target in node.targets
+            )
+        )
+        self.assertIsInstance(assignment.value, ast.Call)
+        self.assertEqual(assignment.value.args[0].value, "sell_repricing_enabled")
+        self.assertIs(assignment.value.args[1].value, False)
+
+        open_sell_branch = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Compare)
+            and isinstance(node.test.left, ast.Name)
+            and node.test.left.id == "status"
+            and any(
+                isinstance(comparator, ast.Constant)
+                and comparator.value == "open"
+                for comparator in node.test.comparators
+            )
+            and any(
+                isinstance(descendant, ast.Call)
+                and isinstance(descendant.func, ast.Name)
+                and descendant.func.id == "kraken_call"
+                and descendant.args
+                and isinstance(descendant.args[0], ast.Constant)
+                and descendant.args[0].value == "AMEND_SELL"
+                for descendant in ast.walk(node)
+            )
+        )
+
+        guard_index = next(
+            index
+            for index, statement in enumerate(open_sell_branch.body)
+            if isinstance(statement, ast.If)
+            and isinstance(statement.test, ast.UnaryOp)
+            and isinstance(statement.test.op, ast.Not)
+            and isinstance(statement.test.operand, ast.Name)
+            and statement.test.operand.id == "sell_repricing_enabled"
+            and any(
+                isinstance(descendant, ast.Continue)
+                for descendant in ast.walk(statement)
+            )
+        )
+        amend_index = next(
+            index
+            for index, statement in enumerate(open_sell_branch.body)
+            if any(
+                isinstance(descendant, ast.Call)
+                and isinstance(descendant.func, ast.Name)
+                and descendant.func.id == "kraken_call"
+                and descendant.args
+                and isinstance(descendant.args[0], ast.Constant)
+                and descendant.args[0].value == "AMEND_SELL"
+                for descendant in ast.walk(statement)
+            )
+        )
+        self.assertLess(guard_index, amend_index)
+
+    def test_production_profile_explicitly_disables_sell_repricing(self):
+        profile_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "range_grid_strategy_production_recovery_source_policy.json",
+        )
+        with open(profile_path, encoding="utf-8") as handle:
+            profile = json.load(handle)
+
+        self.assertIs(profile["sell_repricing_enabled"], False)
 
 
 if __name__ == "__main__":

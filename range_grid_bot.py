@@ -609,6 +609,7 @@ price_check_interval_seconds = profile_int("price_check_interval_seconds", 120)
 range_refresh_interval_minutes = profile_int("range_refresh_interval_minutes", 60)
 max_open_sell_orders = profile_int("max_open_sell_orders", 999999)
 max_inventory_usd = profile_float("max_inventory_usd", 1e18)
+sell_repricing_enabled = profile_bool("sell_repricing_enabled", False)
 aging_start_minutes = profile_int("aging_start_minutes", 999999)
 aging_step_minutes = profile_int("aging_step_minutes", 60)
 aging_profit_reduction_pct = profile_float("aging_profit_reduction_pct", 0.0)
@@ -6300,6 +6301,7 @@ def main():
         profit_target_pct=profit_target_pct,
         entry_step_pct=entry_step_pct,
         round_trip_fee_pct=round_trip_fee_pct,
+        sell_repricing_enabled=sell_repricing_enabled,
         position_size_pct=position_size_pct,
         min_buy_notional_usd=min_buy_notional_usd,
         min_buy_volume_asset=min_buy_volume_asset,
@@ -7337,6 +7339,9 @@ def main():
                                 **sentiment_risk_fields,
                             )
 
+                    if not sell_repricing_enabled:
+                        continue
+
                     adjusted_profit_target = effective_sell_profit_target(
                         age_minutes=age_minutes,
                         base_profit_target=sell_pct_override,
@@ -7432,6 +7437,26 @@ def main():
                         adjusted_profit_target_pct=adjusted_profit_target,
                         sell_pct_override=sell_pct_override,
                         buy_source=order.get("buy_source")
+                    )
+                    log_trade_activity(
+                        "SELL_ORDER_REPRICED",
+                        mode="live",
+                        cycle_id=cycle_id,
+                        old_txid=txid,
+                        txid=txid,
+                        amend_id=amend_result.get("amend_id"),
+                        amend_recovered_after_error=(
+                            amend_recovered_after_error
+                        ),
+                        level=order.get("level"),
+                        volume=order.get("volume"),
+                        buy_price=buy_price,
+                        old_sell_price=current_sell_price,
+                        sell_price=adjusted_sell_price,
+                        age_minutes=age_minutes,
+                        adjusted_profit_target_pct=adjusted_profit_target,
+                        sell_pct_override=sell_pct_override,
+                        buy_source=order.get("buy_source"),
                     )
                     notify_order_tracker(
                         trade_id=order.get("trade_id") or txid,
@@ -10821,6 +10846,7 @@ def main():
                 "effective_max_open_sell_orders": (
                     effective_max_open_sell_orders
                 ),
+                "sell_repricing_enabled": sell_repricing_enabled,
                 "high_anchor_enabled": effective_high_anchor_enabled,
                 "weather_high_anchor_allowed": weather_high_anchor_allowed,
                 "realized_pnl_today": round(realized_pnl_today, 8),
