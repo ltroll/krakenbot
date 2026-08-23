@@ -119,6 +119,19 @@ in recovery while the architecture work proceeds.
 
 ## Verification log
 
+### 2026-08-23 — Correct live and replay fee economics
+
+- Reconciled eight completed production round trips against Kraken execution
+  data: buys paid 0.80% taker fees and resting sells paid 0.40% maker fees.
+- Updated production and its matching paper candidate to model a 1.20%
+  maker-plus-taker round trip.
+- Normalized every profile in the active ranked strategy set to the same fee
+  schedule so candidate comparisons cannot benefit from stale fee assumptions.
+- Existing exchange sell orders remain unchanged; corrected fees affect only
+  targets computed for future filled buys.
+- `python -m unittest discover -s tests`: 269 tests passed.
+- JSON validation and `git diff --check` passed.
+
 ### 2026-08-22 — Live sell repricing disabled
 
 - Added a fail-closed live sell-repricing control; omitted configuration now

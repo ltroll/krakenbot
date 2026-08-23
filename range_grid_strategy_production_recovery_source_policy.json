@@ -85,9 +85,9 @@
     "range_median": 0.001,
     "range_high_band": 0.0015
   },
-  "maker_fee_pct": 0.0025,
-  "taker_fee_pct": 0.004,
-  "round_trip_fee_pct": 0.0065,
+  "maker_fee_pct": 0.004,
+  "taker_fee_pct": 0.008,
+  "round_trip_fee_pct": 0.012,
   "position_size_pct": 0.12,
   "min_buy_notional_usd": 8.0,
   "min_buy_volume_btc": 0.0001,

@@ -37,6 +37,33 @@ def weather_report(*, phase="range_chop_accumulation", falling_tape=False):
 
 
 class RangeGridSourcePolicyTests(unittest.TestCase):
+    def test_ranked_profiles_use_observed_kraken_fee_schedule(self):
+        strategy_set_path = os.path.join(
+            ROOT,
+            "range_grid_strategy_test_set.txt",
+        )
+        with open(strategy_set_path, encoding="utf-8") as handle:
+            strategy_files = [
+                line.strip()
+                for line in handle
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+
+        mismatches = []
+        for strategy_file in strategy_files:
+            strategy_path = os.path.join(ROOT, strategy_file)
+            with open(strategy_path, encoding="utf-8") as handle:
+                strategy = json.load(handle)
+            actual = (
+                strategy.get("maker_fee_pct"),
+                strategy.get("taker_fee_pct"),
+                strategy.get("round_trip_fee_pct"),
+            )
+            if actual != (0.004, 0.008, 0.012):
+                mismatches.append((strategy_file, actual))
+
+        self.assertEqual(mismatches, [])
+
     def test_price_first_bypasses_normal_sentiment_block_and_reduces_falling_tape(self):
         config = {
             "source_entry_policy_enabled": True,
@@ -395,6 +422,9 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
             production["minimum_order_floor_cash_reserve_usd"],
             100.0,
         )
+        self.assertEqual(production["maker_fee_pct"], 0.004)
+        self.assertEqual(production["taker_fee_pct"], 0.008)
+        self.assertEqual(production["round_trip_fee_pct"], 0.012)
         self.assertTrue(candidate.pop("paper_trading_enabled"))
         self.assertFalse(production.pop("paper_trading_enabled"))
         self.assertEqual(production, candidate)
