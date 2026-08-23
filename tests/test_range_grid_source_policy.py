@@ -412,11 +412,16 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
 
         self.assertEqual(validate_strategy_config(production), [])
         self.assertTrue(production["minimum_order_floor_enabled"])
-        self.assertEqual(production["minimum_order_floor_sources"], "range_low")
-        self.assertEqual(production["minimum_order_floor_usd"], 8.0)
+        self.assertTrue(production["minimum_order_floor_require_full_size"])
+        self.assertEqual(production["min_buy_notional_usd"], 8.0)
+        self.assertEqual(
+            production["minimum_order_floor_sources"],
+            "range_low,range_median",
+        )
+        self.assertEqual(production["minimum_order_floor_usd"], 100.0)
         self.assertEqual(
             production["minimum_order_floor_cooldown_minutes"],
-            60,
+            0,
         )
         self.assertEqual(
             production["minimum_order_floor_cash_reserve_usd"],

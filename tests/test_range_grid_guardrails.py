@@ -66,6 +66,7 @@ class RangeGridGuardrailsTests(unittest.TestCase):
     def test_validate_strategy_config_accepts_minimum_order_floor(self):
         errors = guardrails.validate_strategy_config({
             "minimum_order_floor_enabled": True,
+            "minimum_order_floor_require_full_size": True,
             "minimum_order_floor_sources": "range_low",
             "minimum_order_floor_usd": 8.0,
             "minimum_order_floor_cooldown_minutes": 60,
@@ -77,6 +78,7 @@ class RangeGridGuardrailsTests(unittest.TestCase):
     def test_validate_strategy_config_rejects_bad_minimum_order_floor(self):
         errors = guardrails.validate_strategy_config({
             "minimum_order_floor_enabled": "sometimes",
+            "minimum_order_floor_require_full_size": "sometimes",
             "minimum_order_floor_sources": "range_low,banana",
             "minimum_order_floor_usd": 0,
             "minimum_order_floor_cooldown_minutes": -1,
@@ -85,6 +87,7 @@ class RangeGridGuardrailsTests(unittest.TestCase):
 
         for field in (
             "minimum_order_floor_enabled",
+            "minimum_order_floor_require_full_size",
             "minimum_order_floor_sources",
             "minimum_order_floor_usd",
             "minimum_order_floor_cooldown_minutes",

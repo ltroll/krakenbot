@@ -19,7 +19,10 @@ from range_grid_source_policy import (
     source_entry_policy_decision,
     source_entry_step_pct,
 )
-from range_grid_order_sizing import minimum_order_floor_decision
+from range_grid_order_sizing import (
+    minimum_order_floor_decision,
+    minimum_order_floor_required_block_reason,
+)
 from signal_normalizer import normalize_signal_payload
 
 
@@ -3182,6 +3185,17 @@ def simulate_approved_order_lifecycle(replay, snapshots):
                     min_buy_volume,
                 )
                 entry_notional = volume * entry_price
+            required_floor_block_reason = (
+                minimum_order_floor_required_block_reason(minimum_floor)
+            )
+            if required_floor_block_reason is not None:
+                count_key = (
+                    "minimum_order_floor_"
+                    f"{required_floor_block_reason}_blocked"
+                )
+                counts[count_key] += 1
+                source_stats[buy_source][count_key] += 1
+                continue
             if (
                 entry_notional > remaining_inventory_capacity
                 or entry_notional > remaining_bucket_capacity
@@ -3337,6 +3351,9 @@ def simulate_approved_order_lifecycle(replay, snapshots):
         ],
         "minimum_order_floor_cash_reserve_blocked": counts[
             "minimum_order_floor_cash_reserve_blocked"
+        ],
+        "minimum_order_floor_insufficient_available_usd_blocked": counts[
+            "minimum_order_floor_insufficient_available_usd_blocked"
         ],
         "modeled_profit_guard_blocked": counts[
             "modeled_profit_guard_blocked"
@@ -4164,6 +4181,11 @@ def build_strategy_comparison_rows(
             "simulation_minimum_order_floor_cash_reserve_blocked": (
                 simulation.get("minimum_order_floor_cash_reserve_blocked")
             ),
+            "simulation_minimum_order_floor_insufficient_available_usd_blocked": (
+                simulation.get(
+                    "minimum_order_floor_insufficient_available_usd_blocked"
+                )
+            ),
             "simulation_modeled_profit_guard_blocked": simulation.get(
                 "modeled_profit_guard_blocked"
             ),
@@ -4841,6 +4863,7 @@ def write_strategy_comparison_csv(comparison, output_path):
         "simulation_minimum_order_floor_applied",
         "simulation_minimum_order_floor_cooldown_blocked",
         "simulation_minimum_order_floor_cash_reserve_blocked",
+        "simulation_minimum_order_floor_insufficient_available_usd_blocked",
         "simulation_modeled_profit_guard_blocked",
         "simulation_by_source",
         "simulation_filled_range_low",
@@ -4978,6 +5001,7 @@ def write_ranked_strategy_csv(comparison, output_path):
         "simulation_minimum_order_floor_applied",
         "simulation_minimum_order_floor_cooldown_blocked",
         "simulation_minimum_order_floor_cash_reserve_blocked",
+        "simulation_minimum_order_floor_insufficient_available_usd_blocked",
         "simulation_modeled_profit_guard_blocked",
         "simulation_by_source",
         "simulation_filled_range_low",

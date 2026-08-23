@@ -43,7 +43,10 @@ from range_grid_order_safety import (
     order_execution,
     order_limit_price,
 )
-from range_grid_order_sizing import minimum_order_floor_decision
+from range_grid_order_sizing import (
+    minimum_order_floor_decision,
+    minimum_order_floor_required_block_reason,
+)
 from range_grid_source_policy import (
     source_entry_policy_decision,
     source_entry_step_pct,
@@ -6310,6 +6313,10 @@ def main():
             "minimum_order_floor_enabled",
             False,
         ),
+        minimum_order_floor_require_full_size=profile_bool(
+            "minimum_order_floor_require_full_size",
+            False,
+        ),
         minimum_order_floor_sources=profile_str(
             "minimum_order_floor_sources",
             "range_low",
@@ -8742,6 +8749,12 @@ def main():
                             "minimum_order_floor_enabled",
                             False,
                         ),
+                        "require_full_size": strategy_bool_with_fallback(
+                            route_config,
+                            strategy_config,
+                            "minimum_order_floor_require_full_size",
+                            False,
+                        ),
                         "eligible_source": False,
                         "applied": False,
                         "reason": "not_evaluated",
@@ -8967,14 +8980,7 @@ def main():
                         bucket_inventory_usd + (level * volume)
                     )
 
-                    if (
-                        skip_reason is None
-                        and (
-                            trade_notional_usd
-                            < candidate_min_buy_notional_usd
-                            or volume < candidate_min_buy_volume_btc
-                        )
-                    ):
+                    if skip_reason is None:
                         minimum_floor = minimum_order_floor_decision(
                             minimum_floor_config,
                             buy_source=buy_source,
@@ -9008,6 +9014,20 @@ def main():
                             projected_bucket_inventory_usd = (
                                 bucket_inventory_usd + trade_notional_usd
                             )
+
+                    required_floor_block_reason = (
+                        minimum_order_floor_required_block_reason(
+                            minimum_floor
+                        )
+                    )
+                    if (
+                        skip_reason is None
+                        and required_floor_block_reason is not None
+                    ):
+                        skip_reason = (
+                            "minimum_order_floor_"
+                            + required_floor_block_reason
+                        )
 
                     if (
                         skip_reason is None
@@ -9051,6 +9071,9 @@ def main():
                     minimum_order_floor_log_fields = {
                         "minimum_order_floor_enabled": minimum_floor.get(
                             "enabled"
+                        ),
+                        "minimum_order_floor_require_full_size": (
+                            minimum_floor.get("require_full_size")
                         ),
                         "minimum_order_floor_applied": minimum_floor.get(
                             "applied"

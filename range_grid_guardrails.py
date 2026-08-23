@@ -82,6 +82,7 @@ def validate_strategy_config(strategy_config):
         "open_sell_hard_cap_enabled",
         "flow_hard_block_enabled",
         "minimum_order_floor_enabled",
+        "minimum_order_floor_require_full_size",
     )
     for field in boolean_fields:
         if field in strategy_config and not isinstance(

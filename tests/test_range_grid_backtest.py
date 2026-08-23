@@ -1138,6 +1138,67 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(result["minimum_order_floor_applied"], 1)
         self.assertEqual(result["ending_committed_inventory_usd"], 12.0)
 
+    def test_order_lifecycle_places_hundred_dollar_low_and_median_orders(self):
+        strategy = {
+            "backtest_starting_cash_usd": 350.0,
+            "max_inventory_usd": 1000.0,
+            "min_buy_notional_usd": 8.0,
+            "minimum_order_floor_enabled": True,
+            "minimum_order_floor_require_full_size": True,
+            "minimum_order_floor_sources": "range_low,range_median",
+            "minimum_order_floor_usd": 100.0,
+            "minimum_order_floor_cooldown_minutes": 0,
+            "minimum_order_floor_cash_reserve_usd": 100.0,
+        }
+        timestamps = [
+            "2026-06-13T12:00:00+00:00",
+            "2026-06-13T12:15:00+00:00",
+            "2026-06-13T12:30:00+00:00",
+        ]
+        snapshots = [
+            make_snapshot(
+                timestamp,
+                95.0,
+                strategy_overrides=strategy,
+            )
+            for timestamp in timestamps
+        ]
+        replay = {
+            "approved_events": [
+                {
+                    "captured_at": timestamps[0],
+                    "level": 100.0,
+                    "buy_source": "range_low",
+                    "effective_position_size_pct_before_inventory_pressure": 0.1,
+                    "effective_max_inventory_usd": 1000.0,
+                },
+                {
+                    "captured_at": timestamps[1],
+                    "level": 99.0,
+                    "buy_source": "range_median",
+                    "effective_position_size_pct_before_inventory_pressure": 0.1,
+                    "effective_max_inventory_usd": 1000.0,
+                },
+                {
+                    "captured_at": timestamps[2],
+                    "level": 98.0,
+                    "buy_source": "range_low",
+                    "effective_position_size_pct_before_inventory_pressure": 0.1,
+                    "effective_max_inventory_usd": 1000.0,
+                },
+            ]
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(replay, snapshots)
+
+        self.assertEqual(result["orders_placed"], 2)
+        self.assertEqual(result["minimum_order_floor_applied"], 2)
+        self.assertEqual(
+            result["minimum_order_floor_cash_reserve_blocked"],
+            1,
+        )
+        self.assertEqual(result["ending_committed_inventory_usd"], 200.0)
+
     def test_order_lifecycle_paces_floor_assisted_orders(self):
         strategy = {
             "backtest_starting_cash_usd": 200.0,

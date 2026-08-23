@@ -119,6 +119,23 @@ in recovery while the architecture work proceeds.
 
 ## Verification log
 
+### 2026-08-23 — Production order sizing floor
+
+- Added an enforced $100 source-specific floor to production and its matching
+  paper candidate for low and median entries.
+- Kept the general $8 exchange minimum separate so high-band sizing remains
+  risk-adjusted and is neither rounded up nor blocked by the $100 floor.
+- Retained the existing source cooldowns for signal pacing and a $100 spendable
+  cash reserve; the floor cannot spend the reserve.
+- High-band entries are not rounded up and must reach $100 through normal
+  risk-adjusted sizing before they can trade.
+- Existing buys and sells remain unchanged; the sizing floor applies only to
+  future buy submissions.
+- Added unit and simulated-lifecycle coverage for $100 low/median orders, cash
+  reserve preservation, and rejection of undersized high-band orders.
+- `python -m unittest discover -s tests`: 272 tests passed.
+- JSON validation and `git diff --check` passed.
+
 ### 2026-08-23 — Correct live and replay fee economics
 
 - Reconciled eight completed production round trips against Kraken execution

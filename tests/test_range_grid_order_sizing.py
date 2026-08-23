@@ -1,7 +1,10 @@
 from datetime import datetime, timedelta, timezone
 import unittest
 
-from range_grid_order_sizing import minimum_order_floor_decision
+from range_grid_order_sizing import (
+    minimum_order_floor_decision,
+    minimum_order_floor_required_block_reason,
+)
 
 
 class MinimumOrderFloorTests(unittest.TestCase):
@@ -82,6 +85,59 @@ class MinimumOrderFloorTests(unittest.TestCase):
         )
 
         self.assertTrue(result["applied"])
+
+    def test_applies_configured_hundred_dollar_median_floor(self):
+        config = {
+            "minimum_order_floor_enabled": True,
+            "minimum_order_floor_require_full_size": True,
+            "minimum_order_floor_sources": "range_low,range_median",
+            "minimum_order_floor_usd": 100.0,
+            "minimum_order_floor_cash_reserve_usd": 100.0,
+            "minimum_order_floor_cooldown_minutes": 0,
+        }
+
+        result = minimum_order_floor_decision(
+            config,
+            buy_source="range_median",
+            available_usd=600.0,
+            calculated_notional_usd=35.0,
+            min_buy_notional_usd=8.0,
+            now=self.now,
+            last_floor_at_by_source={},
+        )
+
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["floor_notional_usd"], 100.0)
+        self.assertIsNone(
+            minimum_order_floor_required_block_reason(result)
+        )
+
+    def test_hundred_dollar_floor_preserves_hundred_dollar_reserve(self):
+        config = {
+            "minimum_order_floor_enabled": True,
+            "minimum_order_floor_require_full_size": True,
+            "minimum_order_floor_sources": "range_low,range_median",
+            "minimum_order_floor_usd": 100.0,
+            "minimum_order_floor_cash_reserve_usd": 100.0,
+            "minimum_order_floor_cooldown_minutes": 0,
+        }
+
+        result = minimum_order_floor_decision(
+            config,
+            buy_source="range_low",
+            available_usd=199.99,
+            calculated_notional_usd=35.0,
+            min_buy_notional_usd=8.0,
+            now=self.now,
+            last_floor_at_by_source={},
+        )
+
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["reason"], "cash_reserve")
+        self.assertEqual(
+            minimum_order_floor_required_block_reason(result),
+            "cash_reserve",
+        )
 
 
 if __name__ == "__main__":
