@@ -74,6 +74,11 @@ def minimum_order_floor_decision(
         float(min_buy_volume_asset or 0.0),
     )
     enabled = _strategy_bool(config, "minimum_order_floor_enabled", False)
+    require_full_size = _strategy_bool(
+        config,
+        "minimum_order_floor_require_full_size",
+        False,
+    )
     sources = _source_tokens(
         (config or {}).get("minimum_order_floor_sources", "range_low")
     )
@@ -100,6 +105,7 @@ def minimum_order_floor_decision(
 
     details = {
         "enabled": enabled,
+        "require_full_size": require_full_size,
         "eligible_source": source in sources,
         "applied": False,
         "reason": None,
@@ -153,3 +159,27 @@ def minimum_order_floor_decision(
     details["applied"] = True
     details["reason"] = "minimum_order_floor"
     return details
+
+
+def minimum_order_floor_required_block_reason(decision):
+    """Return why an enforced source floor cannot be satisfied, if any."""
+
+    if not isinstance(decision, dict):
+        return None
+    if not decision.get("require_full_size"):
+        return None
+    if not decision.get("eligible_source") or decision.get("applied"):
+        return None
+    if decision.get("calculated_notional_usd", 0.0) >= decision.get(
+        "floor_notional_usd",
+        0.0,
+    ):
+        return None
+    reason = decision.get("reason")
+    if reason in {
+        "cash_reserve",
+        "cooldown",
+        "insufficient_available_usd",
+    }:
+        return reason
+    return None
