@@ -3,6 +3,7 @@ import os
 import unittest
 
 from range_grid_entry_placement import (
+    entry_grid_levels,
     entry_placement_mode,
     entry_price_placement_decision,
 )
@@ -54,6 +55,34 @@ class RangeGridEntryPlacementTests(unittest.TestCase):
         self.assertTrue(decision["allowed"])
         self.assertEqual(decision["mode"], "resting_grid")
         self.assertAlmostEqual(decision["max_above_level_pct"], 0.0035)
+
+    def test_resting_grid_levels_include_anchor_as_first_slot(self):
+        levels = entry_grid_levels(
+            100.0,
+            0.0028,
+            3,
+            self.config,
+            "range_low",
+        )
+
+        self.assertEqual(len(levels), 3)
+        self.assertAlmostEqual(levels[0], 100.0)
+        self.assertAlmostEqual(levels[1], 99.72)
+        self.assertAlmostEqual(levels[2], 99.44)
+
+    def test_triggered_grid_levels_keep_legacy_first_step_discount(self):
+        levels = entry_grid_levels(
+            100.0,
+            0.0028,
+            3,
+            {},
+            "range_low",
+        )
+
+        self.assertEqual(len(levels), 3)
+        self.assertAlmostEqual(levels[0], 99.72)
+        self.assertAlmostEqual(levels[1], 99.44)
+        self.assertAlmostEqual(levels[2], 99.16)
 
     def test_resting_grid_rejects_level_outside_nearby_zone(self):
         decision = entry_price_placement_decision(
@@ -170,4 +199,3 @@ class RangeGridEntryPlacementTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

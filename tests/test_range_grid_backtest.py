@@ -2584,6 +2584,43 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertTrue(approved)
         self.assertIsNone(reason)
 
+    def test_build_candidates_starts_resting_low_and_median_at_anchor(self):
+        snapshot = make_snapshot(
+            "2026-06-12T12:00:00+00:00",
+            99.6,
+            strategy_modes=["low", "median"],
+            strategy_overrides={
+                "entry_placement_mode_by_source": {
+                    "range_low": "resting_grid",
+                    "range_median": "resting_grid",
+                },
+                "resting_grid_max_above_level_pct_by_source": {
+                    "range_low": 0.0035,
+                    "range_median": 0.0055,
+                },
+            },
+        )
+
+        result = backtest.build_candidates(snapshot, 99.6)
+        candidates_by_source = {}
+        for candidate in result["raw_candidates"]:
+            candidates_by_source.setdefault(
+                candidate["buy_source"],
+                [],
+            ).append(candidate)
+
+        low_candidates = candidates_by_source["range_low"]
+        median_candidates = candidates_by_source["range_median"]
+        self.assertEqual(low_candidates[0]["grid_slot"], "range_low:1")
+        self.assertAlmostEqual(low_candidates[0]["level"], 95.0)
+        self.assertAlmostEqual(low_candidates[1]["level"], 94.05)
+        self.assertEqual(
+            median_candidates[0]["grid_slot"],
+            "range_median:1",
+        )
+        self.assertAlmostEqual(median_candidates[0]["level"], 99.5)
+        self.assertAlmostEqual(median_candidates[1]["level"], 98.505)
+
     def test_evaluate_candidate_allows_nearby_resting_low_order(self):
         snapshot = make_snapshot(
             "2026-06-12T12:00:00+00:00",

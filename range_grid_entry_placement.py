@@ -59,6 +59,33 @@ def entry_placement_mode(config, buy_source, fallback_config=None):
     return "triggered"
 
 
+def entry_grid_levels(
+    anchor,
+    step_pct,
+    grid_size,
+    config,
+    buy_source,
+    *,
+    fallback_config=None,
+):
+    """Build anchor-based levels with semantics matching placement mode.
+
+    Triggered entries preserve the legacy behavior where the first level is
+    one step below the anchor.  A resting grid includes the anchor as its
+    first level so it can actually be placed in advance of a price crossing.
+    """
+
+    mode = entry_placement_mode(config, buy_source, fallback_config)
+    first_step = 0 if mode == "resting_grid" else 1
+    return sorted(
+        [
+            anchor * (1 - (step_pct * (index + first_step)))
+            for index in range(grid_size)
+        ],
+        reverse=True,
+    )
+
+
 def resting_grid_max_above_level_pct(
     config,
     buy_source,

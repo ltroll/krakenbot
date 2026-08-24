@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from fee_config import effective_round_trip_fee_pct
 from range_grid_effective_strategy import resolve_effective_strategy
 from range_grid_entry_placement import (
+    entry_grid_levels,
     entry_placement_mode,
     entry_price_placement_decision,
 )
@@ -2462,16 +2463,6 @@ def select_dynamic_strategy_modes(base_modes, operating_mode, range_position, co
     if llm_enabled:
         selected_modes.insert(0, "llm_target")
     return selected_modes
-
-
-def compute_grid(anchor, entry_step_pct, max_grid_size):
-    return sorted(
-        [
-            anchor * (1 - (entry_step_pct * (i + 1)))
-            for i in range(max_grid_size)
-        ],
-        reverse=True
-    )
 
 
 def snapshot_price(snapshot):
@@ -6107,7 +6098,13 @@ def build_candidates(snapshot, price):
                 source_grid_size = int(
                     source_config.get("max_grid_size", max_grid_size)
                 )
-                grid = compute_grid(mean, candidate_step_pct, source_grid_size)
+                grid = entry_grid_levels(
+                    mean,
+                    candidate_step_pct,
+                    source_grid_size,
+                    source_config,
+                    buy_source,
+                )
                 sell_pct_override = None
             elif strategy_mode == "median" and median is not None:
                 buy_source = "range_median"
@@ -6122,10 +6119,12 @@ def build_candidates(snapshot, price):
                 source_grid_size = int(
                     source_config.get("max_grid_size", max_grid_size)
                 )
-                grid = compute_grid(
+                grid = entry_grid_levels(
                     median,
                     candidate_step_pct,
                     source_grid_size,
+                    source_config,
+                    buy_source,
                 )
                 sell_pct_override = None
             elif strategy_mode == "high":
@@ -6168,7 +6167,13 @@ def build_candidates(snapshot, price):
                 source_grid_size = int(
                     source_config.get("max_grid_size", max_grid_size)
                 )
-                grid = compute_grid(low, candidate_step_pct, source_grid_size)
+                grid = entry_grid_levels(
+                    low,
+                    candidate_step_pct,
+                    source_grid_size,
+                    source_config,
+                    buy_source,
+                )
                 sell_pct_override = None
 
             source_effective_strategy = effective_strategy_record(

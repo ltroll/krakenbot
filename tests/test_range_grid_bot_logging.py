@@ -129,6 +129,28 @@ class RangeGridBotLoggingTests(unittest.TestCase):
             )
         )
 
+    def test_live_low_mean_and_median_use_shared_entry_grid_semantics(self):
+        tree = self._bot_tree()
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "entry_grid_levels"
+        ]
+
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(len(call.args) == 5 for call in calls))
+        self.assertTrue(all(
+            any(
+                keyword.arg == "fallback_config"
+                and isinstance(keyword.value, ast.Name)
+                and keyword.value.id == "strategy_config"
+                for keyword in call.keywords
+            )
+            for call in calls
+        ))
+
     def test_sell_repricing_is_fail_closed_and_guards_live_amend(self):
         tree = self._bot_tree()
         assignment = next(

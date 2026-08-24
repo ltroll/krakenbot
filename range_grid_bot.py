@@ -37,6 +37,7 @@ from range_grid_guardrails import (
 )
 from range_grid_effective_strategy import resolve_effective_strategy
 from range_grid_entry_placement import (
+    entry_grid_levels,
     entry_placement_mode,
     entry_price_placement_decision,
 )
@@ -3892,16 +3893,6 @@ def refresh_range():
 # ----------------------
 # GRID
 # ----------------------
-
-def compute_grid(anchor, step_pct, grid_size):
-    return sorted(
-        [
-            anchor * (1 - (step_pct * (i + 1)))
-            for i in range(grid_size)
-        ],
-        reverse=True
-    )
-
 
 def compute_high_anchor_grid(
     high,
@@ -8563,14 +8554,17 @@ def main():
                                 price_regime_volatility_pct,
                                 buy_source,
                             )
-                            grid = compute_grid(
+                            grid = entry_grid_levels(
                                 mean,
                                 route_entry_step_pct,
                                 int(strategy_float(
                                     route_config,
                                     "max_grid_size",
                                     max_grid_size,
-                                ))
+                                )),
+                                route_config,
+                                buy_source,
+                                fallback_config=strategy_config,
                             )
                             sell_pct_override = None
                         elif strategy_mode == "median" and median is not None:
@@ -8588,14 +8582,17 @@ def main():
                                 price_regime_volatility_pct,
                                 buy_source,
                             )
-                            grid = compute_grid(
+                            grid = entry_grid_levels(
                                 median,
                                 route_entry_step_pct,
                                 int(strategy_float(
                                     route_config,
                                     "max_grid_size",
                                     max_grid_size,
-                                ))
+                                )),
+                                route_config,
+                                buy_source,
+                                fallback_config=strategy_config,
                             )
                             sell_pct_override = None
                         elif strategy_mode == "high":
@@ -8650,14 +8647,17 @@ def main():
                                 price_regime_volatility_pct,
                                 buy_source,
                             )
-                            grid = compute_grid(
+                            grid = entry_grid_levels(
                                 low,
                                 route_entry_step_pct,
                                 int(strategy_float(
                                     route_config,
                                     "max_grid_size",
                                     max_grid_size,
-                                ))
+                                )),
+                                route_config,
+                                buy_source,
+                                fallback_config=strategy_config,
                             )
                             sell_pct_override = None
 
