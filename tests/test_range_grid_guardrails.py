@@ -98,6 +98,45 @@ class RangeGridGuardrailsTests(unittest.TestCase):
                 msg=f"missing validation error for {field}: {errors}",
             )
 
+    def test_validate_strategy_config_accepts_fear_greed_profit_target(self):
+        errors = guardrails.validate_strategy_config({
+            "fear_greed_profit_target_enabled": True,
+            "fear_greed_profit_target_sources": "range_low,range_median",
+            "fear_greed_profit_target_greed_start_index": 50,
+            "fear_greed_profit_target_full_greed_index": 75,
+            "fear_greed_profit_target_max_multiplier": 1.5,
+            "fear_greed_profit_target_max_multiplier_by_source": {
+                "range_low": 1.5,
+                "range_median": 2.0,
+            },
+        })
+
+        self.assertFalse(errors)
+
+    def test_validate_strategy_config_rejects_bad_fear_greed_profit_target(self):
+        errors = guardrails.validate_strategy_config({
+            "fear_greed_profit_target_enabled": "yes",
+            "fear_greed_profit_target_sources": "range_low,banana",
+            "fear_greed_profit_target_greed_start_index": 80,
+            "fear_greed_profit_target_full_greed_index": 70,
+            "fear_greed_profit_target_max_multiplier": 0.9,
+            "fear_greed_profit_target_max_multiplier_by_source": {
+                "range_low": 0.5,
+            },
+        })
+
+        for field in (
+            "fear_greed_profit_target_enabled",
+            "fear_greed_profit_target_sources",
+            "fear_greed_profit_target_full_greed_index",
+            "fear_greed_profit_target_max_multiplier",
+            "fear_greed_profit_target_max_multiplier_by_source",
+        ):
+            self.assertTrue(
+                any(field in error for error in errors),
+                msg=f"missing validation error for {field}: {errors}",
+            )
+
     def test_validate_strategy_config_rejects_out_of_bounds_execution_threshold(self):
         errors = guardrails.validate_strategy_config({
             "grid_anchor": "low,high",

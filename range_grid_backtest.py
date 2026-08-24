@@ -14,6 +14,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
+from fee_config import effective_round_trip_fee_pct
 from range_grid_effective_strategy import resolve_effective_strategy
 from range_grid_source_policy import (
     source_entry_policy_decision,
@@ -23,6 +24,7 @@ from range_grid_order_sizing import (
     minimum_order_floor_decision,
     minimum_order_floor_required_block_reason,
 )
+from range_grid_profit_target import fear_greed_profit_target_adjustment
 from signal_normalizer import normalize_signal_payload
 
 
@@ -2519,16 +2521,29 @@ def sell_backlog_effective_count(snapshot):
     return effective_count
 
 
-def approved_event_profit_target_pct(snapshot, event):
+def approved_event_profit_target_adjustment(snapshot, event):
     config = effective_strategy_payload(snapshot, event.get("buy_source"))
     signal = signal_payload(snapshot)
-    return effective_sell_profit_target_pct(
+    base_profit_target_pct = effective_sell_profit_target_pct(
         config,
         buy_source=event.get("buy_source"),
         base_profit_target=safe_float(event.get("sell_pct_override")),
         age_minutes=0,
         regime=sell_policy_regime(config, signal),
     )
+    return fear_greed_profit_target_adjustment(
+        config,
+        buy_source=event.get("buy_source"),
+        fear_greed_index=signal.get("fear_greed_index"),
+        base_profit_target_pct=base_profit_target_pct,
+    )
+
+
+def approved_event_profit_target_pct(snapshot, event):
+    return approved_event_profit_target_adjustment(
+        snapshot,
+        event,
+    )["effective_profit_target_pct"]
 
 
 def infer_live_only_blockers(snapshot, event):
@@ -2784,11 +2799,12 @@ def simulate_missed_opportunity(snapshot, event, snapshots, snapshot_price_index
         return None
 
     hold_end = entry_time + timedelta(hours=BACKTEST_POTENTIAL_MAX_HOLD_HOURS)
-    target_profit_pct = approved_event_profit_target_pct(snapshot, event)
+    target_adjustment = approved_event_profit_target_adjustment(snapshot, event)
+    target_profit_pct = target_adjustment["effective_profit_target_pct"]
     config = effective_strategy_payload(snapshot, event.get("buy_source"))
     round_trip_fee_pct = max(
         0.0,
-        safe_float(config.get("round_trip_fee_pct")) or 0.0,
+        effective_round_trip_fee_pct(config, 0.0) or 0.0,
     )
     target_price_move_pct = target_profit_pct + round_trip_fee_pct
     target_return_pct = target_price_move_pct * 100.0
@@ -2816,6 +2832,16 @@ def simulate_missed_opportunity(snapshot, event, snapshots, snapshot_price_index
 
     return {
         "target_profit_pct": round(target_profit_pct * 100.0, 4),
+        "base_profit_target_pct": round(
+            target_adjustment["base_profit_target_pct"] * 100.0,
+            4,
+        ),
+        "fear_greed_index": target_adjustment["fear_greed_index"],
+        "fear_greed_profit_target_multiplier": round(
+            target_adjustment["multiplier"],
+            6,
+        ),
+        "fear_greed_profit_target_reason": target_adjustment["reason"],
         "round_trip_fee_pct": round(round_trip_fee_pct * 100.0, 4),
         "target_price_move_pct": round(target_price_move_pct * 100.0, 4),
         "take_profit_reached": take_profit_reached_at is not None,
@@ -2960,6 +2986,41 @@ def simulate_approved_order_lifecycle(replay, snapshots):
             position_value += position["entry_notional_usd"] * (1.0 + net_return)
         return available_cash_usd + pending_value + position_value
 
+    def lock_position_target_at_fill(position, fill_snapshot):
+        target_adjustment = approved_event_profit_target_adjustment(
+            fill_snapshot,
+            position,
+        )
+        config = effective_strategy_payload(
+            fill_snapshot,
+            position.get("buy_source"),
+        )
+        profit_target_pct = target_adjustment[
+            "effective_profit_target_pct"
+        ]
+        round_trip_fee_pct = max(
+            0.0,
+            effective_round_trip_fee_pct(config, 0.0) or 0.0,
+        )
+        position.update({
+            "profit_target_pct": profit_target_pct,
+            "base_profit_target_pct": target_adjustment[
+                "base_profit_target_pct"
+            ],
+            "fear_greed_index": target_adjustment["fear_greed_index"],
+            "fear_greed_profit_target_multiplier": target_adjustment[
+                "multiplier"
+            ],
+            "fear_greed_profit_target_reason": target_adjustment[
+                "reason"
+            ],
+            "round_trip_fee_pct": round_trip_fee_pct,
+            "sell_target_price": position["entry_price"] * (
+                1.0 + profit_target_pct + round_trip_fee_pct
+            ),
+        })
+        return position
+
     for captured_at, snapshot in ordered_snapshots:
         price = snapshot_price(snapshot)
         if price is None or price <= 0:
@@ -2972,6 +3033,7 @@ def simulate_approved_order_lifecycle(replay, snapshots):
             if price <= order["entry_price"]:
                 position = dict(order)
                 position["filled_at"] = captured_at.isoformat()
+                lock_position_target_at_fill(position, snapshot)
                 newly_filled.append(position)
                 counts["filled_entries"] += 1
                 source_stats[order["buy_source"]]["filled_entries"] += 1
@@ -3219,11 +3281,6 @@ def simulate_approved_order_lifecycle(replay, snapshots):
                 source_stats[buy_source]["below_min_volume"] += 1
                 continue
 
-            profit_target_pct = approved_event_profit_target_pct(snapshot, event)
-            round_trip_fee_pct = max(
-                0.0,
-                safe_float(config.get("round_trip_fee_pct")) or 0.0,
-            )
             order = {
                 "approved_at": captured_at.isoformat(),
                 "buy_source": buy_source,
@@ -3242,10 +3299,8 @@ def simulate_approved_order_lifecycle(replay, snapshots):
                 "inventory_pressure_size_multiplier": inventory_pressure[
                     "size_multiplier"
                 ],
-                "profit_target_pct": profit_target_pct,
-                "round_trip_fee_pct": round_trip_fee_pct,
-                "sell_target_price": entry_price * (
-                    1.0 + profit_target_pct + round_trip_fee_pct
+                "sell_pct_override": safe_float(
+                    event.get("sell_pct_override")
                 ),
             }
             available_cash_usd -= entry_notional
@@ -3260,6 +3315,7 @@ def simulate_approved_order_lifecycle(replay, snapshots):
                 )
             if price <= entry_price:
                 order["filled_at"] = captured_at.isoformat()
+                lock_position_target_at_fill(order, snapshot)
                 open_positions.append(order)
                 counts["filled_entries"] += 1
                 source_stats[buy_source]["filled_entries"] += 1
@@ -3379,7 +3435,7 @@ def simulate_approved_order_lifecycle(replay, snapshots):
             "Approved candidates become GTC limit buys; no fill is assumed until a captured price touches the limit.",
             "Sell targets include the configured profit margin plus round_trip_fee_pct, matching live target construction.",
             "Position sizing applies the live sentiment regime, smoothed risk, risk-context, source-policy, flow, leveling, and evolving inventory-pressure multipliers.",
-            "The configured low-band minimum-order floor is modeled after all gates, including its cash reserve and cooldown.",
+            "The configured source-specific minimum-order floor is modeled after all gates, including its cash reserve and cooldown.",
             "Position sizing consumes simulated available cash and respects effective max inventory, bucket inventory, minimum notional, and minimum volume constraints.",
             "backtest_starting_deployed_inventory_usd affects sizing and capacity but is not included in simulated P&L.",
             "High-band orders respect max_open_high_anchor_orders, including configured aged-sell exposure weighting.",
@@ -3622,6 +3678,16 @@ def summarize_potential_from_approved_events(replay, snapshots):
         for result in potential_results
         if result.get("risk_context_position_size_effective_multiplier") is not None
     ]
+    fear_greed_target_multipliers = [
+        result.get("fear_greed_profit_target_multiplier")
+        for result in potential_results
+        if result.get("fear_greed_profit_target_multiplier") is not None
+    ]
+    fear_greed_target_applied_count = sum(
+        1
+        for multiplier in fear_greed_target_multipliers
+        if multiplier > 1.0
+    )
 
     def summarize_phase_results(results):
         phase_end_returns = [
@@ -3715,6 +3781,14 @@ def summarize_potential_from_approved_events(replay, snapshots):
         "avg_risk_size_multiplier": (
             round(statistics.mean(size_multipliers), 6)
             if size_multipliers
+            else None
+        ),
+        "fear_greed_profit_target_applied_count": (
+            fear_greed_target_applied_count
+        ),
+        "avg_fear_greed_profit_target_multiplier": (
+            round(statistics.mean(fear_greed_target_multipliers), 6)
+            if fear_greed_target_multipliers
             else None
         ),
         "risk_sized_avg_end_return_pct": (
@@ -4031,6 +4105,25 @@ def build_strategy_comparison_rows(
             "operating_mode": strategy_payload.get("operating_mode"),
             "sentiment_control_mode": strategy_payload.get("sentiment_control_mode"),
             "dynamic_anchor_mode": strategy_payload.get("dynamic_anchor_mode"),
+            "fear_greed_profit_target_enabled": strategy_payload.get(
+                "fear_greed_profit_target_enabled",
+                False,
+            ),
+            "fear_greed_profit_target_sources": strategy_payload.get(
+                "fear_greed_profit_target_sources"
+            ),
+            "fear_greed_profit_target_greed_start_index": strategy_payload.get(
+                "fear_greed_profit_target_greed_start_index"
+            ),
+            "fear_greed_profit_target_full_greed_index": strategy_payload.get(
+                "fear_greed_profit_target_full_greed_index"
+            ),
+            "fear_greed_profit_target_max_multiplier_by_source": json.dumps(
+                strategy_payload.get(
+                    "fear_greed_profit_target_max_multiplier_by_source"
+                ) or {},
+                sort_keys=True,
+            ),
             "entry_step_pct": strategy_payload.get("entry_step_pct"),
             "volatility_reference_pct": strategy_payload.get("volatility_reference_pct"),
             "raw_candidates": summary.get("raw_candidates", 0),
@@ -4118,6 +4211,12 @@ def build_strategy_comparison_rows(
             "potential_avg_max_drawdown_pct": potential.get("avg_max_drawdown_pct"),
             "potential_avg_risk_size_multiplier": potential.get(
                 "avg_risk_size_multiplier"
+            ),
+            "potential_fear_greed_profit_target_applied_count": potential.get(
+                "fear_greed_profit_target_applied_count"
+            ),
+            "potential_avg_fear_greed_profit_target_multiplier": potential.get(
+                "avg_fear_greed_profit_target_multiplier"
             ),
             "potential_risk_sized_avg_end_return_pct": potential.get(
                 "risk_sized_avg_end_return_pct"
@@ -4802,6 +4901,11 @@ def write_strategy_comparison_csv(comparison, output_path):
         "operating_mode",
         "sentiment_control_mode",
         "dynamic_anchor_mode",
+        "fear_greed_profit_target_enabled",
+        "fear_greed_profit_target_sources",
+        "fear_greed_profit_target_greed_start_index",
+        "fear_greed_profit_target_full_greed_index",
+        "fear_greed_profit_target_max_multiplier_by_source",
         "entry_step_pct",
         "volatility_reference_pct",
         "raw_candidates",
@@ -4837,6 +4941,8 @@ def write_strategy_comparison_csv(comparison, output_path):
         "potential_avg_max_runup_pct",
         "potential_avg_max_drawdown_pct",
         "potential_avg_risk_size_multiplier",
+        "potential_fear_greed_profit_target_applied_count",
+        "potential_avg_fear_greed_profit_target_multiplier",
         "potential_risk_sized_avg_end_return_pct",
         "potential_risk_sized_avg_net_end_return_pct",
         "potential_risk_sized_avg_max_runup_pct",
@@ -4962,6 +5068,11 @@ def write_ranked_strategy_csv(comparison, output_path):
         "candidate_efficiency",
         "approved_llm_target",
         "dynamic_anchor_mode",
+        "fear_greed_profit_target_enabled",
+        "fear_greed_profit_target_sources",
+        "fear_greed_profit_target_greed_start_index",
+        "fear_greed_profit_target_full_greed_index",
+        "fear_greed_profit_target_max_multiplier_by_source",
         "blocked_reason_counts",
         "blocked_reason_counts_by_source",
         "source_entry_policy_reason_counts",
@@ -4976,6 +5087,8 @@ def write_ranked_strategy_csv(comparison, output_path):
         "potential_avg_max_runup_pct",
         "potential_avg_max_drawdown_pct",
         "potential_avg_risk_size_multiplier",
+        "potential_fear_greed_profit_target_applied_count",
+        "potential_avg_fear_greed_profit_target_multiplier",
         "potential_risk_sized_avg_end_return_pct",
         "potential_risk_sized_avg_net_end_return_pct",
         "potential_risk_sized_avg_max_runup_pct",

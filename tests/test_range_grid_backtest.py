@@ -18,6 +18,7 @@ def make_snapshot(
     open_sell_orders=None,
     runtime_status_overrides=None,
     risk_context=None,
+    fear_greed_index=None,
 ):
     strategy_payload = {
         "grid_anchor": "low,high",
@@ -63,6 +64,8 @@ def make_snapshot(
     }
     if risk_context is not None:
         signal_payload["risk_context"] = risk_context
+    if fear_greed_index is not None:
+        signal_payload["fear_greed_index"] = fear_greed_index
 
     return {
         "captured_at": captured_at,
@@ -1072,6 +1075,163 @@ class RangeGridBacktestTests(unittest.TestCase):
             "2026-06-13T12:20:00+00:00",
         )
         self.assertAlmostEqual(result["net_end_return_pct"], 1.05, places=6)
+
+    def test_potential_applies_greed_anchored_profit_multiplier(self):
+        strategy = {
+            "profit_target_pct": 0.01,
+            "round_trip_fee_pct": 0.012,
+            "fear_greed_profit_target_enabled": True,
+            "fear_greed_profit_target_sources": "range_median",
+            "fear_greed_profit_target_greed_start_index": 50,
+            "fear_greed_profit_target_full_greed_index": 75,
+            "fear_greed_profit_target_max_multiplier_by_source": {
+                "range_median": 2.0,
+            },
+        }
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                100.0,
+                strategy_overrides=strategy,
+                fear_greed_index=73,
+            ),
+            make_snapshot(
+                "2026-06-13T12:20:00+00:00",
+                103.2,
+                strategy_overrides=strategy,
+                fear_greed_index=73,
+            ),
+        ]
+        event = {
+            "captured_at": "2026-06-13T12:00:00+00:00",
+            "level": 100.0,
+            "buy_source": "range_median",
+        }
+
+        result = backtest.simulate_missed_opportunity(
+            snapshots[0],
+            event,
+            snapshots,
+        )
+
+        self.assertEqual(result["base_profit_target_pct"], 1.0)
+        self.assertEqual(result["fear_greed_index"], 73.0)
+        self.assertAlmostEqual(
+            result["fear_greed_profit_target_multiplier"],
+            1.92,
+            places=6,
+        )
+        self.assertEqual(result["target_profit_pct"], 1.92)
+        self.assertEqual(result["target_price_move_pct"], 3.12)
+        self.assertTrue(result["take_profit_reached"])
+
+    def test_order_lifecycle_realizes_greed_adjusted_profit_target(self):
+        strategy = {
+            "backtest_starting_cash_usd": 100.0,
+            "position_size_pct": 1.0,
+            "max_inventory_usd": 1000.0,
+            "profit_target_pct": 0.01,
+            "round_trip_fee_pct": 0.012,
+            "fear_greed_profit_target_enabled": True,
+            "fear_greed_profit_target_sources": "range_median",
+            "fear_greed_profit_target_greed_start_index": 50,
+            "fear_greed_profit_target_full_greed_index": 75,
+            "fear_greed_profit_target_max_multiplier_by_source": {
+                "range_median": 2.0,
+            },
+        }
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                100.0,
+                strategy_overrides=strategy,
+                fear_greed_index=75,
+            ),
+            make_snapshot(
+                "2026-06-13T12:20:00+00:00",
+                103.2,
+                strategy_overrides=strategy,
+                fear_greed_index=75,
+            ),
+        ]
+        replay = {
+            "approved_events": [{
+                "captured_at": "2026-06-13T12:00:00+00:00",
+                "level": 100.0,
+                "buy_source": "range_median",
+                "effective_position_size_pct_before_inventory_pressure": 1.0,
+                "effective_max_inventory_usd": 1000.0,
+            }]
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(
+            replay,
+            snapshots,
+        )
+
+        self.assertEqual(result["closed_positions"], 1)
+        self.assertEqual(result["realized_net_pnl_usd"], 2.0)
+        self.assertEqual(result["net_return_on_starting_capital_pct"], 2.0)
+
+    def test_order_lifecycle_locks_greed_target_when_pending_buy_fills(self):
+        strategy = {
+            "backtest_starting_cash_usd": 100.0,
+            "position_size_pct": 1.0,
+            "max_inventory_usd": 1000.0,
+            "profit_target_pct": 0.01,
+            "round_trip_fee_pct": 0.012,
+            "fear_greed_profit_target_enabled": True,
+            "fear_greed_profit_target_sources": "range_median",
+            "fear_greed_profit_target_greed_start_index": 50,
+            "fear_greed_profit_target_full_greed_index": 75,
+            "fear_greed_profit_target_max_multiplier_by_source": {
+                "range_median": 2.0,
+            },
+        }
+        snapshots = [
+            make_snapshot(
+                "2026-06-13T12:00:00+00:00",
+                101.0,
+                strategy_overrides=strategy,
+                fear_greed_index=25,
+            ),
+            make_snapshot(
+                "2026-06-13T12:10:00+00:00",
+                100.0,
+                strategy_overrides=strategy,
+                fear_greed_index=75,
+            ),
+            make_snapshot(
+                "2026-06-13T12:20:00+00:00",
+                102.3,
+                strategy_overrides=strategy,
+                fear_greed_index=25,
+            ),
+            make_snapshot(
+                "2026-06-13T12:30:00+00:00",
+                103.2,
+                strategy_overrides=strategy,
+                fear_greed_index=25,
+            ),
+        ]
+        replay = {
+            "approved_events": [{
+                "captured_at": "2026-06-13T12:00:00+00:00",
+                "level": 100.0,
+                "buy_source": "range_median",
+                "effective_position_size_pct_before_inventory_pressure": 1.0,
+                "effective_max_inventory_usd": 1000.0,
+            }]
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(
+            replay,
+            snapshots,
+        )
+
+        self.assertEqual(result["filled_entries"], 1)
+        self.assertEqual(result["closed_positions"], 1)
+        self.assertEqual(result["realized_net_pnl_usd"], 2.0)
 
     def test_order_lifecycle_requires_limit_touch_before_fill(self):
         snapshots = [

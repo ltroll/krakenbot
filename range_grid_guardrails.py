@@ -83,6 +83,7 @@ def validate_strategy_config(strategy_config):
         "flow_hard_block_enabled",
         "minimum_order_floor_enabled",
         "minimum_order_floor_require_full_size",
+        "fear_greed_profit_target_enabled",
     )
     for field in boolean_fields:
         if field in strategy_config and not isinstance(
@@ -139,6 +140,7 @@ def validate_strategy_config(strategy_config):
         "stale_level_reanchor_profit_min_samples",
         "minimum_order_floor_cooldown_minutes",
         "minimum_order_floor_cash_reserve_usd",
+        "fear_greed_profit_target_max_multiplier",
     )
     for field in non_negative_numeric_fields:
         value = strategy_config.get(field)
@@ -151,6 +153,20 @@ def validate_strategy_config(strategy_config):
             continue
         if numeric < 0:
             errors.append(f"{field} must be >= 0")
+
+    fear_greed_max_multiplier = strategy_config.get(
+        "fear_greed_profit_target_max_multiplier"
+    )
+    if fear_greed_max_multiplier is not None:
+        try:
+            fear_greed_max_multiplier = float(fear_greed_max_multiplier)
+        except Exception:
+            pass
+        else:
+            if fear_greed_max_multiplier < 1:
+                errors.append(
+                    "fear_greed_profit_target_max_multiplier must be >= 1"
+                )
 
     value = strategy_config.get("execution_signal_threshold")
     if value is not None:
@@ -217,6 +233,39 @@ def validate_strategy_config(strategy_config):
         if numeric < 0 or numeric > 1:
             errors.append(f"{field} must be between 0 and 1")
 
+    fear_greed_index_fields = (
+        "fear_greed_profit_target_greed_start_index",
+        "fear_greed_profit_target_full_greed_index",
+    )
+    for field in fear_greed_index_fields:
+        value = strategy_config.get(field)
+        if value is None:
+            continue
+        try:
+            numeric = float(value)
+        except Exception:
+            errors.append(f"{field} must be numeric")
+            continue
+        if numeric < 0 or numeric > 100:
+            errors.append(f"{field} must be between 0 and 100")
+
+    try:
+        greed_start = float(strategy_config.get(
+            "fear_greed_profit_target_greed_start_index",
+            50,
+        ))
+        full_greed = float(strategy_config.get(
+            "fear_greed_profit_target_full_greed_index",
+            75,
+        ))
+        if full_greed <= greed_start:
+            errors.append(
+                "fear_greed_profit_target_full_greed_index must be greater than "
+                "fear_greed_profit_target_greed_start_index"
+            )
+    except Exception:
+        pass
+
     try:
         profit_target_pct = float(strategy_config.get("profit_target_pct", 0.01))
         min_profit_target_pct = float(
@@ -270,6 +319,27 @@ def validate_strategy_config(strategy_config):
                     f"{source}"
                 )
 
+    fear_greed_sources = strategy_config.get(
+        "fear_greed_profit_target_sources"
+    )
+    if fear_greed_sources is not None:
+        if isinstance(fear_greed_sources, str):
+            parsed_fear_greed_sources = fear_greed_sources.split(",")
+        elif isinstance(fear_greed_sources, (list, tuple)):
+            parsed_fear_greed_sources = fear_greed_sources
+        else:
+            parsed_fear_greed_sources = []
+            errors.append(
+                "fear_greed_profit_target_sources must be a string or list"
+            )
+        for source in parsed_fear_greed_sources:
+            normalized_source = str(source or "").strip().lower()
+            if normalized_source not in VALID_BUY_SOURCES:
+                errors.append(
+                    "fear_greed_profit_target_sources contains unsupported "
+                    f"source: {source}"
+                )
+
     source_numeric_maps = {
         "sell_target_offset_pct_by_source": ("numeric", None),
         "entry_step_pct_by_source": ("positive", None),
@@ -279,6 +349,10 @@ def validate_strategy_config(strategy_config):
         "aging_profit_reduction_pct_by_source": ("non_negative", None),
         "min_profit_target_pct_by_source": ("non_negative", None),
         "buy_cooldown_after_sell_fill_minutes_by_source": ("non_negative", None),
+        "fear_greed_profit_target_max_multiplier_by_source": (
+            "at_least_one",
+            None,
+        ),
     }
     for field, (kind, _) in source_numeric_maps.items():
         value = strategy_config.get(field)
@@ -303,6 +377,8 @@ def validate_strategy_config(strategy_config):
                 errors.append(f"{field}.{source} must be > 0")
             elif kind == "non_negative" and numeric < 0:
                 errors.append(f"{field}.{source} must be >= 0")
+            elif kind == "at_least_one" and numeric < 1:
+                errors.append(f"{field}.{source} must be >= 1")
 
     entry_policies = strategy_config.get("entry_policy_by_source")
     if entry_policies is not None:

@@ -47,6 +47,10 @@ from range_grid_order_sizing import (
     minimum_order_floor_decision,
     minimum_order_floor_required_block_reason,
 )
+from range_grid_profit_target import (
+    fear_greed_profit_target_adjustment,
+    fear_greed_profit_target_policy,
+)
 from range_grid_source_policy import (
     source_entry_policy_decision,
     source_entry_step_pct,
@@ -6333,6 +6337,27 @@ def main():
             "minimum_order_floor_cash_reserve_usd",
             0.0,
         ),
+        fear_greed_profit_target_enabled=profile_bool(
+            "fear_greed_profit_target_enabled",
+            False,
+        ),
+        fear_greed_profit_target_sources=profile_str(
+            "fear_greed_profit_target_sources",
+            "",
+        ),
+        fear_greed_profit_target_greed_start_index=profile_float(
+            "fear_greed_profit_target_greed_start_index",
+            50.0,
+        ),
+        fear_greed_profit_target_full_greed_index=profile_float(
+            "fear_greed_profit_target_full_greed_index",
+            75.0,
+        ),
+        fear_greed_profit_target_max_multiplier_by_source=(
+            strategy_config.get(
+                "fear_greed_profit_target_max_multiplier_by_source"
+            ) or {}
+        ),
         execution_signal_threshold=execution_signal_threshold,
         llm_target_proximity_pct=llm_target_proximity_pct,
         llm_target_min_signal=llm_target_min_signal,
@@ -7198,7 +7223,22 @@ def main():
                         gross_pnl=gross_pnl,
                         estimated_net_pnl=estimated_net_pnl,
                         realized_net_pnl=realized_net_pnl,
-                        hold_minutes=hold_minutes
+                        hold_minutes=hold_minutes,
+                        base_sell_profit_target_pct=order.get(
+                            "base_sell_profit_target_pct"
+                        ),
+                        locked_sell_profit_target_pct=order.get(
+                            "locked_sell_profit_target_pct"
+                        ),
+                        fear_greed_index_at_target_lock=order.get(
+                            "fear_greed_index_at_target_lock"
+                        ),
+                        fear_greed_profit_target_multiplier=order.get(
+                            "fear_greed_profit_target_multiplier"
+                        ),
+                        fear_greed_profit_target_reason=order.get(
+                            "fear_greed_profit_target_reason"
+                        )
                     )
                     log_trade_activity(
                         "SELL_ORDER_FILLED",
@@ -7218,7 +7258,22 @@ def main():
                         gross_pnl=gross_pnl,
                         estimated_net_pnl=estimated_net_pnl,
                         realized_net_pnl=realized_net_pnl,
-                        hold_minutes=hold_minutes
+                        hold_minutes=hold_minutes,
+                        base_sell_profit_target_pct=order.get(
+                            "base_sell_profit_target_pct"
+                        ),
+                        locked_sell_profit_target_pct=order.get(
+                            "locked_sell_profit_target_pct"
+                        ),
+                        fear_greed_index_at_target_lock=order.get(
+                            "fear_greed_index_at_target_lock"
+                        ),
+                        fear_greed_profit_target_multiplier=order.get(
+                            "fear_greed_profit_target_multiplier"
+                        ),
+                        fear_greed_profit_target_reason=order.get(
+                            "fear_greed_profit_target_reason"
+                        )
                     )
                     continue
 
@@ -7943,12 +7998,62 @@ def main():
                 )
                 sell_pct_override = order.get("sell_pct_override")
                 buy_source = order.get("buy_source")
-                target_profit_pct = effective_sell_profit_target(
-                    age_minutes=0,
-                    base_profit_target=sell_pct_override,
-                    buy_source=buy_source,
-                    regime=regime,
+                target_profit_pct = optional_float(
+                    order.get("locked_sell_profit_target_pct")
                 )
+                if target_profit_pct is None:
+                    base_target_profit_pct = effective_sell_profit_target(
+                        age_minutes=0,
+                        base_profit_target=sell_pct_override,
+                        buy_source=buy_source,
+                        regime=regime,
+                    )
+                    fear_greed_target = fear_greed_profit_target_adjustment(
+                        order.get("fear_greed_profit_target_policy")
+                        or strategy_config,
+                        buy_source=buy_source,
+                        fear_greed_index=sentiment_payload.get(
+                            "fear_greed_index"
+                        ),
+                        base_profit_target_pct=base_target_profit_pct,
+                    )
+                    target_profit_pct = fear_greed_target[
+                        "effective_profit_target_pct"
+                    ]
+                    order.update({
+                        "locked_sell_profit_target_pct": target_profit_pct,
+                        "base_sell_profit_target_pct": base_target_profit_pct,
+                        "fear_greed_index_at_target_lock": fear_greed_target[
+                            "fear_greed_index"
+                        ],
+                        "fear_greed_profit_target_multiplier": (
+                            fear_greed_target["multiplier"]
+                        ),
+                        "fear_greed_profit_target_reason": (
+                            fear_greed_target["reason"]
+                        ),
+                    })
+                    save_state(state)
+                else:
+                    base_target_profit_pct = optional_float(
+                        order.get("base_sell_profit_target_pct")
+                    )
+                    if base_target_profit_pct is None:
+                        base_target_profit_pct = target_profit_pct
+                    fear_greed_target = {
+                        "fear_greed_index": order.get(
+                            "fear_greed_index_at_target_lock"
+                        ),
+                        "multiplier": numeric_or_default(
+                            order.get(
+                                "fear_greed_profit_target_multiplier"
+                            ),
+                            1.0,
+                        ),
+                        "reason": order.get(
+                            "fear_greed_profit_target_reason"
+                        ) or "locked",
+                    }
                 sell_price = compute_sell_target_price(
                     buy_price,
                     target_profit_pct
@@ -7990,7 +8095,18 @@ def main():
                         volume=round(order["volume"], VOLUME_DECIMALS),
                         price=round(buy_price, PRICE_DECIMALS),
                         hold_minutes=hold_minutes,
-                        sell_pct_override=sell_pct_override
+                        sell_pct_override=sell_pct_override,
+                        base_sell_profit_target_pct=base_target_profit_pct,
+                        locked_sell_profit_target_pct=target_profit_pct,
+                        fear_greed_index_at_target_lock=(
+                            fear_greed_target["fear_greed_index"]
+                        ),
+                        fear_greed_profit_target_multiplier=(
+                            fear_greed_target["multiplier"]
+                        ),
+                        fear_greed_profit_target_reason=(
+                            fear_greed_target["reason"]
+                        )
                     )
                     log_trade_activity(
                         "BUY_ORDER_FILLED",
@@ -8010,7 +8126,18 @@ def main():
                         price=round(buy_price, PRICE_DECIMALS),
                         buy_source=buy_source,
                         hold_minutes=hold_minutes,
-                        sell_pct_override=sell_pct_override
+                        sell_pct_override=sell_pct_override,
+                        base_sell_profit_target_pct=base_target_profit_pct,
+                        locked_sell_profit_target_pct=target_profit_pct,
+                        fear_greed_index_at_target_lock=(
+                            fear_greed_target["fear_greed_index"]
+                        ),
+                        fear_greed_profit_target_multiplier=(
+                            fear_greed_target["multiplier"]
+                        ),
+                        fear_greed_profit_target_reason=(
+                            fear_greed_target["reason"]
+                        )
                     )
                 else:
                     actions.append("buy_fill_already_processed")
@@ -8098,6 +8225,17 @@ def main():
                     "sell_price": sell_price,
                     "placed_at": cycle_id,
                     "sell_pct_override": target_profit_pct,
+                    "base_sell_profit_target_pct": base_target_profit_pct,
+                    "locked_sell_profit_target_pct": target_profit_pct,
+                    "fear_greed_index_at_target_lock": fear_greed_target[
+                        "fear_greed_index"
+                    ],
+                    "fear_greed_profit_target_multiplier": fear_greed_target[
+                        "multiplier"
+                    ],
+                    "fear_greed_profit_target_reason": fear_greed_target[
+                        "reason"
+                    ],
                     "buy_source": buy_source,
                     "trade_id": order.get("trade_id") or order.get("txid"),
                     "buy_cost": order.get("buy_cost"),
@@ -8274,7 +8412,18 @@ def main():
                     stale_level_reanchor_above_level_pct=(
                         order.get("stale_level_reanchor_above_level_pct")
                     ),
-                    sell_pct_override=sell_pct_override,
+                    sell_pct_override=target_profit_pct,
+                    base_sell_profit_target_pct=base_target_profit_pct,
+                    locked_sell_profit_target_pct=target_profit_pct,
+                    fear_greed_index_at_target_lock=(
+                        fear_greed_target["fear_greed_index"]
+                    ),
+                    fear_greed_profit_target_multiplier=(
+                        fear_greed_target["multiplier"]
+                    ),
+                    fear_greed_profit_target_reason=(
+                        fear_greed_target["reason"]
+                    ),
                     buy_source=buy_source
                 )
                 log_trade_activity(
@@ -8295,7 +8444,18 @@ def main():
                     stale_level_reanchor_above_level_pct=(
                         order.get("stale_level_reanchor_above_level_pct")
                     ),
-                    sell_pct_override=sell_pct_override,
+                    sell_pct_override=target_profit_pct,
+                    base_sell_profit_target_pct=base_target_profit_pct,
+                    locked_sell_profit_target_pct=target_profit_pct,
+                    fear_greed_index_at_target_lock=(
+                        fear_greed_target["fear_greed_index"]
+                    ),
+                    fear_greed_profit_target_multiplier=(
+                        fear_greed_target["multiplier"]
+                    ),
+                    fear_greed_profit_target_reason=(
+                        fear_greed_target["reason"]
+                    ),
                     buy_source=buy_source
                 )
                 notify_order_tracker(
@@ -10026,6 +10186,9 @@ def main():
                         ),
                         "placed_at": cycle_id,
                         "sell_pct_override": active_sell_pct_override,
+                        "fear_greed_profit_target_policy": (
+                            fear_greed_profit_target_policy(route_config)
+                        ),
                         "buy_source": buy_source,
                         "source_entry_authority": source_policy.get("authority"),
                         "source_entry_policy_reason": source_policy.get("reason"),
