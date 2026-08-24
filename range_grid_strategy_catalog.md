@@ -9,6 +9,16 @@
 - `range_grid_strategy_price_first_source_policy_candidate.json`
   Paper-only recovery-first comparison profile. Low entries are price-first and weather-sized, median entries prefer stabilization but continue at reduced size, and high entries require confirmed range chop. Legacy inventory, sell backlog, and flow pressure soften sizing without imposing broad hard buy blocks. It is included in `range_grid_strategy_test_set.txt` but is not selected by `env.range`.
 
+- `range_grid_strategy_recovery_resting_low_median.json`
+  Deterministic resting-grid candidate built from the recovery source-policy
+  and Fear & Greed profit-target work. Low and median maintain fixed nearby
+  resting rungs with hard-safety-only entry authority and stable managed slot
+  identities. A slot remains occupied through its paired immutable sell, while
+  legacy orders without slot identities do not block the working grid. Dynamic
+  anchor selection, volatility-adaptive spacing, and stale reanchoring are
+  disabled. High remains triggered and chop-confirmed. Included in
+  `range_grid_strategy_test_set.txt` for ranked replay before production use.
+
 Sentiment control modes:
 
 - `strict_sentiment`

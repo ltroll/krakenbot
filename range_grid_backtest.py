@@ -16,7 +16,12 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from fee_config import effective_round_trip_fee_pct
 from range_grid_effective_strategy import resolve_effective_strategy
+from range_grid_entry_placement import (
+    entry_placement_mode,
+    entry_price_placement_decision,
+)
 from range_grid_source_policy import (
+    hard_safety_entry_decision,
     source_entry_policy_decision,
     source_entry_step_pct,
 )
@@ -1882,14 +1887,20 @@ def price_is_above_allowed_entry(
     buy_source,
     fallback_config=None,
 ):
-    if buy_source == "llm_target":
-        return False
     tolerance_pct = range_momentum_entry_tolerance_pct(
         config,
         buy_source,
         fallback_config,
     )
-    return price > (level * (1 + tolerance_pct))
+    decision = entry_price_placement_decision(
+        price,
+        level,
+        config,
+        buy_source,
+        fallback_config=fallback_config,
+        triggered_tolerance_pct=tolerance_pct,
+    )
+    return not decision["allowed"]
 
 
 def stale_level_reanchor_entry(price, level, config, buy_source, weather_report):
@@ -2966,13 +2977,24 @@ def simulate_approved_order_lifecycle(replay, snapshots):
             if buy_source_bucket(position["buy_source"]) == bucket
         )
 
-    def active_level_keys():
-        return {
+    def active_level_keys(include_open_positions=True):
+        keys = {
             (order["buy_source"], round(order["entry_price"], 8))
             for order in pending_orders
-        } | {
-            (position["buy_source"], round(position["entry_price"], 8))
-            for position in open_positions
+        }
+        if include_open_positions:
+            keys |= {
+                (position["buy_source"], round(position["entry_price"], 8))
+                for position in open_positions
+            }
+        return keys
+
+    def active_resting_grid_slots():
+        return {
+            order.get("grid_slot")
+            for order in (pending_orders + open_positions)
+            if order.get("entry_placement_mode") == "resting_grid"
+            and order.get("grid_slot")
         }
 
     def mark_to_market_equity(price):
@@ -3079,12 +3101,26 @@ def simulate_approved_order_lifecycle(replay, snapshots):
                 source_stats[buy_source]["invalid_entry"] += 1
                 continue
             level_key = (buy_source, round(entry_price, 8))
-            if level_key in active_level_keys():
+            config = effective_strategy_payload(snapshot, buy_source)
+            placement_mode = (
+                event.get("entry_placement_mode")
+                or entry_placement_mode(config, buy_source)
+            )
+            resting_grid_entry = placement_mode == "resting_grid"
+            grid_slot = event.get("grid_slot")
+            if (
+                resting_grid_entry
+                and grid_slot in active_resting_grid_slots()
+            ):
+                counts["resting_grid_slot_active"] += 1
+                source_stats[buy_source]["resting_grid_slot_active"] += 1
+                continue
+            if level_key in active_level_keys(
+                include_open_positions=not resting_grid_entry
+            ):
                 counts["duplicate_active_level"] += 1
                 source_stats[buy_source]["duplicate_active_level"] += 1
                 continue
-
-            config = effective_strategy_payload(snapshot, buy_source)
             if (
                 event.get(
                     "modeled_stale_level_reanchor_profit_guard_allowed"
@@ -3182,17 +3218,23 @@ def simulate_approved_order_lifecycle(replay, snapshots):
             requested_notional = (
                 available_cash_usd
                 * max(0.0, effective_position_size_pct)
-                * inventory_pressure["size_multiplier"]
+                * (
+                    1.0
+                    if resting_grid_entry
+                    else inventory_pressure["size_multiplier"]
+                )
                 * stale_reanchor_size_multiplier
             )
             remaining_inventory_capacity = (
                 event_effective_max_inventory_usd
                 - simulated_deployed_inventory_usd
-                if inventory_hard_cap_enabled
+                if inventory_hard_cap_enabled and not resting_grid_entry
                 else float("inf")
             )
             bucket = buy_source_bucket(buy_source)
-            bucket_cap = bucket_caps.get(bucket)
+            bucket_cap = (
+                None if resting_grid_entry else bucket_caps.get(bucket)
+            )
             if bucket_cap is not None:
                 bucket_cap = min(
                     bucket_cap,
@@ -3285,6 +3327,8 @@ def simulate_approved_order_lifecycle(replay, snapshots):
                 "approved_at": captured_at.isoformat(),
                 "buy_source": buy_source,
                 "strategy_mode": event.get("strategy_mode"),
+                "entry_placement_mode": placement_mode,
+                "grid_slot": grid_slot,
                 "entry_price": entry_price,
                 "entry_notional_usd": entry_notional,
                 "volume": volume,
@@ -3392,6 +3436,7 @@ def simulate_approved_order_lifecycle(replay, snapshots):
         "closed_positions": counts["closed_positions"],
         "open_positions": len(open_positions),
         "duplicate_active_level": counts["duplicate_active_level"],
+        "resting_grid_slot_active": counts["resting_grid_slot_active"],
         "capital_or_inventory_blocked": counts["capital_or_inventory_blocked"],
         "bucket_inventory_blocked": counts["bucket_inventory_blocked"],
         "max_open_high_anchor_orders_blocked": counts[
@@ -4105,6 +4150,16 @@ def build_strategy_comparison_rows(
             "operating_mode": strategy_payload.get("operating_mode"),
             "sentiment_control_mode": strategy_payload.get("sentiment_control_mode"),
             "dynamic_anchor_mode": strategy_payload.get("dynamic_anchor_mode"),
+            "entry_placement_mode_by_source": json.dumps(
+                strategy_payload.get("entry_placement_mode_by_source") or {},
+                sort_keys=True,
+            ),
+            "resting_grid_max_above_level_pct_by_source": json.dumps(
+                strategy_payload.get(
+                    "resting_grid_max_above_level_pct_by_source"
+                ) or {},
+                sort_keys=True,
+            ),
             "fear_greed_profit_target_enabled": strategy_payload.get(
                 "fear_greed_profit_target_enabled",
                 False,
@@ -4134,6 +4189,10 @@ def build_strategy_comparison_rows(
             "approved_range_median": summary.get("approved_counts_by_source", {}).get("range_median", 0),
             "approved_range_high_band": summary.get("approved_counts_by_source", {}).get("range_high_band", 0),
             "blocked_price_above_level": summary.get("blocked_reason_counts", {}).get("price_above_level", 0),
+            "blocked_resting_grid_price_too_far_above_level": summary.get(
+                "blocked_reason_counts",
+                {},
+            ).get("resting_grid_price_too_far_above_level", 0),
             "blocked_sentiment_high": summary.get("blocked_reason_counts", {}).get("sentiment_action_not_high_range_permitted", 0),
             "blocked_reason_counts": json.dumps(
                 summary.get("blocked_reason_counts") or {},
@@ -4257,6 +4316,9 @@ def build_strategy_comparison_rows(
             ),
             "simulation_duplicate_active_level": simulation.get(
                 "duplicate_active_level"
+            ),
+            "simulation_resting_grid_slot_active": simulation.get(
+                "resting_grid_slot_active"
             ),
             "simulation_capital_or_inventory_blocked": simulation.get(
                 "capital_or_inventory_blocked"
@@ -4901,6 +4963,8 @@ def write_strategy_comparison_csv(comparison, output_path):
         "operating_mode",
         "sentiment_control_mode",
         "dynamic_anchor_mode",
+        "entry_placement_mode_by_source",
+        "resting_grid_max_above_level_pct_by_source",
         "fear_greed_profit_target_enabled",
         "fear_greed_profit_target_sources",
         "fear_greed_profit_target_greed_start_index",
@@ -4916,6 +4980,7 @@ def write_strategy_comparison_csv(comparison, output_path):
         "approved_range_median",
         "approved_range_high_band",
         "blocked_price_above_level",
+        "blocked_resting_grid_price_too_far_above_level",
         "blocked_sentiment_high",
         "blocked_reason_counts",
         "blocked_reason_counts_by_source",
@@ -4961,6 +5026,7 @@ def write_strategy_comparison_csv(comparison, output_path):
         "simulation_net_return_pct",
         "simulation_max_equity_drawdown_pct",
         "simulation_duplicate_active_level",
+        "simulation_resting_grid_slot_active",
         "simulation_capital_or_inventory_blocked",
         "simulation_bucket_inventory_blocked",
         "simulation_max_open_high_anchor_orders_blocked",
@@ -5068,6 +5134,8 @@ def write_ranked_strategy_csv(comparison, output_path):
         "candidate_efficiency",
         "approved_llm_target",
         "dynamic_anchor_mode",
+        "entry_placement_mode_by_source",
+        "resting_grid_max_above_level_pct_by_source",
         "fear_greed_profit_target_enabled",
         "fear_greed_profit_target_sources",
         "fear_greed_profit_target_greed_start_index",
@@ -5106,6 +5174,7 @@ def write_ranked_strategy_csv(comparison, output_path):
         "simulation_net_return_pct",
         "simulation_max_equity_drawdown_pct",
         "simulation_duplicate_active_level",
+        "simulation_resting_grid_slot_active",
         "simulation_capital_or_inventory_blocked",
         "simulation_bucket_inventory_blocked",
         "simulation_max_open_high_anchor_orders_blocked",
@@ -5192,6 +5261,7 @@ def write_ranked_strategy_csv(comparison, output_path):
         "approved_range_median",
         "approved_range_high_band",
         "blocked_price_above_level",
+        "blocked_resting_grid_price_too_far_above_level",
         "blocked_sentiment_high",
         "entry_step_pct",
         "volatility_reference_pct",
@@ -5806,14 +5876,25 @@ def build_candidates(snapshot, price):
         if buy_source is None:
             continue
         source_config = effective_strategy_payload(snapshot, buy_source)
-        decision = source_entry_policy_decision(
-            source_config,
-            buy_source,
-            action_recommendation=action_recommendation,
-            action_policy=action_policy,
-            risk_context=risk_context,
-            weather_report=weather_report,
-        )
+        placement_mode = entry_placement_mode(source_config, buy_source)
+        if placement_mode == "resting_grid":
+            decision = hard_safety_entry_decision(
+                source_config,
+                buy_source,
+                action_recommendation=action_recommendation,
+                action_policy=action_policy,
+                risk_context=risk_context,
+                weather_report=weather_report,
+            )
+        else:
+            decision = source_entry_policy_decision(
+                source_config,
+                buy_source,
+                action_recommendation=action_recommendation,
+                action_policy=action_policy,
+                risk_context=risk_context,
+                weather_report=weather_report,
+            )
         range_source_policy_decisions[buy_source] = decision
         if decision["allowed"] and decision["bypass_sentiment_gate"]:
             range_source_policy_bypass_available = True
@@ -6094,9 +6175,10 @@ def build_candidates(snapshot, price):
                 snapshot,
                 buy_source,
             )
-            for level in grid:
+            for grid_slot_index, level in enumerate(grid, start=1):
                 candidate_levels.append({
                     "level": level,
+                    "grid_slot": f"{buy_source}:{grid_slot_index}",
                     "sell_pct_override": sell_pct_override,
                     "buy_source": buy_source,
                     "strategy_mode": strategy_mode,
@@ -6178,15 +6260,38 @@ def evaluate_candidate(snapshot, candidate, price):
     open_buy_levels = {str(order.get("level")) for order in open_buy_orders if order.get("level") is not None}
     open_sell_levels = {str(order.get("level")) for order in open_sell_orders if order.get("level") is not None}
     buy_source = candidate["buy_source"]
-    source_policy = source_entry_policy_decision(
-        config,
-        buy_source,
-        action_recommendation=signal.get("action_recommendation") or "neutral",
-        action_policy=signal.get("action_policy"),
-        risk_context=risk_context,
-        weather_report=weather_report,
-    )
+    placement_mode = entry_placement_mode(config, buy_source)
+    resting_grid_entry = placement_mode == "resting_grid"
+    active_resting_grid_slots = {
+        order.get("grid_slot")
+        for order in (open_buy_orders + open_sell_orders)
+        if order.get("entry_placement_mode") == "resting_grid"
+        and order.get("grid_slot")
+    }
+    if resting_grid_entry:
+        source_policy = hard_safety_entry_decision(
+            config,
+            buy_source,
+            action_recommendation=(
+                signal.get("action_recommendation") or "neutral"
+            ),
+            action_policy=signal.get("action_policy"),
+            risk_context=risk_context,
+            weather_report=weather_report,
+        )
+    else:
+        source_policy = source_entry_policy_decision(
+            config,
+            buy_source,
+            action_recommendation=(
+                signal.get("action_recommendation") or "neutral"
+            ),
+            action_policy=signal.get("action_policy"),
+            risk_context=risk_context,
+            weather_report=weather_report,
+        )
     candidate["source_entry_policy"] = source_policy
+    candidate["entry_placement_mode"] = placement_mode
     level = safe_float(candidate["level"]) or 0.0
     key = str(candidate["level"])
     stale_reanchor = {"allowed": False}
@@ -6217,9 +6322,16 @@ def evaluate_candidate(snapshot, candidate, price):
 
     if key in open_buy_levels:
         return False, "open_buy_order"
-    if key in open_sell_levels:
+    if (
+        resting_grid_entry
+        and candidate.get("grid_slot") in active_resting_grid_slots
+    ):
+        return False, "resting_grid_slot_active"
+    if key in open_sell_levels and not resting_grid_entry:
         return False, "open_sell_order"
     if (
+        not resting_grid_entry
+        and
         prevent_buy_above_last_sell
         and not allow_above_last_sell_for_candidate(
             config,
@@ -6238,9 +6350,31 @@ def evaluate_candidate(snapshot, candidate, price):
         and level > (last_sell_price * (1 - buy_after_sell_discount_pct))
     ):
         return False, "above_last_sell_discount"
-    if mean_reversion_opportunity < mean_reversion_min_opportunity:
+    if (
+        not resting_grid_entry
+        and mean_reversion_opportunity < mean_reversion_min_opportunity
+    ):
         return False, "mean_reversion_opportunity_below_min"
-    if price_is_above_allowed_entry(price, level, config, buy_source):
+    tolerance_pct = range_momentum_entry_tolerance_pct(
+        config,
+        buy_source,
+    )
+    placement_decision = entry_price_placement_decision(
+        price,
+        level,
+        config,
+        buy_source,
+        triggered_tolerance_pct=tolerance_pct,
+    )
+    candidate["entry_placement_max_above_level_pct"] = placement_decision[
+        "max_above_level_pct"
+    ]
+    candidate["entry_placement_above_level_pct"] = placement_decision[
+        "above_level_pct"
+    ]
+    if not placement_decision["allowed"]:
+        if resting_grid_entry:
+            return False, placement_decision["reason"]
         stale_reanchor = stale_level_reanchor_entry(
             price,
             level,
@@ -6249,7 +6383,7 @@ def evaluate_candidate(snapshot, candidate, price):
             weather_report,
         )
         if not stale_reanchor["allowed"]:
-            return False, "price_above_level"
+            return False, placement_decision["reason"]
         candidate["original_level"] = level
         candidate["level"] = stale_reanchor["reanchor_price"]
         candidate["stale_level_reanchor_applied"] = True
@@ -6269,13 +6403,14 @@ def evaluate_candidate(snapshot, candidate, price):
     }
     if not source_policy["allowed"]:
         return False, source_policy["reason"]
-    weather_entry_guard = source_weather_entry_guard(
-        config,
-        buy_source,
-        weather_report_with_context,
-    )
-    if not weather_entry_guard["allowed"]:
-        return False, weather_entry_guard["reason"]
+    if not resting_grid_entry:
+        weather_entry_guard = source_weather_entry_guard(
+            config,
+            buy_source,
+            weather_report_with_context,
+        )
+        if not weather_entry_guard["allowed"]:
+            return False, weather_entry_guard["reason"]
     sell_fill_cooldown = buy_cooldown_after_sell_fill_status(
         config,
         buy_source,
@@ -6283,9 +6418,14 @@ def evaluate_candidate(snapshot, candidate, price):
         snapshot_timestamp(snapshot),
         last_sell_at,
     )
-    if sell_fill_cooldown["remaining_minutes"] > 0:
+    if (
+        not resting_grid_entry
+        and sell_fill_cooldown["remaining_minutes"] > 0
+    ):
         return False, "buy_after_sell_fill_cooldown"
     if (
+        not resting_grid_entry
+        and
         strategy_bool(config, "inventory_hard_cap_enabled", True)
         and deployed_inventory_usd >= max_inventory_usd
     ):
@@ -6324,7 +6464,7 @@ def evaluate_candidate(snapshot, candidate, price):
             return False, resistance_room_guard["reason"]
 
     flow_control = flow_adjustment(config, flow_pressure, buy_source)
-    if flow_control["block_buy"]:
+    if not resting_grid_entry and flow_control["block_buy"]:
         return False, flow_control["reason"]
 
     now = snapshot_timestamp(snapshot)
@@ -6517,6 +6657,9 @@ def replay_from_snapshots(snapshots):
                 )
             )
             approved, reason = evaluate_candidate(snapshot, candidate, price)
+            resting_grid_entry = (
+                candidate.get("entry_placement_mode") == "resting_grid"
+            )
             source_policy = candidate.get("source_entry_policy") or {}
             source_policy_reason = source_policy.get("reason")
             source_policy_setup_failure_reason = source_policy.get(
@@ -6535,7 +6678,8 @@ def replay_from_snapshots(snapshots):
             )
             if source_policy_size_multiplier is None:
                 source_policy_size_multiplier = 1.0
-            effective_size_multiplier *= source_policy_size_multiplier
+            if not resting_grid_entry:
+                effective_size_multiplier *= source_policy_size_multiplier
             flow_pressure = safe_float(signal.get("flow_pressure"))
             flow_control = flow_adjustment(
                 source_config,
@@ -6547,34 +6691,41 @@ def replay_from_snapshots(snapshots):
             )
             if base_position_size_pct is None:
                 base_position_size_pct = 0.10
-            effective_position_size_pct_before_inventory_pressure = (
-                max(0.0, base_position_size_pct)
-                * max(
+            if resting_grid_entry:
+                effective_position_size_pct_before_inventory_pressure = max(
                     0.0,
-                    safe_float(
-                        built.get(
-                            "sentiment_regime_position_size_multiplier"
+                    base_position_size_pct,
+                )
+            else:
+                effective_position_size_pct_before_inventory_pressure = (
+                    max(0.0, base_position_size_pct)
+                    * max(
+                        0.0,
+                        safe_float(
+                            built.get(
+                                "sentiment_regime_position_size_multiplier"
+                            )
                         )
+                        or 0.0,
                     )
-                    or 0.0,
-                )
-                * max(
-                    0.0,
-                    safe_float(built.get("smoothed_risk_multiplier")) or 0.0,
-                )
-                * max(
-                    0.0,
-                    safe_float(
-                        built.get(
-                            "risk_context_position_size_effective_multiplier"
+                    * max(
+                        0.0,
+                        safe_float(built.get("smoothed_risk_multiplier"))
+                        or 0.0,
+                    )
+                    * max(
+                        0.0,
+                        safe_float(
+                            built.get(
+                                "risk_context_position_size_effective_multiplier"
+                            )
                         )
+                        or 0.0,
                     )
-                    or 0.0,
+                    * max(0.0, leveling_size_multiplier)
+                    * max(0.0, source_policy_size_multiplier)
+                    * max(0.0, flow_control["size_multiplier"])
                 )
-                * max(0.0, leveling_size_multiplier)
-                * max(0.0, source_policy_size_multiplier)
-                * max(0.0, flow_control["size_multiplier"])
-            )
             source_effective_max_inventory_usd = safe_float(
                 source_config.get("max_inventory_usd")
             )
@@ -6626,7 +6777,11 @@ def replay_from_snapshots(snapshots):
             if approved and cooldown["remaining_minutes"] > 0:
                 approved = False
                 reason = "buy_cooldown"
-            if approved and sell_fill_cooldown["remaining_minutes"] > 0:
+            if (
+                approved
+                and not resting_grid_entry
+                and sell_fill_cooldown["remaining_minutes"] > 0
+            ):
                 approved = False
                 reason = "buy_after_sell_fill_cooldown"
             if approved:
@@ -6685,7 +6840,11 @@ def replay_from_snapshots(snapshots):
                     ),
                     "simulated_snapshot_effective_position_size_pct": (
                         effective_position_size_pct_before_inventory_pressure
-                        * source_inventory_pressure["size_multiplier"]
+                        * (
+                            1.0
+                            if resting_grid_entry
+                            else source_inventory_pressure["size_multiplier"]
+                        )
                     ),
                     "risk_context_position_sizing_enabled": built.get(
                         "risk_context_position_sizing_enabled"
@@ -6711,6 +6870,15 @@ def replay_from_snapshots(snapshots):
                     ),
                     "source_entry_policy_size_multiplier": (
                         source_policy_size_multiplier
+                    ),
+                    "entry_placement_mode": candidate.get(
+                        "entry_placement_mode"
+                    ),
+                    "entry_placement_max_above_level_pct": candidate.get(
+                        "entry_placement_max_above_level_pct"
+                    ),
+                    "entry_placement_above_level_pct": candidate.get(
+                        "entry_placement_above_level_pct"
                     ),
                     "effective_strategy_fingerprint": (
                         source_effective_strategy["effective_fingerprint"]
@@ -6750,6 +6918,7 @@ def replay_from_snapshots(snapshots):
                     ),
                     "buy_source": candidate["buy_source"],
                     "strategy_mode": candidate["strategy_mode"],
+                    "grid_slot": candidate.get("grid_slot"),
                     "level": round(candidate["level"], 2),
                     "original_level": (
                         round(candidate["original_level"], 2)
@@ -6873,6 +7042,16 @@ def replay_from_snapshots(snapshots):
                     ),
                     "buy_source": candidate["buy_source"],
                     "strategy_mode": candidate["strategy_mode"],
+                    "grid_slot": candidate.get("grid_slot"),
+                    "entry_placement_mode": candidate.get(
+                        "entry_placement_mode"
+                    ),
+                    "entry_placement_max_above_level_pct": candidate.get(
+                        "entry_placement_max_above_level_pct"
+                    ),
+                    "entry_placement_above_level_pct": candidate.get(
+                        "entry_placement_above_level_pct"
+                    ),
                     "level": round(candidate["level"], 2),
                     "status": "blocked_gate_only",
                     "reason": reason,

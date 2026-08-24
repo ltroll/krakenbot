@@ -1359,6 +1359,67 @@ class RangeGridBacktestTests(unittest.TestCase):
         )
         self.assertEqual(result["ending_committed_inventory_usd"], 200.0)
 
+    def test_resting_grid_slot_reopens_only_after_paired_sell(self):
+        strategy = {
+            "backtest_starting_cash_usd": 300.0,
+            "position_size_pct": 0.1,
+            "max_inventory_usd": 1000.0,
+            "inventory_hard_cap_enabled": False,
+            "min_buy_notional_usd": 8.0,
+            "minimum_order_floor_enabled": True,
+            "minimum_order_floor_require_full_size": True,
+            "minimum_order_floor_sources": "range_low",
+            "minimum_order_floor_usd": 100.0,
+            "minimum_order_floor_cash_reserve_usd": 100.0,
+            "profit_target_pct": 0.009,
+            "round_trip_fee_pct": 0.012,
+            "entry_placement_mode_by_source": {
+                "range_low": "resting_grid",
+            },
+            "resting_grid_max_above_level_pct_by_source": {
+                "range_low": 0.0035,
+            },
+        }
+        timestamps = [
+            "2026-06-13T12:00:00+00:00",
+            "2026-06-13T12:10:00+00:00",
+            "2026-06-13T12:20:00+00:00",
+            "2026-06-13T12:30:00+00:00",
+        ]
+        snapshots = [
+            make_snapshot(timestamps[0], 100.3, strategy_overrides=strategy),
+            make_snapshot(timestamps[1], 100.0, strategy_overrides=strategy),
+            make_snapshot(timestamps[2], 101.0, strategy_overrides=strategy),
+            make_snapshot(timestamps[3], 102.2, strategy_overrides=strategy),
+        ]
+        base_event = {
+            "level": 100.0,
+            "buy_source": "range_low",
+            "strategy_mode": "low",
+            "grid_slot": "range_low:1",
+            "entry_placement_mode": "resting_grid",
+            "effective_position_size_pct_before_inventory_pressure": 0.1,
+            "effective_max_inventory_usd": 1000.0,
+        }
+        replay = {
+            "approved_events": [
+                {**base_event, "captured_at": timestamps[0]},
+                {**base_event, "captured_at": timestamps[2]},
+                {**base_event, "captured_at": timestamps[3]},
+            ]
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(
+            replay,
+            snapshots,
+        )
+
+        self.assertEqual(result["orders_placed"], 2)
+        self.assertEqual(result["filled_entries"], 1)
+        self.assertEqual(result["closed_positions"], 1)
+        self.assertEqual(result["unfilled_entries"], 1)
+        self.assertEqual(result["resting_grid_slot_active"], 1)
+
     def test_order_lifecycle_paces_floor_assisted_orders(self):
         strategy = {
             "backtest_starting_cash_usd": 200.0,
@@ -2522,6 +2583,144 @@ class RangeGridBacktestTests(unittest.TestCase):
 
         self.assertTrue(approved)
         self.assertIsNone(reason)
+
+    def test_evaluate_candidate_allows_nearby_resting_low_order(self):
+        snapshot = make_snapshot(
+            "2026-06-12T12:00:00+00:00",
+            100.3,
+            action_recommendation="blocked",
+            strategy_modes=["low"],
+            strategy_overrides={
+                "entry_placement_mode_by_source": {
+                    "range_low": "resting_grid",
+                },
+                "resting_grid_max_above_level_pct_by_source": {
+                    "range_low": 0.0035,
+                },
+                "prevent_buy_above_last_sell": True,
+                "inventory_hard_cap_enabled": True,
+                "max_inventory_usd": 50,
+                "flow_hard_block_enabled": True,
+                "flow_block_high_only": False,
+                "flow_block_threshold": 0.2,
+                "source_entry_policy_enabled": True,
+                "entry_policy_by_source": {
+                    "range_low": {
+                        "authority": "chop_confirmed",
+                        "hard_block_falling_tape": True,
+                        "allowed_phases": "range_chop_accumulation",
+                    },
+                },
+            },
+            state_summary_overrides={
+                "deployed_inventory_usd": 500,
+                "last_sell_price": 90,
+                "last_sell_at": "2026-06-12T11:55:00+00:00",
+            },
+            open_sell_orders=[{
+                "level": 100.0,
+                "buy_source": "range_low",
+                "placed_at": "2026-06-12T11:00:00+00:00",
+            }],
+            risk_context={
+                "weather_report": {
+                    "mode": "weather_report",
+                    "bot_decision_authority": "bot",
+                    "trade_permission": "bot_decides",
+                    "alert_level": "watch",
+                    "trend_pressure": {"falling_tape": True},
+                    "market_opportunity": {
+                        "cycle_phase": "post_jump_distribution",
+                    },
+                },
+            },
+        )
+        candidate = {
+            "level": 100.0,
+            "buy_source": "range_low",
+            "strategy_mode": "low",
+        }
+
+        approved, reason = backtest.evaluate_candidate(
+            snapshot,
+            candidate,
+            100.3,
+        )
+
+        self.assertTrue(approved)
+        self.assertIsNone(reason)
+        self.assertEqual(candidate["entry_placement_mode"], "resting_grid")
+        self.assertEqual(
+            candidate["source_entry_policy"]["reason"],
+            "resting_grid_hard_safety_only",
+        )
+
+    def test_evaluate_candidate_rejects_resting_order_outside_zone(self):
+        snapshot = make_snapshot(
+            "2026-06-12T12:00:00+00:00",
+            100.6,
+            strategy_modes=["median"],
+            strategy_overrides={
+                "entry_placement_mode_by_source": {
+                    "range_median": "resting_grid",
+                },
+                "resting_grid_max_above_level_pct_by_source": {
+                    "range_median": 0.0055,
+                },
+            },
+        )
+        candidate = {
+            "level": 100.0,
+            "buy_source": "range_median",
+            "strategy_mode": "median",
+        }
+
+        approved, reason = backtest.evaluate_candidate(
+            snapshot,
+            candidate,
+            100.6,
+        )
+
+        self.assertFalse(approved)
+        self.assertEqual(reason, "resting_grid_price_too_far_above_level")
+
+    def test_resting_grid_slot_ignores_legacy_but_not_managed_sell(self):
+        strategy_overrides = {
+            "entry_placement_mode_by_source": {
+                "range_low": "resting_grid",
+            },
+            "resting_grid_max_above_level_pct_by_source": {
+                "range_low": 0.0035,
+            },
+        }
+        managed_sell = {
+            "level": 101.0,
+            "grid_slot": "range_low:1",
+            "entry_placement_mode": "resting_grid",
+            "buy_source": "range_low",
+        }
+        snapshot = make_snapshot(
+            "2026-06-12T12:00:00+00:00",
+            100.3,
+            strategy_modes=["low"],
+            strategy_overrides=strategy_overrides,
+            open_sell_orders=[managed_sell],
+        )
+        candidate = {
+            "level": 100.0,
+            "grid_slot": "range_low:1",
+            "buy_source": "range_low",
+            "strategy_mode": "low",
+        }
+
+        approved, reason = backtest.evaluate_candidate(
+            snapshot,
+            candidate,
+            100.3,
+        )
+
+        self.assertFalse(approved)
+        self.assertEqual(reason, "resting_grid_slot_active")
 
     def test_evaluate_candidate_keeps_high_anchor_strict_above_level(self):
         snapshot = make_snapshot(

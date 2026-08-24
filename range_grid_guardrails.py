@@ -5,6 +5,10 @@ from range_grid_source_policy import (
     ENTRY_POLICY_NUMERIC_FIELDS,
     VALID_ENTRY_AUTHORITIES,
 )
+from range_grid_entry_placement import (
+    RESTING_GRID_BUY_SOURCES,
+    VALID_ENTRY_PLACEMENT_MODES,
+)
 
 
 VALID_OPERATING_MODES = {
@@ -344,6 +348,10 @@ def validate_strategy_config(strategy_config):
         "sell_target_offset_pct_by_source": ("numeric", None),
         "entry_step_pct_by_source": ("positive", None),
         "momentum_entry_tolerance_pct_by_source": ("non_negative", None),
+        "resting_grid_max_above_level_pct_by_source": (
+            "non_negative",
+            None,
+        ),
         "aging_start_minutes_by_source": ("positive", None),
         "aging_step_minutes_by_source": ("positive", None),
         "aging_profit_reduction_pct_by_source": ("non_negative", None),
@@ -379,6 +387,57 @@ def validate_strategy_config(strategy_config):
                 errors.append(f"{field}.{source} must be >= 0")
             elif kind == "at_least_one" and numeric < 1:
                 errors.append(f"{field}.{source} must be >= 1")
+
+    placement_modes = strategy_config.get("entry_placement_mode_by_source")
+    if placement_modes is not None:
+        if not isinstance(placement_modes, dict):
+            errors.append("entry_placement_mode_by_source must be an object")
+        else:
+            resting_distances = strategy_config.get(
+                "resting_grid_max_above_level_pct_by_source"
+            )
+            if not isinstance(resting_distances, dict):
+                resting_distances = {}
+            normalized_distances = {
+                str(source or "").strip().lower(): value
+                for source, value in resting_distances.items()
+            }
+            for source, raw_mode in placement_modes.items():
+                normalized_source = str(source or "").strip().lower()
+                mode = str(raw_mode or "").strip().lower()
+                if normalized_source not in VALID_BUY_SOURCES:
+                    errors.append(
+                        "entry_placement_mode_by_source."
+                        f"{source} must use a supported source key"
+                    )
+                    continue
+                if mode not in VALID_ENTRY_PLACEMENT_MODES:
+                    errors.append(
+                        "entry_placement_mode_by_source."
+                        f"{source} must be one of "
+                        + ", ".join(sorted(VALID_ENTRY_PLACEMENT_MODES))
+                    )
+                    continue
+                if (
+                    mode == "resting_grid"
+                    and normalized_source not in RESTING_GRID_BUY_SOURCES
+                ):
+                    errors.append(
+                        "entry_placement_mode_by_source."
+                        f"{source} cannot use resting_grid"
+                    )
+                if mode == "resting_grid":
+                    try:
+                        max_above = float(
+                            normalized_distances.get(normalized_source)
+                        )
+                    except (TypeError, ValueError):
+                        max_above = 0.0
+                    if max_above <= 0:
+                        errors.append(
+                            "resting_grid_max_above_level_pct_by_source."
+                            f"{source} must be > 0 when resting_grid is enabled"
+                        )
 
     entry_policies = strategy_config.get("entry_policy_by_source")
     if entry_policies is not None:

@@ -449,3 +449,59 @@ def source_entry_policy_decision(
         "weather_available": True,
         "setup_confirmed": True,
     }
+
+
+def hard_safety_entry_decision(
+    config,
+    buy_source,
+    *,
+    action_recommendation=None,
+    action_policy=None,
+    risk_context=None,
+    weather_report=None,
+    fallback_config=None,
+):
+    """Apply only non-negotiable entry safety for deterministic grid sources.
+
+    Forecast phases, setup scores, falling-tape labels, and sentiment opinions
+    are deliberately excluded.  Emergency weather, explicit risk-off posture,
+    and non-bypassable hard-safety flags still block an entry.
+    """
+
+    policy = entry_policy_for_source(config, buy_source, fallback_config) or {}
+    weather_report = weather_report if isinstance(weather_report, dict) else {}
+    if not isinstance(risk_context, dict):
+        embedded_risk = weather_report.get("_risk_context")
+        risk_context = embedded_risk if isinstance(embedded_risk, dict) else {}
+    weather_available = _weather_bot_decides(weather_report)
+    authority = str(policy.get("authority") or "price_first").strip().lower()
+
+    if _hard_risk_blocked(
+        action_recommendation,
+        action_policy,
+        risk_context,
+        weather_report,
+        policy,
+    ):
+        return {
+            "policy_enabled": True,
+            "authority": authority,
+            "allowed": False,
+            "reason": "source_policy_hard_risk",
+            "bypass_sentiment_gate": False,
+            "size_multiplier": 0.0,
+            "weather_available": weather_available,
+            "setup_confirmed": False,
+        }
+
+    return {
+        "policy_enabled": True,
+        "authority": "hard_safety_only",
+        "configured_authority": authority,
+        "allowed": True,
+        "reason": "resting_grid_hard_safety_only",
+        "bypass_sentiment_gate": True,
+        "size_multiplier": 1.0,
+        "weather_available": weather_available,
+        "setup_confirmed": None,
+    }

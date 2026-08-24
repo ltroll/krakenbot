@@ -36,6 +36,10 @@ from range_grid_guardrails import (
     validate_strategy_config,
 )
 from range_grid_effective_strategy import resolve_effective_strategy
+from range_grid_entry_placement import (
+    entry_placement_mode,
+    entry_price_placement_decision,
+)
 from range_grid_order_safety import (
     allocate_position_costs,
     atomic_write_json,
@@ -52,6 +56,7 @@ from range_grid_profit_target import (
     fear_greed_profit_target_policy,
 )
 from range_grid_source_policy import (
+    hard_safety_entry_decision,
     source_entry_policy_decision,
     source_entry_step_pct,
 )
@@ -4727,14 +4732,20 @@ def price_is_above_allowed_entry(
     buy_source,
     fallback_config=None
 ):
-    if buy_source == "llm_target":
-        return False
     tolerance_pct = range_momentum_entry_tolerance_pct(
         config,
         buy_source,
         fallback_config
     )
-    return price > (level * (1 + tolerance_pct))
+    decision = entry_price_placement_decision(
+        price,
+        level,
+        config,
+        buy_source,
+        fallback_config=fallback_config,
+        triggered_tolerance_pct=tolerance_pct,
+    )
+    return not decision["allowed"]
 
 
 def stale_level_reanchor_entry(
@@ -6804,6 +6815,7 @@ def main():
                 "high": "range_high_band",
             }
             range_source_policy_bypass_available = False
+            resting_grid_source_configured = False
             for active_mode in active_strategy_modes:
                 policy_source = source_by_mode.get(active_mode)
                 if policy_source is None:
@@ -6814,15 +6826,32 @@ def main():
                     route.get("strategy_config")
                     if route else strategy_config
                 )
-                source_policy_gate = source_entry_policy_decision(
+                placement_mode = entry_placement_mode(
                     route_config,
                     policy_source,
-                    action_recommendation=action_recommendation,
-                    action_policy=action_policy,
-                    risk_context=risk_context,
-                    weather_report=weather_report,
-                    fallback_config=strategy_config,
+                    strategy_config,
                 )
+                if placement_mode == "resting_grid":
+                    resting_grid_source_configured = True
+                    source_policy_gate = hard_safety_entry_decision(
+                        route_config,
+                        policy_source,
+                        action_recommendation=action_recommendation,
+                        action_policy=action_policy,
+                        risk_context=risk_context,
+                        weather_report=weather_report,
+                        fallback_config=strategy_config,
+                    )
+                else:
+                    source_policy_gate = source_entry_policy_decision(
+                        route_config,
+                        policy_source,
+                        action_recommendation=action_recommendation,
+                        action_policy=action_policy,
+                        risk_context=risk_context,
+                        weather_report=weather_report,
+                        fallback_config=strategy_config,
+                    )
                 if (
                     source_policy_gate["allowed"]
                     and source_policy_gate["bypass_sentiment_gate"]
@@ -7211,6 +7240,7 @@ def main():
                         cycle_id=cycle_id,
                         txid=txid,
                         trade_id=order.get("trade_id") or txid,
+                        grid_slot=order.get("grid_slot"),
                         level=sell_level,
                         volume=volume,
                         buy_price=buy_price,
@@ -7246,6 +7276,7 @@ def main():
                         cycle_id=cycle_id,
                         txid=txid,
                         trade_id=order.get("trade_id") or txid,
+                        grid_slot=order.get("grid_slot"),
                         level=sell_level,
                         volume=volume,
                         buy_price=buy_price,
@@ -8084,6 +8115,7 @@ def main():
                         cycle_id=cycle_id,
                         txid=txid,
                         trade_id=order.get("trade_id") or txid,
+                        grid_slot=order.get("grid_slot"),
                         level=level,
                         original_level=order.get("original_level"),
                         stale_level_reanchor_applied=bool(
@@ -8114,6 +8146,7 @@ def main():
                         cycle_id=cycle_id,
                         txid=txid,
                         trade_id=order.get("trade_id") or txid,
+                        grid_slot=order.get("grid_slot"),
                         level=level,
                         original_level=order.get("original_level"),
                         stale_level_reanchor_applied=bool(
@@ -8221,6 +8254,10 @@ def main():
                 sell_order_state = {
                     "level": level,
                     "volume": order["volume"],
+                    "grid_slot": order.get("grid_slot"),
+                    "entry_placement_mode": order.get(
+                        "entry_placement_mode"
+                    ),
                     "buy_price": buy_price,
                     "sell_price": sell_price,
                     "placed_at": cycle_id,
@@ -8400,6 +8437,7 @@ def main():
                     cycle_id=cycle_id,
                     txid=txid,
                     trade_id=order.get("trade_id") or order.get("txid"),
+                    grid_slot=order.get("grid_slot"),
                     client_order_id=accepted_client_order_id,
                     submission_recovered=sell_submission_recovered,
                     volume=round(order["volume"], VOLUME_DECIMALS),
@@ -8432,6 +8470,7 @@ def main():
                     cycle_id=cycle_id,
                     txid=txid,
                     trade_id=order.get("trade_id") or order.get("txid"),
+                    grid_slot=order.get("grid_slot"),
                     client_order_id=accepted_client_order_id,
                     submission_recovered=sell_submission_recovered,
                     volume=round(order["volume"], VOLUME_DECIMALS),
@@ -8480,7 +8519,10 @@ def main():
             # BUY CANDIDATES
             if (
                 range_signal_gates_allow
-                and effective_position_size_pct > 0
+                and (
+                    effective_position_size_pct > 0
+                    or resting_grid_source_configured
+                )
                 and active_strategy_modes
                 and low and high
                 and (
@@ -8626,10 +8668,13 @@ def main():
                                 profit_target_pct,
                             )
 
-                        for level in grid:
+                        for grid_slot_index, level in enumerate(grid, start=1):
                             candidate_levels.append(
                                 {
                                     "level": level,
+                                    "grid_slot": (
+                                        f"{buy_source}:{grid_slot_index}"
+                                    ),
                                     "sell_pct_override": sell_pct_override,
                                     "buy_source": buy_source,
                                     "anchor_router_anchor": route_context["anchor"],
@@ -8677,6 +8722,15 @@ def main():
                     sell_order.get("level")
                     for sell_order in state["open_sell_orders"].values()
                 }
+                active_resting_grid_slots = {
+                    order.get("grid_slot")
+                    for order in (
+                        list(state["open_buy_orders"].values())
+                        + list(state["open_sell_orders"].values())
+                    )
+                    if order.get("entry_placement_mode") == "resting_grid"
+                    and order.get("grid_slot")
+                }
                 last_sell_price = positive_float(state.get("last_sell_price"))
                 last_sell_at = parse_iso8601(state.get("last_sell_at"))
                 llm_sell_cooldown_remaining = (
@@ -8695,6 +8749,7 @@ def main():
 
                 for candidate in deduped_candidates:
                     level = candidate["level"]
+                    grid_slot = candidate.get("grid_slot")
                     active_sell_pct_override = candidate["sell_pct_override"]
                     buy_source = candidate["buy_source"]
                     effective_strategy = candidate.get(
@@ -8706,10 +8761,26 @@ def main():
                     route_block_reason = candidate.get(
                         "anchor_router_block_reason"
                     )
+                    candidate_entry_placement_mode = entry_placement_mode(
+                        route_config,
+                        buy_source,
+                        strategy_config,
+                    )
+                    resting_grid_entry = (
+                        candidate_entry_placement_mode == "resting_grid"
+                    )
+                    candidate_risk_multiplier = (
+                        1.0
+                        if resting_grid_entry
+                        else (
+                            smoothed_risk_multiplier
+                            * risk_context_size_multiplier
+                        )
+                    )
                     route_limits = routed_effective_limits(
                         route_config,
                         regime,
-                        smoothed_risk_multiplier * risk_context_size_multiplier,
+                        candidate_risk_multiplier,
                     )
                     route_inventory_pressure = inventory_pressure_adjustment(
                         deployed_inventory_usd,
@@ -8718,7 +8789,11 @@ def main():
                     )
                     candidate_effective_position_size_pct = (
                         route_limits["position_size_pct"]
-                        * route_inventory_pressure["size_multiplier"]
+                        * (
+                            1.0
+                            if resting_grid_entry
+                            else route_inventory_pressure["size_multiplier"]
+                        )
                     )
                     leveling_size_multiplier = (
                         high_band_leveling_size_multiplier(
@@ -8808,8 +8883,18 @@ def main():
                             strategy_config
                         )
                     )
+                    entry_placement = entry_price_placement_decision(
+                        price,
+                        level,
+                        route_config,
+                        buy_source,
+                        fallback_config=strategy_config,
+                        triggered_tolerance_pct=(
+                            momentum_entry_tolerance_pct
+                        ),
+                    )
                     momentum_entry_max_price = level * (
-                        1 + momentum_entry_tolerance_pct
+                        1 + entry_placement["max_above_level_pct"]
                     )
                     bucket_inventory_usd = bucket_inventory_usd_map.get(
                         bucket_name,
@@ -8837,15 +8922,26 @@ def main():
                     weather_report_for_bypass["_risk_context"] = (
                         sentiment_payload.get("risk_context") or {}
                     )
-                    source_policy = source_entry_policy_decision(
-                        route_config,
-                        buy_source,
-                        action_recommendation=action_recommendation,
-                        action_policy=action_policy,
-                        risk_context=sentiment_payload.get("risk_context"),
-                        weather_report=weather_report,
-                        fallback_config=strategy_config,
-                    )
+                    if resting_grid_entry:
+                        source_policy = hard_safety_entry_decision(
+                            route_config,
+                            buy_source,
+                            action_recommendation=action_recommendation,
+                            action_policy=action_policy,
+                            risk_context=sentiment_payload.get("risk_context"),
+                            weather_report=weather_report,
+                            fallback_config=strategy_config,
+                        )
+                    else:
+                        source_policy = source_entry_policy_decision(
+                            route_config,
+                            buy_source,
+                            action_recommendation=action_recommendation,
+                            action_policy=action_policy,
+                            risk_context=sentiment_payload.get("risk_context"),
+                            weather_report=weather_report,
+                            fallback_config=strategy_config,
+                        )
                     inventory_hard_cap_enabled = strategy_bool_with_fallback(
                         route_config,
                         strategy_config,
@@ -8886,6 +8982,15 @@ def main():
                         ),
                         "source_entry_policy_size_multiplier": (
                             source_policy_size_multiplier
+                        ),
+                        "entry_placement_mode": (
+                            candidate_entry_placement_mode
+                        ),
+                        "entry_placement_max_above_level_pct": (
+                            entry_placement["max_above_level_pct"]
+                        ),
+                        "entry_placement_above_level_pct": (
+                            entry_placement["above_level_pct"]
                         ),
                     }
                     effective_strategy_log_fields = {
@@ -8955,11 +9060,18 @@ def main():
 
                     if key in state["open_buy_orders"]:
                         skip_reason = "open_buy_order"
+                    elif (
+                        resting_grid_entry
+                        and grid_slot in active_resting_grid_slots
+                    ):
+                        skip_reason = "resting_grid_slot_active"
                     elif route_block_reason:
                         skip_reason = route_block_reason
-                    elif key in reserved_sell_levels:
+                    elif key in reserved_sell_levels and not resting_grid_entry:
                         skip_reason = "open_sell_order"
                     elif (
+                        not resting_grid_entry
+                        and
                         prevent_buy_above_last_sell
                         and not above_last_sell_breakout_bypass
                         and last_sell_price is not None
@@ -8974,68 +9086,75 @@ def main():
                     ):
                         skip_reason = "above_last_sell_discount"
                     elif (
+                        not resting_grid_entry
+                        and
                         mean_reversion_opportunity < mean_reversion_min_opportunity
                     ):
                         skip_reason = "mean_reversion_opportunity_below_min"
-                    elif price_is_above_allowed_entry(
-                        price,
-                        level,
-                        route_config,
-                        buy_source,
-                        strategy_config
-                    ):
-                        stale_reanchor = stale_level_reanchor_entry(
-                            price,
-                            level,
-                            route_config,
-                            buy_source,
-                            weather_report,
-                            strategy_config,
-                            stale_level_reanchor_profit_guard(
-                                route_config,
-                                now,
-                            ),
-                        )
-                        if stale_reanchor["allowed"]:
-                            original_level = level
-                            level = stale_reanchor["reanchor_price"]
-                            key = str(level)
-                            momentum_entry_max_price = level
-                            stale_profit_guard = (
-                                stale_reanchor.get("profit_guard")
-                                if isinstance(stale_reanchor, dict)
-                                else {}
-                            )
-                            if isinstance(stale_profit_guard, dict):
-                                candidate_effective_position_size_pct *= (
-                                    optional_float(
-                                        stale_profit_guard.get(
-                                            "size_multiplier"
-                                        )
-                                    )
-                                    or 1.0
-                                )
-                            if key in state["open_buy_orders"]:
-                                skip_reason = "open_buy_order"
-                            elif key in reserved_sell_levels:
-                                skip_reason = "open_sell_order"
+                    elif not entry_placement["allowed"]:
+                        if resting_grid_entry:
+                            skip_reason = entry_placement["reason"]
                         else:
-                            skip_reason = (
-                                stale_reanchor.get("reason")
-                                if str(stale_reanchor.get("reason") or "").startswith(
-                                    "profit_guard_"
-                                )
-                                else "price_above_level"
+                            stale_reanchor = stale_level_reanchor_entry(
+                                price,
+                                level,
+                                route_config,
+                                buy_source,
+                                weather_report,
+                                strategy_config,
+                                stale_level_reanchor_profit_guard(
+                                    route_config,
+                                    now,
+                                ),
                             )
+                            if stale_reanchor["allowed"]:
+                                original_level = level
+                                level = stale_reanchor["reanchor_price"]
+                                key = str(level)
+                                momentum_entry_max_price = level
+                                stale_profit_guard = (
+                                    stale_reanchor.get("profit_guard")
+                                    if isinstance(stale_reanchor, dict)
+                                    else {}
+                                )
+                                if isinstance(stale_profit_guard, dict):
+                                    candidate_effective_position_size_pct *= (
+                                        optional_float(
+                                            stale_profit_guard.get(
+                                                "size_multiplier"
+                                            )
+                                        )
+                                        or 1.0
+                                    )
+                                if key in state["open_buy_orders"]:
+                                    skip_reason = "open_buy_order"
+                                elif key in reserved_sell_levels:
+                                    skip_reason = "open_sell_order"
+                            else:
+                                skip_reason = (
+                                    stale_reanchor.get("reason")
+                                    if str(
+                                        stale_reanchor.get("reason") or ""
+                                    ).startswith("profit_guard_")
+                                    else entry_placement["reason"]
+                                )
                     elif not source_policy["allowed"]:
                         skip_reason = source_policy["reason"]
-                    elif not weather_entry_guard["allowed"]:
+                    elif (
+                        not resting_grid_entry
+                        and not weather_entry_guard["allowed"]
+                    ):
                         skip_reason = weather_entry_guard["reason"]
                     elif buy_cooldown["remaining_minutes"] > 0:
                         skip_reason = "buy_cooldown"
-                    elif sell_fill_cooldown["remaining_minutes"] > 0:
+                    elif (
+                        not resting_grid_entry
+                        and sell_fill_cooldown["remaining_minutes"] > 0
+                    ):
                         skip_reason = "buy_after_sell_fill_cooldown"
                     elif (
+                        not resting_grid_entry
+                        and
                         inventory_hard_cap_enabled
                         and
                         deployed_inventory_usd
@@ -9104,7 +9223,7 @@ def main():
                             }
                             if not high_band_guard["allowed"]:
                                 skip_reason = high_band_guard["reason"]
-                    elif flow_control["block_buy"]:
+                    elif not resting_grid_entry and flow_control["block_buy"]:
                         skip_reason = flow_control["reason"]
                     elif (
                         buy_source == "llm_target"
@@ -9130,7 +9249,11 @@ def main():
                     volume = (
                         available_usd
                         * candidate_effective_position_size_pct
-                        * flow_control["size_multiplier"]
+                        * (
+                            1.0
+                            if resting_grid_entry
+                            else flow_control["size_multiplier"]
+                        )
                     ) / level
                     trade_notional_usd = level * volume
                     projected_inventory_usd = deployed_inventory_usd + (
@@ -9204,6 +9327,7 @@ def main():
 
                     if (
                         skip_reason is None
+                        and not resting_grid_entry
                         and inventory_hard_cap_enabled
                         and projected_inventory_usd > (
                             candidate_effective_max_inventory_usd
@@ -9213,6 +9337,7 @@ def main():
 
                     if (
                         skip_reason is None
+                        and not resting_grid_entry
                         and bucket_inventory_hard_caps_enabled
                         and projected_bucket_inventory_usd > bucket_cap_usd
                     ):
@@ -9316,6 +9441,7 @@ def main():
                         log_event(
                             "BUY_CANDIDATE_SKIPPED",
                             cycle_id=cycle_id,
+                            grid_slot=grid_slot,
                             level=round(level, PRICE_DECIMALS),
                             original_level=(
                                 round(original_level, PRICE_DECIMALS)
@@ -10175,6 +10301,13 @@ def main():
                     buy_order_state = {
                         "volume": volume,
                         "price": level,
+                        "grid_slot": grid_slot,
+                        "entry_placement_mode": (
+                            candidate_entry_placement_mode
+                        ),
+                        "entry_placement_max_above_level_pct": (
+                            entry_placement["max_above_level_pct"]
+                        ),
                         "original_level": (
                             original_level if original_level != level else None
                         ),
@@ -10376,6 +10509,7 @@ def main():
                         trade_id=txid,
                         client_order_id=accepted_client_order_id,
                         submission_recovered=buy_submission_recovered,
+                        grid_slot=grid_slot,
                         volume=round(volume, VOLUME_DECIMALS),
                         price=round(level, PRICE_DECIMALS),
                         original_level=(
@@ -10452,6 +10586,7 @@ def main():
                         trade_id=txid,
                         client_order_id=accepted_client_order_id,
                         submission_recovered=buy_submission_recovered,
+                        grid_slot=grid_slot,
                         volume=round(volume, VOLUME_DECIMALS),
                         price=round(level, PRICE_DECIMALS),
                         original_level=(

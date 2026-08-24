@@ -64,6 +64,44 @@ Acceptance criteria:
 - Live-only code performs I/O and order submission, not strategy decisions.
 - Replay-only code performs simulated exchange execution, not gate decisions.
 
+## P1A — Restore deterministic low/median grid placement
+
+The legacy entry engine calculated grid levels but treated them as market
+timing triggers. It would not submit a buy while price remained above the
+level, then required several forecast and recovery mechanisms to align after
+price crossed it. This produced long silent periods followed by order bursts.
+
+- [x] Add an explicit per-source `resting_grid` placement mode shared by live
+      execution and replay.
+- [x] Keep high-band entry in the existing strict triggered mode.
+- [x] Give each new resting rung a stable source-and-depth slot identity.
+- [x] Keep a managed slot occupied through its paired sell and reopen it only
+      after that sell fills.
+- [x] Exclude legacy orders without a managed slot identity from slot blocking.
+- [x] Reduce resting low/median entry authority to hard safety only; forecast
+      phases, sentiment opinions, falling-tape labels, flow pressure, inventory
+      pressure, above-last-sell checks, and post-sell cooldowns cannot veto a
+      nearby resting slot.
+- [x] Retain cash reserve, exchange minimums, duplicate open-buy protection,
+      short source pacing, explicit risk-off/danger blocks, operating mode, and
+      private-API failure protection.
+- [x] Disable dynamic one-anchor selection, volatility-shifting grid spacing,
+      and stale-level reanchoring in the resting-grid candidate.
+- [x] Add replay reporting for placement modes, resting distance, and occupied
+      slots.
+- [x] Add the candidate to the ranked strategy set.
+
+Acceptance criteria:
+
+- When price enters the configured low or median anchor zone, the first nearby
+  rung can rest before price crosses it.
+- A current managed sell blocks only its own slot; legacy recovery orders do
+  not block any new managed slot.
+- A resting low/median candidate is blocked only by price being outside its
+  anchor zone, an occupied managed slot, short pacing, insufficient spendable
+  cash above reserve, exchange constraints, or hard safety/runtime failures.
+- Existing open orders are never canceled, repriced, or migrated during rollout.
+
 ## P2 — Separate legacy recovery from working inventory
 
 Existing sells currently count at full buy cost in inventory-pressure sizing.
@@ -110,14 +148,35 @@ Acceptance criteria:
 ## Rollout order
 
 1. Complete P0 and verify on fixtures plus the captured 40-hour window.
-2. Complete P1 parity before further strategy tuning.
-3. Migrate existing orders into the legacy-recovery cohort and complete P2.
-4. Replay P3 candidates, then enable bounded live probes.
+2. Rank the P1A resting-grid candidate on captured windows before selecting it
+   in production.
+3. Complete P1 parity before further strategy tuning.
+4. Migrate existing orders into the legacy-recovery cohort and complete P2.
+5. Replay P3 candidates, then enable bounded live probes.
 
 No stage requires waiting for existing sell orders to close. Those orders stay
 in recovery while the architecture work proceeds.
 
 ## Verification log
+
+### 2026-08-24 — Deterministic low/median resting-grid candidate
+
+- Replaced price-crossing entry behavior with explicit nearby resting orders
+  for low and median only; high remains triggered and chop-confirmed.
+- Added stable managed slot identities that persist from buy placement through
+  the paired sell. Legacy orders carry no slot identity and cannot block the
+  working grid.
+- Removed soft forecast, sentiment, flow, inventory-pressure, above-last-sell,
+  and post-sell blockers from resting low/median entries while retaining hard
+  risk and runtime safety.
+- Disabled dynamic anchor selection, volatility-adaptive spacing, and stale
+  reanchoring in `range_grid_strategy_recovery_resting_low_median.json`.
+- Retained the $100 low/median order floor, $100 cash reserve, immutable sells,
+  observed 1.20% fee schedule, source pacing, and strict high-band policy.
+- Added live/replay placement metadata plus managed-slot lifecycle coverage.
+- `python -m unittest discover -s tests`: 293 tests passed.
+- Python compilation, JSON validation, and `git diff --check` passed.
+
 
 ### 2026-08-23 — Production order sizing floor
 
