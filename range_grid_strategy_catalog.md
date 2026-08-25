@@ -19,11 +19,18 @@
   disabled. High remains triggered and chop-confirmed. Included in
   `range_grid_strategy_test_set.txt` for ranked replay before production use.
 
+- `range_grid_strategy_production_active_low_median_fear_greed.json`
+  Production active-grid profile promoted from the successful 40-hour and
+  168-hour comparisons. Low and median use four anchor-first resting levels
+  with fixed source spacing and price-band occupancy. It keeps $100 full-size
+  orders, a $100 cash reserve, immutable sells, and double Fear & Greed profit
+  targets. High-band trading and paper trading are disabled. Run this profile
+  with the anchor router disabled so live execution matches isolated replay.
+
 - `range_grid_strategy_recovery_hybrid_active_low_median_fear_greed.json`
-  Paper-only active-grid candidate. Low and median use four anchor-first
-  resting levels with fixed source spacing and price-band occupancy. It keeps
-  $100 full-size orders, a $100 cash reserve, immutable sells, and double Fear
-  & Greed profit targets. High-band trading is disabled.
+  Superseded paper-only source of the production profile. Retained for audit
+  history but removed from `range_grid_strategy_test_set.txt`; the production
+  file now receives the continuing ranked backtests.
 
 - `range_grid_strategy_recovery_hybrid_active_low_median_high_probe.json`
   Paper-only comparison using the same active low/median resting grid plus one

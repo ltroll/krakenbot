@@ -64,17 +64,25 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
 
         self.assertEqual(mismatches, [])
 
-    def test_hybrid_fear_greed_candidates_are_paper_only_and_bounded(self):
-        safe_name = (
+    def test_promoted_active_grid_and_high_probe_are_bounded(self):
+        candidate_name = (
             "range_grid_strategy_recovery_"
             "hybrid_active_low_median_fear_greed.json"
+        )
+        production_name = (
+            "range_grid_strategy_production_"
+            "active_low_median_fear_greed.json"
         )
         probe_name = (
             "range_grid_strategy_recovery_"
             "hybrid_active_low_median_high_probe.json"
         )
         profiles = {}
-        for strategy_name in (safe_name, probe_name):
+        for strategy_name in (
+            candidate_name,
+            production_name,
+            probe_name,
+        ):
             with open(
                 os.path.join(ROOT, strategy_name),
                 encoding="utf-8",
@@ -91,10 +99,22 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
                 if line.strip() and not line.lstrip().startswith("#")
             }
 
-        for strategy_name, profile in profiles.items():
+        self.assertNotIn(candidate_name, ranked_names)
+        self.assertIn(production_name, ranked_names)
+        self.assertIn(probe_name, ranked_names)
+
+        candidate = profiles[candidate_name]
+        production = profiles[production_name]
+        candidate_payload = dict(candidate)
+        production_payload = dict(production)
+        self.assertTrue(candidate_payload.pop("paper_trading_enabled"))
+        self.assertFalse(production_payload.pop("paper_trading_enabled"))
+        self.assertEqual(production_payload, candidate_payload)
+
+        for strategy_name in (production_name, probe_name):
+            profile = profiles[strategy_name]
             self.assertIn(strategy_name, ranked_names)
             self.assertEqual(validate_strategy_config(profile), [])
-            self.assertTrue(profile["paper_trading_enabled"])
             self.assertEqual(profile["backtest_starting_cash_usd"], 600)
             self.assertEqual(profile["max_grid_size"], 4)
             self.assertEqual(profile["dynamic_anchor_low_band_max"], 0.5)
@@ -157,10 +177,12 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
                 {"range_low": 2, "range_median": 2},
             )
 
-        safe = profiles[safe_name]
+        self.assertFalse(production["paper_trading_enabled"])
+        self.assertTrue(profiles[probe_name]["paper_trading_enabled"])
+
         probe = profiles[probe_name]
-        self.assertEqual(safe["grid_anchor"], "low,median")
-        self.assertEqual(safe["max_open_high_anchor_orders"], 0)
+        self.assertEqual(production["grid_anchor"], "low,median")
+        self.assertEqual(production["max_open_high_anchor_orders"], 0)
         self.assertEqual(probe["grid_anchor"], "low,median,high")
         self.assertEqual(probe["max_open_high_anchor_orders"], 1)
         self.assertEqual(probe["high_anchor_buy_cooldown_minutes"], 60)

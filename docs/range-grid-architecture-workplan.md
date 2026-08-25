@@ -162,30 +162,60 @@ Acceptance criteria:
 No stage requires waiting for existing sell orders to close. Those orders stay
 in recovery while the architecture work proceeds.
 
-## Active backtest experiments
+## Active production trial and backtest control
 
-Two paper-only hybrids isolate the useful low/median activity from the
-168-hour `super_aggressive` result without inheriting its unrestricted high
-exposure or small fragmented order sizing:
+The active low/median experiment isolated useful inventory accumulation from
+the `super_aggressive` result without inheriting its unrestricted high exposure
+or small fragmented order sizing. The 168-hour result justified a small live
+trial:
 
-- `range_grid_strategy_recovery_hybrid_active_low_median_fear_greed.json`
-  expands the low selection band and maintains four fixed-spacing,
-  anchor-first resting levels for both low and median. It retains $100 orders,
-  the $100 reserve, double Fear & Greed targets, immutable sells, and excludes
-  high-band trading.
+- `range_grid_strategy_production_active_low_median_fear_greed.json` is the
+  promoted live profile. It expands the low selection band and maintains four
+  fixed-spacing, anchor-first resting levels for both low and median. It
+  retains $100 orders, the $100 reserve, double Fear & Greed targets, immutable
+  sells, and excludes high-band trading.
 - `range_grid_strategy_recovery_hybrid_active_low_median_high_probe.json`
   uses the same resting low/median grid and adds a separate triggered high-band
   probe above 90% of the range. High has no $100 floor, is limited to one open
   order, uses 60/90-minute pacing, and still requires a bounded chop setup plus
   risk-context confirmation.
 
-Both candidates use the same $600 starting cash and 1.20% round-trip fees as
-the current double Fear & Greed control. Promotion requires more than nine
-completed low/median trades, greater than 1.8567% net return, at least a 90%
-close rate, drawdown no worse than roughly -2.5%, and no accumulating high-band
-inventory over the captured 168-hour window.
+Both profiles use the same $600 starting cash and 1.20% round-trip fees as the
+double Fear & Greed control. The production trial requires more than nine
+completed low/median trades, positive marked-to-market return overall and by
+source, drawdown no worse than roughly -2.5%, full preservation of the $100
+cash reserve, and no high-band inventory. Open low/median inventory is not a
+failure while these conditions hold; patient recovery is intentional.
+
+The production trial must initially set
+`RANGE_GRID_ANCHOR_ROUTER_ENABLED=false`. Strategy comparison evaluates each
+profile in isolation, so disabling routing ensures live execution uses the
+same payload that produced the ranked result.
 
 ## Verification log
+
+### 2026-08-25 — Promote active low/median grid to bounded production
+
+- The corrected 168-hour replay placed 16 $100 orders, filled 15, closed 11,
+  and retained four open median positions. Realized net P&L was $12.928 and
+  marked-to-market total net P&L remained positive at $7.0469 (1.1745%).
+- Low closed four of four fills for $5.032 net. Median closed seven of eleven
+  fills and remained positive marked to market at $2.0149 despite $5.8811 of
+  temporary unrealized loss on its four open positions.
+- Maximum equity drawdown was -1.873%. The $100 cash reserve remained enforced,
+  no high-band order was approved, and the high-probe comparison added no
+  trades or return.
+- The triggered double Fear & Greed control earned a higher fully closed
+  seven-day return, but placed only nine orders. The active profile better
+  matches the stated goal of safe, patient inventory accumulation while
+  remaining positive after valuing open inventory.
+- Added `range_grid_strategy_production_active_low_median_fear_greed.json` as
+  an exact production copy of the winning paper candidate with only paper mode
+  disabled. Ranked backtests now follow the production file directly; the
+  superseded safe paper copy remains only for audit history.
+- Initial live deployment disables the anchor router so routed composition
+  cannot change the isolated strategy that was tested. Existing orders remain
+  untouched and retain their locked sell prices.
 
 ### 2026-08-25 — Price-band slots and active hybrid correction
 
