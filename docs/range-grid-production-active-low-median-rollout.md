@@ -36,8 +36,12 @@ order floor, a $100 reserve, and sell repricing disabled.
 ## Verify startup
 
 ```bash
-grep '"event": "BOT_START"' /var/www/html/bot/range_grid_activity.jsonl | tail -1 | jq '{ts,strategy_profile,paper_trading_enabled,grid_anchor,max_grid_size,minimum_order_floor_usd,minimum_order_floor_cash_reserve_usd,sell_repricing_enabled,anchor_strategy_router_enabled}'
+grep '"event": "BOT_START"' trade_log.jsonl | tail -1 | jq '{ts,strategy_profile,paper_trading_enabled,grid_anchor,max_grid_size,minimum_order_floor_usd,minimum_order_floor_cash_reserve_usd,sell_repricing_enabled,anchor_strategy_router_enabled}'
 ```
+
+`BOT_START` is part of the bot's trade/runtime log, not the separate public
+activity log. Run this command from the production repository, where the
+current `.env` sets `RANGE_GRID_TRADE_LOG_FILE=trade_log.jsonl`.
 
 Expected identity:
 
