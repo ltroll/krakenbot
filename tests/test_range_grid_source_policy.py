@@ -64,6 +64,96 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
 
         self.assertEqual(mismatches, [])
 
+    def test_hybrid_fear_greed_candidates_are_paper_only_and_bounded(self):
+        safe_name = (
+            "range_grid_strategy_recovery_"
+            "hybrid_active_low_median_fear_greed.json"
+        )
+        probe_name = (
+            "range_grid_strategy_recovery_"
+            "hybrid_active_low_median_high_probe.json"
+        )
+        profiles = {}
+        for strategy_name in (safe_name, probe_name):
+            with open(
+                os.path.join(ROOT, strategy_name),
+                encoding="utf-8",
+            ) as handle:
+                profiles[strategy_name] = json.load(handle)
+
+        with open(
+            os.path.join(ROOT, "range_grid_strategy_test_set.txt"),
+            encoding="utf-8",
+        ) as handle:
+            ranked_names = {
+                line.strip()
+                for line in handle
+                if line.strip() and not line.lstrip().startswith("#")
+            }
+
+        for strategy_name, profile in profiles.items():
+            self.assertIn(strategy_name, ranked_names)
+            self.assertEqual(validate_strategy_config(profile), [])
+            self.assertTrue(profile["paper_trading_enabled"])
+            self.assertEqual(profile["backtest_starting_cash_usd"], 600)
+            self.assertEqual(profile["max_grid_size"], 4)
+            self.assertEqual(profile["dynamic_anchor_low_band_max"], 0.5)
+            self.assertEqual(
+                profile["momentum_entry_tolerance_pct_by_source"],
+                {"range_low": 0.0015, "range_median": 0.0015},
+            )
+            self.assertEqual(
+                profile["entry_policy_by_source"]["range_low"]["authority"],
+                "price_first",
+            )
+            self.assertEqual(
+                profile["entry_policy_by_source"]["range_median"]["authority"],
+                "price_first",
+            )
+            self.assertTrue(profile["minimum_order_floor_require_full_size"])
+            self.assertEqual(
+                profile["minimum_order_floor_sources"],
+                "range_low,range_median",
+            )
+            self.assertEqual(profile["minimum_order_floor_usd"], 100)
+            self.assertEqual(
+                profile["minimum_order_floor_cash_reserve_usd"],
+                100,
+            )
+            self.assertFalse(profile["inventory_hard_cap_enabled"])
+            self.assertFalse(profile["bucket_inventory_hard_caps_enabled"])
+            self.assertFalse(profile["sell_backlog_hard_block_enabled"])
+            self.assertFalse(profile["open_sell_hard_cap_enabled"])
+            self.assertFalse(profile["flow_hard_block_enabled"])
+            self.assertFalse(profile["sell_repricing_enabled"])
+            self.assertEqual(profile["maker_fee_pct"], 0.004)
+            self.assertEqual(profile["taker_fee_pct"], 0.008)
+            self.assertEqual(profile["round_trip_fee_pct"], 0.012)
+            self.assertEqual(
+                profile["fear_greed_profit_target_max_multiplier_by_source"],
+                {"range_low": 2, "range_median": 2},
+            )
+
+        safe = profiles[safe_name]
+        probe = profiles[probe_name]
+        self.assertEqual(safe["grid_anchor"], "low,median")
+        self.assertEqual(safe["max_open_high_anchor_orders"], 0)
+        self.assertEqual(probe["grid_anchor"], "low,median,high")
+        self.assertEqual(probe["max_open_high_anchor_orders"], 1)
+        self.assertEqual(probe["high_anchor_buy_cooldown_minutes"], 60)
+        self.assertEqual(
+            probe["buy_cooldown_minutes_by_source"]["range_high_band"],
+            60,
+        )
+        self.assertEqual(
+            probe["entry_policy_by_source"]["range_high_band"]["authority"],
+            "chop_confirmed",
+        )
+        self.assertNotIn(
+            "range_high_band",
+            probe["minimum_order_floor_sources"].split(","),
+        )
+
     def test_price_first_bypasses_normal_sentiment_block_and_reduces_falling_tape(self):
         config = {
             "source_entry_policy_enabled": True,

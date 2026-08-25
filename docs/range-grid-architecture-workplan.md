@@ -73,8 +73,13 @@ price crossed it. This produced long silent periods followed by order bursts.
 
 - [x] Add an explicit per-source `resting_grid` placement mode shared by live
       execution and replay.
+- [x] Make resting slot 1 equal its low/median anchor while preserving the
+      legacy one-step-below calculation for triggered entries.
 - [x] Keep high-band entry in the existing strict triggered mode.
 - [x] Give each new resting rung a stable source-and-depth slot identity.
+- [ ] Replace source-and-depth-only slot identities with quantized price-band
+      identities so a materially lower grid level can trade while an older,
+      higher sell waits without permitting duplicates in the same band.
 - [x] Keep a managed slot occupied through its paired sell and reopen it only
       after that sell fills.
 - [x] Exclude legacy orders without a managed slot identity from slot blocking.
@@ -157,7 +162,43 @@ Acceptance criteria:
 No stage requires waiting for existing sell orders to close. Those orders stay
 in recovery while the architecture work proceeds.
 
+## Active backtest experiments
+
+Two paper-only hybrids isolate the useful low/median activity from the
+168-hour `super_aggressive` result without inheriting its unrestricted high
+exposure or small fragmented order sizing:
+
+- `range_grid_strategy_recovery_hybrid_active_low_median_fear_greed.json`
+  expands the low selection band, uses four grid levels, admits a 0.15% nearby
+  low/median tolerance, and makes median price-first. It retains $100 orders,
+  the $100 reserve, double Fear & Greed targets, immutable sells, and excludes
+  high-band trading.
+- `range_grid_strategy_recovery_hybrid_active_low_median_high_probe.json`
+  adds a separate high-band probe above 90% of the range. High has no $100
+  floor, is limited to one open order, uses 60/90-minute pacing, and still
+  requires a bounded chop setup plus risk-context confirmation.
+
+Both candidates use the same $600 starting cash and 1.20% round-trip fees as
+the current double Fear & Greed control. Promotion requires more than nine
+completed low/median trades, greater than 1.8567% net return, at least a 90%
+close rate, drawdown no worse than roughly -2.5%, and no accumulating high-band
+inventory over the captured 168-hour window.
+
 ## Verification log
+
+### 2026-08-24 — Anchor-first resting-grid correction
+
+- The first 40-hour replay of the resting-grid candidate placed one low and
+  one median order but filled neither because the inherited grid calculation
+  put slot 1 one full step below its anchor.
+- Resting low/median grids now start at the anchor and descend from there;
+  triggered grids retain their existing one-step-below behavior and high-band
+  construction is unchanged.
+- Live and replay now use the same shared entry-grid calculation.
+- Existing orders, slot lifecycle, placement windows, sizing, profit targets,
+  and sell behavior are unchanged.
+- `python -m unittest discover -s tests`: 297 tests passed.
+- Python compilation and `git diff --check` passed.
 
 ### 2026-08-24 — Deterministic low/median resting-grid candidate
 
