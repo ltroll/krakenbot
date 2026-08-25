@@ -4,6 +4,7 @@ import unittest
 
 from range_grid_entry_placement import (
     entry_grid_levels,
+    entry_grid_slot,
     entry_placement_mode,
     entry_price_placement_decision,
 )
@@ -83,6 +84,54 @@ class RangeGridEntryPlacementTests(unittest.TestCase):
         self.assertAlmostEqual(levels[0], 99.72)
         self.assertAlmostEqual(levels[1], 99.44)
         self.assertAlmostEqual(levels[2], 99.16)
+
+    def test_resting_grid_slot_is_stable_within_price_band(self):
+        anchor_slot = entry_grid_slot(
+            "range_low",
+            100.0,
+            0.0028,
+            1,
+            self.config,
+        )
+        drifted_slot = entry_grid_slot(
+            "range_low",
+            100.01,
+            0.0028,
+            3,
+            self.config,
+        )
+
+        self.assertEqual(anchor_slot, drifted_slot)
+        self.assertTrue(anchor_slot.startswith("range_low:price_band:"))
+
+    def test_resting_grid_slot_reopens_at_next_lower_price_band(self):
+        anchor_slot = entry_grid_slot(
+            "range_low",
+            100.0,
+            0.0028,
+            1,
+            self.config,
+        )
+        lower_slot = entry_grid_slot(
+            "range_low",
+            99.72,
+            0.0028,
+            2,
+            self.config,
+        )
+
+        self.assertNotEqual(anchor_slot, lower_slot)
+
+    def test_triggered_grid_slot_keeps_source_and_depth_identity(self):
+        slot = entry_grid_slot(
+            "range_low",
+            100.0,
+            0.0028,
+            3,
+            {},
+        )
+
+        self.assertEqual(slot, "range_low:3")
 
     def test_resting_grid_rejects_level_outside_nearby_zone(self):
         decision = entry_price_placement_decision(

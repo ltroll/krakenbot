@@ -38,6 +38,7 @@ from range_grid_guardrails import (
 from range_grid_effective_strategy import resolve_effective_strategy
 from range_grid_entry_placement import (
     entry_grid_levels,
+    entry_grid_slot,
     entry_placement_mode,
     entry_price_placement_decision,
 )
@@ -8672,9 +8673,15 @@ def main():
                             candidate_levels.append(
                                 {
                                     "level": level,
-                                    "grid_slot": (
-                                        f"{buy_source}:{grid_slot_index}"
+                                    "grid_slot": entry_grid_slot(
+                                        buy_source,
+                                        level,
+                                        route_entry_step_pct,
+                                        grid_slot_index,
+                                        route_config,
+                                        fallback_config=strategy_config,
                                     ),
+                                    "grid_slot_depth": grid_slot_index,
                                     "sell_pct_override": sell_pct_override,
                                     "buy_source": buy_source,
                                     "anchor_router_anchor": route_context["anchor"],

@@ -10,18 +10,12 @@
   "entry_policy_by_source": {
     "range_low": {
       "authority": "price_first",
-      "position_size_multiplier": 0.75,
-      "missing_weather_size_multiplier": 0.7,
-      "falling_tape_size_multiplier": 0.35,
-      "hard_block_falling_tape": false,
+      "position_size_multiplier": 1,
       "weather_bypassable_hard_safety_flags": "source_health_block"
     },
     "range_median": {
       "authority": "price_first",
-      "position_size_multiplier": 0.65,
-      "missing_weather_size_multiplier": 0.65,
-      "falling_tape_size_multiplier": 0.35,
-      "hard_block_falling_tape": false,
+      "position_size_multiplier": 1,
       "weather_bypassable_hard_safety_flags": "source_health_block"
     },
     "range_high_band": {
@@ -49,14 +43,16 @@
     "range_median": 0.0035,
     "range_high_band": 0.003
   },
-  "momentum_entry_tolerance_pct_by_source": {
-    "range_low": 0.0015,
-    "range_median": 0.0015
+  "entry_placement_mode_by_source": {
+    "range_low": "resting_grid",
+    "range_median": "resting_grid",
+    "range_high_band": "triggered"
   },
-  "volatility_adaptive_entry_step_enabled": true,
-  "volatility_reference_pct": 0.03,
-  "volatility_min_step_multiplier": 0.85,
-  "volatility_max_step_multiplier": 1.25,
+  "resting_grid_max_above_level_pct_by_source": {
+    "range_low": 0.0035,
+    "range_median": 0.0055
+  },
+  "volatility_adaptive_entry_step_enabled": false,
   "profit_target_pct": 0.009,
   "high_anchor_profit_target_pct": 0.006,
   "sell_target_offset_pct_by_source": {
@@ -71,19 +67,6 @@
     "range_high_band": 0.0035
   },
   "sell_repricing_enabled": false,
-  "aging_start_minutes": 360,
-  "aging_step_minutes": 180,
-  "aging_profit_reduction_pct": 0.001,
-  "aging_start_minutes_by_source": {
-    "range_low": 540,
-    "range_median": 300,
-    "range_high_band": 180
-  },
-  "aging_profit_reduction_pct_by_source": {
-    "range_low": 0.00075,
-    "range_median": 0.001,
-    "range_high_band": 0.0015
-  },
   "maker_fee_pct": 0.004,
   "taker_fee_pct": 0.008,
   "round_trip_fee_pct": 0.012,
@@ -122,29 +105,7 @@
   "prevent_buy_above_last_sell": true,
   "buy_after_sell_discount_pct": 0.001,
   "buy_above_last_sell_guard_minutes": 60,
-  "stale_level_reanchor_enabled": true,
-  "stale_level_reanchor_sources": "range_low",
-  "stale_level_reanchor_weather_phases": "dip_leveling_entry",
-  "stale_level_reanchor_require_weather": true,
-  "stale_level_reanchor_min_above_level_pct": 0.006,
-  "stale_level_reanchor_max_above_level_pct": 0.025,
-  "stale_level_reanchor_min_entry_opportunity_score": 0.6,
-  "stale_level_reanchor_min_rebound_confirmation_score": 0,
-  "stale_level_reanchor_max_exit_pressure_score": 0.25,
-  "stale_level_reanchor_profit_guard_enabled": true,
-  "stale_level_reanchor_profit_guard_fail_closed": true,
-  "stale_level_reanchor_profit_guard_low_dip_bypass_enabled": true,
-  "stale_level_reanchor_profit_guard_low_dip_bypass_phases": "dip_leveling_entry,bottoming_setup,range_chop_accumulation",
-  "stale_level_reanchor_profit_guard_low_dip_min_stabilization_score": 0.6,
-  "stale_level_reanchor_profit_guard_low_dip_min_entry_opportunity_score": 0.6,
-  "stale_level_reanchor_profit_guard_low_dip_min_resistance_room_pct": 0.006,
-  "stale_level_reanchor_profit_guard_low_dip_min_bottom_readiness_score": 0.55,
-  "stale_level_reanchor_profit_guard_low_dip_max_support_distance_pct": 0.01,
-  "stale_level_reanchor_profit_guard_low_dip_size_multiplier": 0.35,
-  "stale_level_reanchor_profit_lookback_hours": 24,
-  "stale_level_reanchor_profit_min_samples": 2,
-  "stale_level_reanchor_assumed_net_return_pct": -0.25,
-  "stale_level_reanchor_min_projected_avg_net_return_pct": 0.1,
+  "stale_level_reanchor_enabled": false,
   "require_fresh_signal": true,
   "min_signal_status": "fresh",
   "execution_signal_threshold": -1,

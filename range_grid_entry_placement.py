@@ -6,6 +6,8 @@ advance so low/median entries behave like an actual grid instead of a market
 timing trigger.
 """
 
+import math
+
 
 VALID_ENTRY_PLACEMENT_MODES = {
     "triggered",
@@ -84,6 +86,46 @@ def entry_grid_levels(
         ],
         reverse=True,
     )
+
+
+def entry_grid_slot(
+    buy_source,
+    level,
+    step_pct,
+    grid_depth,
+    config,
+    *,
+    fallback_config=None,
+):
+    """Return a stable slot identity for an entry-grid level.
+
+    Legacy triggered grids retain source-and-depth identities. Resting grids
+    use a logarithmic price band whose width matches the configured entry
+    step. This lets a materially lower band trade while an older sell waits,
+    without allowing rolling-anchor drift inside the same band to duplicate
+    the position.
+    """
+
+    source = str(buy_source or "").strip().lower()
+    depth = max(1, int(grid_depth))
+    mode = entry_placement_mode(config, source, fallback_config)
+    if mode != "resting_grid":
+        return f"{source}:{depth}"
+
+    numeric_level = _safe_float(level)
+    numeric_step = _safe_float(step_pct)
+    if (
+        numeric_level is None
+        or numeric_level <= 0
+        or numeric_step is None
+        or numeric_step <= 0
+        or numeric_step >= 1
+    ):
+        return f"{source}:price_band:invalid:{depth}"
+
+    band_width = -math.log1p(-numeric_step)
+    band_index = math.floor(math.log(numeric_level) / band_width)
+    return f"{source}:price_band:{band_index}"
 
 
 def resting_grid_max_above_level_pct(

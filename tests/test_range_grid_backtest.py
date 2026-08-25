@@ -2611,12 +2611,27 @@ class RangeGridBacktestTests(unittest.TestCase):
 
         low_candidates = candidates_by_source["range_low"]
         median_candidates = candidates_by_source["range_median"]
-        self.assertEqual(low_candidates[0]["grid_slot"], "range_low:1")
+        self.assertTrue(
+            low_candidates[0]["grid_slot"].startswith(
+                "range_low:price_band:"
+            )
+        )
+        self.assertEqual(low_candidates[0]["grid_slot_depth"], 1)
+        self.assertNotEqual(
+            low_candidates[0]["grid_slot"],
+            low_candidates[1]["grid_slot"],
+        )
         self.assertAlmostEqual(low_candidates[0]["level"], 95.0)
         self.assertAlmostEqual(low_candidates[1]["level"], 94.05)
-        self.assertEqual(
+        self.assertTrue(
+            median_candidates[0]["grid_slot"].startswith(
+                "range_median:price_band:"
+            )
+        )
+        self.assertEqual(median_candidates[0]["grid_slot_depth"], 1)
+        self.assertNotEqual(
             median_candidates[0]["grid_slot"],
-            "range_median:1",
+            median_candidates[1]["grid_slot"],
         )
         self.assertAlmostEqual(median_candidates[0]["level"], 99.5)
         self.assertAlmostEqual(median_candidates[1]["level"], 98.505)
@@ -2721,7 +2736,7 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertFalse(approved)
         self.assertEqual(reason, "resting_grid_price_too_far_above_level")
 
-    def test_resting_grid_slot_ignores_legacy_but_not_managed_sell(self):
+    def test_resting_grid_price_band_ignores_legacy_depth_slot(self):
         strategy_overrides = {
             "entry_placement_mode_by_source": {
                 "range_low": "resting_grid",
@@ -2730,7 +2745,7 @@ class RangeGridBacktestTests(unittest.TestCase):
                 "range_low": 0.0035,
             },
         }
-        managed_sell = {
+        legacy_sell = {
             "level": 101.0,
             "grid_slot": "range_low:1",
             "entry_placement_mode": "resting_grid",
@@ -2741,11 +2756,11 @@ class RangeGridBacktestTests(unittest.TestCase):
             100.3,
             strategy_modes=["low"],
             strategy_overrides=strategy_overrides,
-            open_sell_orders=[managed_sell],
+            open_sell_orders=[legacy_sell],
         )
         candidate = {
             "level": 100.0,
-            "grid_slot": "range_low:1",
+            "grid_slot": "range_low:price_band:1642",
             "buy_source": "range_low",
             "strategy_mode": "low",
         }
@@ -2756,8 +2771,57 @@ class RangeGridBacktestTests(unittest.TestCase):
             100.3,
         )
 
-        self.assertFalse(approved)
-        self.assertEqual(reason, "resting_grid_slot_active")
+        self.assertTrue(approved)
+        self.assertIsNone(reason)
+
+    def test_resting_grid_price_band_blocks_only_matching_managed_sell(self):
+        strategy_overrides = {
+            "entry_placement_mode_by_source": {
+                "range_low": "resting_grid",
+            },
+            "resting_grid_max_above_level_pct_by_source": {
+                "range_low": 0.0035,
+            },
+        }
+        snapshot = make_snapshot(
+            "2026-06-12T12:00:00+00:00",
+            100.3,
+            strategy_modes=["low"],
+            strategy_overrides=strategy_overrides,
+            open_sell_orders=[{
+                "level": 101.0,
+                "grid_slot": "range_low:price_band:1642",
+                "entry_placement_mode": "resting_grid",
+                "buy_source": "range_low",
+            }],
+        )
+        matching_candidate = {
+            "level": 100.0,
+            "grid_slot": "range_low:price_band:1642",
+            "buy_source": "range_low",
+            "strategy_mode": "low",
+        }
+        lower_band_candidate = {
+            **matching_candidate,
+            "level": 99.72,
+            "grid_slot": "range_low:price_band:1641",
+        }
+
+        matching_approved, matching_reason = backtest.evaluate_candidate(
+            snapshot,
+            matching_candidate,
+            100.3,
+        )
+        lower_approved, lower_reason = backtest.evaluate_candidate(
+            snapshot,
+            lower_band_candidate,
+            100.0,
+        )
+
+        self.assertFalse(matching_approved)
+        self.assertEqual(matching_reason, "resting_grid_slot_active")
+        self.assertTrue(lower_approved)
+        self.assertIsNone(lower_reason)
 
     def test_evaluate_candidate_keeps_high_anchor_strict_above_level(self):
         snapshot = make_snapshot(

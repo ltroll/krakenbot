@@ -151,6 +151,25 @@ class RangeGridBotLoggingTests(unittest.TestCase):
             for call in calls
         ))
 
+    def test_live_candidates_use_shared_grid_slot_semantics(self):
+        tree = self._bot_tree()
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "entry_grid_slot"
+        ]
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls[0].args), 5)
+        self.assertTrue(any(
+            keyword.arg == "fallback_config"
+            and isinstance(keyword.value, ast.Name)
+            and keyword.value.id == "strategy_config"
+            for keyword in calls[0].keywords
+        ))
+
     def test_sell_repricing_is_fail_closed_and_guards_live_amend(self):
         tree = self._bot_tree()
         assignment = next(

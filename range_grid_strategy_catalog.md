@@ -12,12 +12,23 @@
 - `range_grid_strategy_recovery_resting_low_median.json`
   Deterministic resting-grid candidate built from the recovery source-policy
   and Fear & Greed profit-target work. Low and median maintain fixed nearby
-  resting rungs with hard-safety-only entry authority and stable managed slot
-  identities. A slot remains occupied through its paired immutable sell, while
-  legacy orders without slot identities do not block the working grid. Dynamic
+  resting rungs with hard-safety-only entry authority and quantized price-band
+  identities. A band remains occupied through its paired immutable sell, while
+  legacy and pre-price-band orders do not block the working grid. Dynamic
   anchor selection, volatility-adaptive spacing, and stale reanchoring are
   disabled. High remains triggered and chop-confirmed. Included in
   `range_grid_strategy_test_set.txt` for ranked replay before production use.
+
+- `range_grid_strategy_recovery_hybrid_active_low_median_fear_greed.json`
+  Paper-only active-grid candidate. Low and median use four anchor-first
+  resting levels with fixed source spacing and price-band occupancy. It keeps
+  $100 full-size orders, a $100 cash reserve, immutable sells, and double Fear
+  & Greed profit targets. High-band trading is disabled.
+
+- `range_grid_strategy_recovery_hybrid_active_low_median_high_probe.json`
+  Paper-only comparison using the same active low/median resting grid plus one
+  tightly paced, triggered high-band probe. High is not promoted to the $100
+  floor and retains chop and risk-context confirmation.
 
 Sentiment control modes:
 

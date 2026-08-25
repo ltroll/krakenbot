@@ -76,8 +76,8 @@ price crossed it. This produced long silent periods followed by order bursts.
 - [x] Make resting slot 1 equal its low/median anchor while preserving the
       legacy one-step-below calculation for triggered entries.
 - [x] Keep high-band entry in the existing strict triggered mode.
-- [x] Give each new resting rung a stable source-and-depth slot identity.
-- [ ] Replace source-and-depth-only slot identities with quantized price-band
+- [x] Give the initial resting rungs a stable source-and-depth slot identity.
+- [x] Replace source-and-depth-only slot identities with quantized price-band
       identities so a materially lower grid level can trade while an older,
       higher sell waits without permitting duplicates in the same band.
 - [x] Keep a managed slot occupied through its paired sell and reopen it only
@@ -100,8 +100,8 @@ Acceptance criteria:
 
 - When price enters the configured low or median anchor zone, the first nearby
   rung can rest before price crosses it.
-- A current managed sell blocks only its own slot; legacy recovery orders do
-  not block any new managed slot.
+- A current managed sell blocks only its own price band; legacy recovery and
+  pre-price-band orders do not block any new managed band.
 - A resting low/median candidate is blocked only by price being outside its
   anchor zone, an occupied managed slot, short pacing, insufficient spendable
   cash above reserve, exchange constraints, or hard safety/runtime failures.
@@ -169,14 +169,15 @@ Two paper-only hybrids isolate the useful low/median activity from the
 exposure or small fragmented order sizing:
 
 - `range_grid_strategy_recovery_hybrid_active_low_median_fear_greed.json`
-  expands the low selection band, uses four grid levels, admits a 0.15% nearby
-  low/median tolerance, and makes median price-first. It retains $100 orders,
+  expands the low selection band and maintains four fixed-spacing,
+  anchor-first resting levels for both low and median. It retains $100 orders,
   the $100 reserve, double Fear & Greed targets, immutable sells, and excludes
   high-band trading.
 - `range_grid_strategy_recovery_hybrid_active_low_median_high_probe.json`
-  adds a separate high-band probe above 90% of the range. High has no $100
-  floor, is limited to one open order, uses 60/90-minute pacing, and still
-  requires a bounded chop setup plus risk-context confirmation.
+  uses the same resting low/median grid and adds a separate triggered high-band
+  probe above 90% of the range. High has no $100 floor, is limited to one open
+  order, uses 60/90-minute pacing, and still requires a bounded chop setup plus
+  risk-context confirmation.
 
 Both candidates use the same $600 starting cash and 1.20% round-trip fees as
 the current double Fear & Greed control. Promotion requires more than nine
@@ -185,6 +186,26 @@ close rate, drawdown no worse than roughly -2.5%, and no accumulating high-band
 inventory over the captured 168-hour window.
 
 ## Verification log
+
+### 2026-08-25 — Price-band slots and active hybrid correction
+
+- Replaced resting source-and-depth slot identities with logarithmic price
+  bands sized to each source's configured entry step. Rolling-anchor drift in
+  one band cannot create duplicates, while a materially lower rung can trade
+  even if an older higher sell remains open.
+- Triggered entries, including high-band probes, retain their existing
+  source-and-depth identities and strict entry behavior.
+- Converted both paper-only active hybrids to anchor-first resting low/median
+  placement, fixed spacing, hard-safety-only entry authority, and no stale
+  reanchor. Preserved four levels, $100 low/median orders, the $100 reserve,
+  immutable sells, and double Fear & Greed targets.
+- Removed dormant aging/repricing parameters from both immutable-sell hybrids
+  so their configuration no longer advertises behavior that cannot run.
+- Existing exchange orders are not canceled, repriced, or migrated. Earlier
+  source-and-depth resting orders are treated as legacy for price-band
+  occupancy and continue waiting for their original exits.
+- `python -m unittest discover -s tests`: 303 tests passed.
+- Python compilation, JSON validation, and `git diff --check` passed.
 
 ### 2026-08-24 — Anchor-first resting-grid correction
 

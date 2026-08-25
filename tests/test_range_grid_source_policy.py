@@ -99,9 +99,20 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
             self.assertEqual(profile["max_grid_size"], 4)
             self.assertEqual(profile["dynamic_anchor_low_band_max"], 0.5)
             self.assertEqual(
-                profile["momentum_entry_tolerance_pct_by_source"],
-                {"range_low": 0.0015, "range_median": 0.0015},
+                profile["entry_placement_mode_by_source"],
+                {
+                    "range_low": "resting_grid",
+                    "range_median": "resting_grid",
+                    "range_high_band": "triggered",
+                },
             )
+            self.assertEqual(
+                profile["resting_grid_max_above_level_pct_by_source"],
+                {"range_low": 0.0035, "range_median": 0.0055},
+            )
+            self.assertNotIn("momentum_entry_tolerance_pct_by_source", profile)
+            self.assertFalse(profile["volatility_adaptive_entry_step_enabled"])
+            self.assertFalse(profile["stale_level_reanchor_enabled"])
             self.assertEqual(
                 profile["entry_policy_by_source"]["range_low"]["authority"],
                 "price_first",
@@ -110,6 +121,15 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
                 profile["entry_policy_by_source"]["range_median"]["authority"],
                 "price_first",
             )
+            for source in ("range_low", "range_median"):
+                self.assertEqual(
+                    set(profile["entry_policy_by_source"][source]),
+                    {
+                        "authority",
+                        "position_size_multiplier",
+                        "weather_bypassable_hard_safety_flags",
+                    },
+                )
             self.assertTrue(profile["minimum_order_floor_require_full_size"])
             self.assertEqual(
                 profile["minimum_order_floor_sources"],
@@ -126,6 +146,9 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
             self.assertFalse(profile["open_sell_hard_cap_enabled"])
             self.assertFalse(profile["flow_hard_block_enabled"])
             self.assertFalse(profile["sell_repricing_enabled"])
+            self.assertNotIn("aging_start_minutes", profile)
+            self.assertNotIn("aging_step_minutes", profile)
+            self.assertNotIn("aging_profit_reduction_pct", profile)
             self.assertEqual(profile["maker_fee_pct"], 0.004)
             self.assertEqual(profile["taker_fee_pct"], 0.008)
             self.assertEqual(profile["round_trip_fee_pct"], 0.012)

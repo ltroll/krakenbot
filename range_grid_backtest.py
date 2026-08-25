@@ -18,6 +18,7 @@ from fee_config import effective_round_trip_fee_pct
 from range_grid_effective_strategy import resolve_effective_strategy
 from range_grid_entry_placement import (
     entry_grid_levels,
+    entry_grid_slot,
     entry_placement_mode,
     entry_price_placement_decision,
 )
@@ -6183,7 +6184,14 @@ def build_candidates(snapshot, price):
             for grid_slot_index, level in enumerate(grid, start=1):
                 candidate_levels.append({
                     "level": level,
-                    "grid_slot": f"{buy_source}:{grid_slot_index}",
+                    "grid_slot": entry_grid_slot(
+                        buy_source,
+                        level,
+                        candidate_step_pct,
+                        grid_slot_index,
+                        source_config,
+                    ),
+                    "grid_slot_depth": grid_slot_index,
                     "sell_pct_override": sell_pct_override,
                     "buy_source": buy_source,
                     "strategy_mode": strategy_mode,
