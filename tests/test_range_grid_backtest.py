@@ -1420,6 +1420,61 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(result["unfilled_entries"], 1)
         self.assertEqual(result["resting_grid_slot_active"], 1)
 
+    def test_order_lifecycle_fills_at_near_touch_price_not_anchor(self):
+        strategy = {
+            "backtest_starting_cash_usd": 200.0,
+            "position_size_pct": 0.5,
+            "max_inventory_usd": 1000.0,
+            "inventory_hard_cap_enabled": False,
+            "min_buy_notional_usd": 8.0,
+            "profit_target_pct": 0.009,
+            "round_trip_fee_pct": 0.012,
+            "entry_placement_mode_by_source": {
+                "range_low": "resting_grid",
+            },
+            "resting_grid_max_above_level_pct_by_source": {
+                "range_low": 0.0035,
+            },
+            "resting_grid_near_touch_offset_pct_by_source": {
+                "range_low": 0.0005,
+            },
+        }
+        timestamps = [
+            "2026-06-13T12:00:00+00:00",
+            "2026-06-13T12:01:00+00:00",
+        ]
+        snapshots = [
+            make_snapshot(timestamps[0], 100.3, strategy_overrides=strategy),
+            make_snapshot(timestamps[1], 100.2, strategy_overrides=strategy),
+        ]
+        replay = {
+            "approved_events": [{
+                "captured_at": timestamps[0],
+                "level": 100.0,
+                "entry_anchor_level": 100.0,
+                "entry_order_price": 100.24985,
+                "near_touch_applied": True,
+                "near_touch_offset_pct": 0.0005,
+                "entry_post_only": True,
+                "buy_source": "range_low",
+                "strategy_mode": "low",
+                "grid_slot": "range_low:price_band:1",
+                "entry_placement_mode": "resting_grid",
+                "effective_position_size_pct_before_inventory_pressure": 0.5,
+                "effective_max_inventory_usd": 1000.0,
+            }],
+        }
+
+        result = backtest.simulate_approved_order_lifecycle(
+            replay,
+            snapshots,
+        )
+
+        self.assertEqual(result["orders_placed"], 1)
+        self.assertEqual(result["near_touch_orders_placed"], 1)
+        self.assertEqual(result["filled_entries"], 1)
+        self.assertEqual(result["unfilled_entries"], 0)
+
     def test_order_lifecycle_paces_floor_assisted_orders(self):
         strategy = {
             "backtest_starting_cash_usd": 200.0,
@@ -2706,6 +2761,44 @@ class RangeGridBacktestTests(unittest.TestCase):
             candidate["source_entry_policy"]["reason"],
             "resting_grid_hard_safety_only",
         )
+
+    def test_evaluate_candidate_sets_near_touch_order_price_for_top_rung(self):
+        snapshot = make_snapshot(
+            "2026-06-12T12:00:00+00:00",
+            100.3,
+            action_recommendation="blocked",
+            strategy_modes=["low"],
+            strategy_overrides={
+                "entry_placement_mode_by_source": {
+                    "range_low": "resting_grid",
+                },
+                "resting_grid_max_above_level_pct_by_source": {
+                    "range_low": 0.0035,
+                },
+                "resting_grid_near_touch_offset_pct_by_source": {
+                    "range_low": 0.0005,
+                },
+            },
+        )
+        candidate = {
+            "level": 100.0,
+            "grid_slot_depth": 1,
+            "buy_source": "range_low",
+            "strategy_mode": "low",
+        }
+
+        approved, reason = backtest.evaluate_candidate(
+            snapshot,
+            candidate,
+            100.3,
+        )
+
+        self.assertTrue(approved)
+        self.assertIsNone(reason)
+        self.assertEqual(candidate["entry_anchor_level"], 100.0)
+        self.assertAlmostEqual(candidate["entry_order_price"], 100.24985)
+        self.assertTrue(candidate["near_touch_applied"])
+        self.assertTrue(candidate["entry_post_only"])
 
     def test_evaluate_candidate_rejects_resting_order_outside_zone(self):
         snapshot = make_snapshot(

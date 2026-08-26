@@ -147,6 +147,86 @@ def resting_grid_max_above_level_pct(
     return 0.0
 
 
+def resting_grid_near_touch_offset_pct(
+    config,
+    buy_source,
+    fallback_config=None,
+):
+    """Return the configured top-rung discount from the current price.
+
+    A missing value keeps the legacy behavior where the range anchor is also
+    the submitted limit price.  Near-touch pricing is deliberately opt-in per
+    source so existing strategies and live orders do not change implicitly.
+    """
+
+    for candidate_config in (config, fallback_config):
+        raw_value = _source_map_value(
+            candidate_config,
+            "resting_grid_near_touch_offset_pct_by_source",
+            buy_source,
+        )
+        numeric = _safe_float(raw_value)
+        if numeric is not None:
+            return max(0.0, numeric)
+    return 0.0
+
+
+def entry_order_price_decision(
+    price,
+    level,
+    config,
+    buy_source,
+    *,
+    grid_depth=1,
+    fallback_config=None,
+):
+    """Choose the submitted buy price after an anchor passes eligibility.
+
+    The range level remains the safety/slot anchor.  When a resting-grid
+    source opts in, only its first rung is moved near the current price.  The
+    deeper rungs remain at their anchor prices, preserving the actual grid.
+    Live callers submit an applied near-touch price as post-only.
+    """
+
+    source = str(buy_source or "").strip().lower()
+    mode = entry_placement_mode(config, source, fallback_config)
+    numeric_price = _safe_float(price)
+    numeric_level = _safe_float(level)
+    try:
+        depth = max(1, int(grid_depth))
+    except (TypeError, ValueError):
+        depth = 1
+    offset_pct = resting_grid_near_touch_offset_pct(
+        config,
+        source,
+        fallback_config,
+    )
+    applied = (
+        mode == "resting_grid"
+        and source in RESTING_GRID_BUY_SOURCES
+        and depth == 1
+        and 0.0 < offset_pct < 1.0
+        and numeric_price is not None
+        and numeric_price > 0
+        and numeric_level is not None
+        and numeric_level > 0
+    )
+    order_price = (
+        numeric_price * (1.0 - offset_pct)
+        if applied
+        else numeric_level
+    )
+    return {
+        "anchor_level": numeric_level,
+        "order_price": order_price,
+        "near_touch_enabled": offset_pct > 0.0,
+        "near_touch_applied": applied,
+        "near_touch_offset_pct": offset_pct,
+        "post_only": applied,
+        "grid_depth": depth,
+    }
+
+
 def entry_price_placement_decision(
     price,
     level,

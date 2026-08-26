@@ -110,6 +110,26 @@ class RangeGridBotLoggingTests(unittest.TestCase):
 
         self.assertEqual(violations, [])
 
+    def test_near_touch_buy_submission_supports_post_only_flag(self):
+        tree = self._bot_tree()
+        place_buy = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "place_buy"
+        )
+        argument_names = [argument.arg for argument in place_buy.args.args]
+        string_values = {
+            node.value
+            for node in ast.walk(place_buy)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+        }
+
+        self.assertIn("post_only", argument_names)
+        self.assertIn("oflags", string_values)
+        self.assertIn("post", string_values)
+
     def test_live_flow_control_receives_effective_route_config(self):
         tree = self._bot_tree()
         calls = [

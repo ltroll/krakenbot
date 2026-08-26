@@ -5,6 +5,7 @@ import unittest
 from range_grid_entry_placement import (
     entry_grid_levels,
     entry_grid_slot,
+    entry_order_price_decision,
     entry_placement_mode,
     entry_price_placement_decision,
 )
@@ -147,6 +148,59 @@ class RangeGridEntryPlacementTests(unittest.TestCase):
             "resting_grid_price_too_far_above_level",
         )
 
+    def test_near_touch_moves_only_first_resting_grid_rung(self):
+        self.config["resting_grid_near_touch_offset_pct_by_source"] = {
+            "range_low": 0.0005,
+        }
+
+        first = entry_order_price_decision(
+            100.3,
+            100.0,
+            self.config,
+            "range_low",
+            grid_depth=1,
+        )
+        second = entry_order_price_decision(
+            100.3,
+            99.72,
+            self.config,
+            "range_low",
+            grid_depth=2,
+        )
+
+        self.assertTrue(first["near_touch_applied"])
+        self.assertTrue(first["post_only"])
+        self.assertAlmostEqual(first["anchor_level"], 100.0)
+        self.assertAlmostEqual(first["order_price"], 100.24985)
+        self.assertFalse(second["near_touch_applied"])
+        self.assertFalse(second["post_only"])
+        self.assertAlmostEqual(second["order_price"], 99.72)
+
+    def test_near_touch_is_opt_in_and_resting_grid_only(self):
+        legacy = entry_order_price_decision(
+            100.3,
+            100.0,
+            self.config,
+            "range_low",
+        )
+        triggered_config = {
+            "entry_placement_mode_by_source": {"range_low": "triggered"},
+            "resting_grid_near_touch_offset_pct_by_source": {
+                "range_low": 0.0005,
+            },
+        }
+        triggered = entry_order_price_decision(
+            100.3,
+            100.0,
+            triggered_config,
+            "range_low",
+        )
+
+        self.assertFalse(legacy["near_touch_applied"])
+        self.assertEqual(legacy["order_price"], 100.0)
+        self.assertFalse(triggered["near_touch_applied"])
+        self.assertEqual(triggered["order_price"], 100.0)
+
     def test_triggered_mode_remains_default_and_high_stays_strict(self):
         self.assertEqual(entry_placement_mode({}, "range_low"), "triggered")
         decision = entry_price_placement_decision(
@@ -244,6 +298,30 @@ class RangeGridEntryPlacementTests(unittest.TestCase):
 
         self.assertTrue(any("range_low must be > 0" in error for error in errors))
         self.assertTrue(any("range_high_band cannot use" in error for error in errors))
+
+    def test_guardrails_validate_near_touch_offsets_and_mode(self):
+        invalid = validate_strategy_config({
+            "entry_placement_mode_by_source": {
+                "range_low": "triggered",
+                "range_median": "resting_grid",
+            },
+            "resting_grid_max_above_level_pct_by_source": {
+                "range_median": 0.0055,
+            },
+            "resting_grid_near_touch_offset_pct_by_source": {
+                "range_low": 0.0005,
+                "range_median": 1.0,
+            },
+        })
+
+        self.assertTrue(any(
+            "range_low requires resting_grid" in error
+            for error in invalid
+        ))
+        self.assertTrue(any(
+            "range_median must be > 0 and < 1" in error
+            for error in invalid
+        ))
 
 
 if __name__ == "__main__":

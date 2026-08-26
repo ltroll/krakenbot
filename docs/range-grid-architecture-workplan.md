@@ -217,6 +217,23 @@ same payload that produced the ranked result.
   cannot change the isolated strategy that was tested. Existing orders remain
   untouched and retain their locked sell prices.
 
+### 2026-08-26 — Near-touch top-rung backtest candidates
+
+- Separated low/median anchor eligibility from the submitted entry price for
+  opt-in near-touch strategies. The historical anchor still decides whether a
+  candidate is safe and owns the grid slot.
+- Only depth 1 moves near the current price; all lower rungs retain their
+  calculated grid levels. Near-touch live submissions are post-only so they
+  cannot intentionally cross the spread as taker buys.
+- Added paper/backtest candidates at 0.05% and 0.10% below the captured price.
+  The existing production profile is unchanged and does not opt in.
+- Replay now models the submitted near-touch price for fills, profit targets,
+  potential outcomes, capital use, and drawdown instead of crediting the
+  strategy with the lower historical anchor.
+- Existing exchange orders are not canceled, amended, or migrated.
+- `python -m unittest discover -s tests`: 310 tests passed.
+- JSON validation and `git diff --check` passed.
+
 ### 2026-08-25 — Price-band slots and active hybrid correction
 
 - Replaced resting source-and-depth slot identities with logarithmic price

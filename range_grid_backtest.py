@@ -19,6 +19,7 @@ from range_grid_effective_strategy import resolve_effective_strategy
 from range_grid_entry_placement import (
     entry_grid_levels,
     entry_grid_slot,
+    entry_order_price_decision,
     entry_placement_mode,
     entry_price_placement_decision,
 )
@@ -2797,7 +2798,11 @@ def snapshot_with_range_values(snapshot, range_values):
 
 def simulate_missed_opportunity(snapshot, event, snapshots, snapshot_price_index=None):
     entry_time = parse_iso8601(event.get("captured_at"))
-    entry_price = safe_float(event.get("level")) or safe_float(event.get("price"))
+    entry_price = (
+        safe_float(event.get("entry_order_price"))
+        or safe_float(event.get("level"))
+        or safe_float(event.get("price"))
+    )
     if entry_time is None or entry_price is None or entry_price <= 0:
         return None
 
@@ -3087,7 +3092,10 @@ def simulate_approved_order_lifecycle(replay, snapshots):
             counts["approved_candidates"] += 1
             buy_source = str(event.get("buy_source") or "unknown")
             source_stats[buy_source]["approved_candidates"] += 1
-            entry_price = safe_float(event.get("level"))
+            entry_price = (
+                safe_float(event.get("entry_order_price"))
+                or safe_float(event.get("level"))
+            )
             if entry_price is None or entry_price <= 0:
                 counts["invalid_entry"] += 1
                 source_stats[buy_source]["invalid_entry"] += 1
@@ -3322,6 +3330,17 @@ def simulate_approved_order_lifecycle(replay, snapshots):
                 "entry_placement_mode": placement_mode,
                 "grid_slot": grid_slot,
                 "entry_price": entry_price,
+                "entry_anchor_level": (
+                    safe_float(event.get("entry_anchor_level"))
+                    or safe_float(event.get("level"))
+                ),
+                "near_touch_applied": bool(
+                    event.get("near_touch_applied")
+                ),
+                "near_touch_offset_pct": safe_float(
+                    event.get("near_touch_offset_pct")
+                ),
+                "entry_post_only": bool(event.get("entry_post_only")),
                 "entry_notional_usd": entry_notional,
                 "volume": volume,
                 "minimum_order_floor_applied": minimum_floor["applied"],
@@ -3343,6 +3362,9 @@ def simulate_approved_order_lifecycle(replay, snapshots):
             counts["orders_placed"] += 1
             source_stats[buy_source]["orders_placed"] += 1
             source_stats[buy_source]["placed_notional_usd"] += entry_notional
+            if order["near_touch_applied"]:
+                counts["near_touch_orders_placed"] += 1
+                source_stats[buy_source]["near_touch_orders_placed"] += 1
             if minimum_floor["applied"]:
                 counts["minimum_order_floor_applied"] += 1
                 source_stats[buy_source]["minimum_order_floor_applied"] += 1
@@ -3423,6 +3445,7 @@ def simulate_approved_order_lifecycle(replay, snapshots):
         "ending_equity_usd": round(ending_equity_usd, 8),
         "approved_candidates": counts["approved_candidates"],
         "orders_placed": counts["orders_placed"],
+        "near_touch_orders_placed": counts["near_touch_orders_placed"],
         "filled_entries": counts["filled_entries"],
         "unfilled_entries": len(pending_orders),
         "closed_positions": counts["closed_positions"],
@@ -4152,6 +4175,12 @@ def build_strategy_comparison_rows(
                 ) or {},
                 sort_keys=True,
             ),
+            "resting_grid_near_touch_offset_pct_by_source": json.dumps(
+                strategy_payload.get(
+                    "resting_grid_near_touch_offset_pct_by_source"
+                ) or {},
+                sort_keys=True,
+            ),
             "fear_greed_profit_target_enabled": strategy_payload.get(
                 "fear_greed_profit_target_enabled",
                 False,
@@ -4283,6 +4312,9 @@ def build_strategy_comparison_rows(
             ),
             "simulation_starting_cash_usd": simulation.get("starting_cash_usd"),
             "simulation_orders_placed": simulation.get("orders_placed"),
+            "simulation_near_touch_orders_placed": simulation.get(
+                "near_touch_orders_placed"
+            ),
             "simulation_filled_entries": simulation.get("filled_entries"),
             "simulation_unfilled_entries": simulation.get("unfilled_entries"),
             "simulation_closed_positions": simulation.get("closed_positions"),
@@ -4957,6 +4989,7 @@ def write_strategy_comparison_csv(comparison, output_path):
         "dynamic_anchor_mode",
         "entry_placement_mode_by_source",
         "resting_grid_max_above_level_pct_by_source",
+        "resting_grid_near_touch_offset_pct_by_source",
         "fear_greed_profit_target_enabled",
         "fear_greed_profit_target_sources",
         "fear_greed_profit_target_greed_start_index",
@@ -5006,6 +5039,7 @@ def write_strategy_comparison_csv(comparison, output_path):
         "potential_risk_sized_avg_max_drawdown_pct",
         "simulation_starting_cash_usd",
         "simulation_orders_placed",
+        "simulation_near_touch_orders_placed",
         "simulation_filled_entries",
         "simulation_unfilled_entries",
         "simulation_closed_positions",
@@ -5128,6 +5162,7 @@ def write_ranked_strategy_csv(comparison, output_path):
         "dynamic_anchor_mode",
         "entry_placement_mode_by_source",
         "resting_grid_max_above_level_pct_by_source",
+        "resting_grid_near_touch_offset_pct_by_source",
         "fear_greed_profit_target_enabled",
         "fear_greed_profit_target_sources",
         "fear_greed_profit_target_greed_start_index",
@@ -5154,6 +5189,7 @@ def write_ranked_strategy_csv(comparison, output_path):
         "potential_risk_sized_avg_max_runup_pct",
         "potential_risk_sized_avg_max_drawdown_pct",
         "simulation_orders_placed",
+        "simulation_near_touch_orders_placed",
         "simulation_filled_entries",
         "simulation_unfilled_entries",
         "simulation_closed_positions",
@@ -6410,6 +6446,25 @@ def evaluate_candidate(snapshot, candidate, price):
             return False, "open_buy_order"
         if key in open_sell_levels:
             return False, "open_sell_order"
+    order_price_decision = entry_order_price_decision(
+        price,
+        level,
+        config,
+        buy_source,
+        grid_depth=candidate.get("grid_slot_depth", 1),
+    )
+    candidate["entry_anchor_level"] = order_price_decision["anchor_level"]
+    candidate["entry_order_price"] = order_price_decision["order_price"]
+    candidate["near_touch_enabled"] = order_price_decision[
+        "near_touch_enabled"
+    ]
+    candidate["near_touch_applied"] = order_price_decision[
+        "near_touch_applied"
+    ]
+    candidate["near_touch_offset_pct"] = order_price_decision[
+        "near_touch_offset_pct"
+    ]
+    candidate["entry_post_only"] = order_price_decision["post_only"]
     weather_report_with_context = {
         **weather_report,
         "_risk_context": risk_context,
@@ -6893,6 +6948,27 @@ def replay_from_snapshots(snapshots):
                     "entry_placement_above_level_pct": candidate.get(
                         "entry_placement_above_level_pct"
                     ),
+                    "entry_anchor_level": candidate.get(
+                        "entry_anchor_level"
+                    ),
+                    "entry_order_price": candidate.get(
+                        "entry_order_price"
+                    ),
+                    "near_touch_enabled": candidate.get(
+                        "near_touch_enabled",
+                        False,
+                    ),
+                    "near_touch_applied": candidate.get(
+                        "near_touch_applied",
+                        False,
+                    ),
+                    "near_touch_offset_pct": candidate.get(
+                        "near_touch_offset_pct"
+                    ),
+                    "entry_post_only": candidate.get(
+                        "entry_post_only",
+                        False,
+                    ),
                     "effective_strategy_fingerprint": (
                         source_effective_strategy["effective_fingerprint"]
                     ),
@@ -7064,6 +7140,27 @@ def replay_from_snapshots(snapshots):
                     ),
                     "entry_placement_above_level_pct": candidate.get(
                         "entry_placement_above_level_pct"
+                    ),
+                    "entry_anchor_level": candidate.get(
+                        "entry_anchor_level"
+                    ),
+                    "entry_order_price": candidate.get(
+                        "entry_order_price"
+                    ),
+                    "near_touch_enabled": candidate.get(
+                        "near_touch_enabled",
+                        False,
+                    ),
+                    "near_touch_applied": candidate.get(
+                        "near_touch_applied",
+                        False,
+                    ),
+                    "near_touch_offset_pct": candidate.get(
+                        "near_touch_offset_pct"
+                    ),
+                    "entry_post_only": candidate.get(
+                        "entry_post_only",
+                        False,
                     ),
                     "level": round(candidate["level"], 2),
                     "status": "blocked_gate_only",
@@ -7293,6 +7390,15 @@ def summarize_actual_trades(events):
                 "buy_source": event.get("buy_source"),
                 "trade_id": trade_id,
                 "price": event.get("price"),
+                "entry_anchor_level": event.get("entry_anchor_level"),
+                "near_touch_applied": event.get(
+                    "near_touch_applied",
+                    False,
+                ),
+                "near_touch_offset_pct": event.get(
+                    "near_touch_offset_pct"
+                ),
+                "entry_post_only": event.get("entry_post_only", False),
                 "volume": event.get("volume"),
                 "trade_notional_usd": event.get("trade_notional_usd"),
                 "weather_opportunity_phase": event.get(

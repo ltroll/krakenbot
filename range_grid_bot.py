@@ -39,6 +39,7 @@ from range_grid_effective_strategy import resolve_effective_strategy
 from range_grid_entry_placement import (
     entry_grid_levels,
     entry_grid_slot,
+    entry_order_price_decision,
     entry_placement_mode,
     entry_price_placement_decision,
 )
@@ -4218,7 +4219,7 @@ def buy_above_last_sell_guard_active(last_sell_at, now, guard_minutes):
 # ORDER HELPERS
 # ----------------------
 
-def place_buy(price, volume, client_order_id=None):
+def place_buy(price, volume, client_order_id=None, post_only=False):
     payload = {
         "pair": KRAKEN_PAIR,
         "type": "buy",
@@ -4230,6 +4231,8 @@ def place_buy(price, volume, client_order_id=None):
         payload["cl_ord_id"] = client_order_id
     else:
         payload["userref"] = str(BOT_ORDER_USERREF)
+    if post_only:
+        payload["oflags"] = "post"
     return safe_kraken_private("BUY", "/0/private/AddOrder", payload)
 
 
@@ -5697,6 +5700,7 @@ def submit_limit_order(
     state_key=None,
     order_state=None,
     state_transition=None,
+    post_only=False,
 ):
     pending_intents = state.setdefault("pending_order_intents", {})
     for existing_client_id, intent in list(pending_intents.items()):
@@ -5759,13 +5763,10 @@ def submit_limit_order(
     save_state(state)
 
     place_fn = place_buy if side == "buy" else place_sell
-    response = kraken_call(
-        side.upper(),
-        place_fn,
-        price,
-        volume,
-        client_order_id,
-    )
+    place_args = [price, volume, client_order_id]
+    if side == "buy":
+        place_args.append(post_only)
+    response = kraken_call(side.upper(), place_fn, *place_args)
     if response and not response.get("error"):
         return response, False
 
@@ -8900,7 +8901,28 @@ def main():
                             momentum_entry_tolerance_pct
                         ),
                     )
-                    momentum_entry_max_price = level * (
+                    entry_anchor_level = level
+                    entry_order_placement = entry_order_price_decision(
+                        price,
+                        entry_anchor_level,
+                        route_config,
+                        buy_source,
+                        grid_depth=candidate.get("grid_slot_depth", 1),
+                        fallback_config=strategy_config,
+                    )
+                    if (
+                        entry_placement["allowed"]
+                        and entry_order_placement["near_touch_applied"]
+                    ):
+                        level = entry_order_placement["order_price"]
+                    elif not entry_placement["allowed"]:
+                        entry_order_placement = {
+                            **entry_order_placement,
+                            "order_price": entry_anchor_level,
+                            "near_touch_applied": False,
+                            "post_only": False,
+                        }
+                    momentum_entry_max_price = entry_anchor_level * (
                         1 + entry_placement["max_above_level_pct"]
                     )
                     bucket_inventory_usd = bucket_inventory_usd_map.get(
@@ -8999,6 +9021,24 @@ def main():
                         "entry_placement_above_level_pct": (
                             entry_placement["above_level_pct"]
                         ),
+                        "entry_anchor_level": round(
+                            entry_anchor_level,
+                            PRICE_DECIMALS,
+                        ),
+                        "entry_order_price": round(
+                            level,
+                            PRICE_DECIMALS,
+                        ),
+                        "near_touch_enabled": entry_order_placement[
+                            "near_touch_enabled"
+                        ],
+                        "near_touch_applied": entry_order_placement[
+                            "near_touch_applied"
+                        ],
+                        "near_touch_offset_pct": entry_order_placement[
+                            "near_touch_offset_pct"
+                        ],
+                        "entry_post_only": entry_order_placement["post_only"],
                     }
                     effective_strategy_log_fields = {
                         "effective_strategy_fingerprint": (
@@ -10308,6 +10348,17 @@ def main():
                     buy_order_state = {
                         "volume": volume,
                         "price": level,
+                        "entry_anchor_level": entry_anchor_level,
+                        "near_touch_enabled": entry_order_placement[
+                            "near_touch_enabled"
+                        ],
+                        "near_touch_applied": entry_order_placement[
+                            "near_touch_applied"
+                        ],
+                        "near_touch_offset_pct": entry_order_placement[
+                            "near_touch_offset_pct"
+                        ],
+                        "entry_post_only": entry_order_placement["post_only"],
                         "grid_slot": grid_slot,
                         "entry_placement_mode": (
                             candidate_entry_placement_mode
@@ -10368,6 +10419,7 @@ def main():
                         buy_client_order_id,
                         state_key=key,
                         order_state=buy_order_state,
+                        post_only=entry_order_placement["post_only"],
                     )
 
                     if not buy_resp or buy_resp.get("error"):

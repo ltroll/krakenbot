@@ -352,6 +352,10 @@ def validate_strategy_config(strategy_config):
             "non_negative",
             None,
         ),
+        "resting_grid_near_touch_offset_pct_by_source": (
+            "fraction",
+            None,
+        ),
         "aging_start_minutes_by_source": ("positive", None),
         "aging_step_minutes_by_source": ("positive", None),
         "aging_profit_reduction_pct_by_source": ("non_negative", None),
@@ -385,6 +389,8 @@ def validate_strategy_config(strategy_config):
                 errors.append(f"{field}.{source} must be > 0")
             elif kind == "non_negative" and numeric < 0:
                 errors.append(f"{field}.{source} must be >= 0")
+            elif kind == "fraction" and not 0 < numeric < 1:
+                errors.append(f"{field}.{source} must be > 0 and < 1")
             elif kind == "at_least_one" and numeric < 1:
                 errors.append(f"{field}.{source} must be >= 1")
 
@@ -438,6 +444,28 @@ def validate_strategy_config(strategy_config):
                             "resting_grid_max_above_level_pct_by_source."
                             f"{source} must be > 0 when resting_grid is enabled"
                         )
+
+    near_touch_offsets = strategy_config.get(
+        "resting_grid_near_touch_offset_pct_by_source"
+    )
+    if isinstance(near_touch_offsets, dict):
+        normalized_modes = {
+            str(source or "").strip().lower(): str(mode or "").strip().lower()
+            for source, mode in (
+                placement_modes.items()
+                if isinstance(placement_modes, dict)
+                else []
+            )
+        }
+        for source in near_touch_offsets:
+            normalized_source = str(source or "").strip().lower()
+            if normalized_source not in VALID_BUY_SOURCES:
+                continue
+            if normalized_modes.get(normalized_source) != "resting_grid":
+                errors.append(
+                    "resting_grid_near_touch_offset_pct_by_source."
+                    f"{source} requires resting_grid entry placement"
+                )
 
     entry_policies = strategy_config.get("entry_policy_by_source")
     if entry_policies is not None:

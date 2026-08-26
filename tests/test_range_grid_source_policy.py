@@ -37,6 +37,37 @@ def weather_report(*, phase="range_chop_accumulation", falling_tape=False):
 
 
 class RangeGridSourcePolicyTests(unittest.TestCase):
+    def test_near_touch_candidates_match_production_except_opt_in_pricing(self):
+        production_path = os.path.join(
+            ROOT,
+            "range_grid_strategy_production_active_low_median_fear_greed.json",
+        )
+        with open(production_path, encoding="utf-8") as handle:
+            production = json.load(handle)
+
+        for suffix, offset in (("005", 0.0005), ("010", 0.001)):
+            candidate_path = os.path.join(
+                ROOT,
+                f"range_grid_strategy_recovery_near_touch_{suffix}_low_median.json",
+            )
+            with open(candidate_path, encoding="utf-8") as handle:
+                candidate = json.load(handle)
+
+            self.assertEqual(validate_strategy_config(candidate), [])
+            self.assertTrue(candidate["paper_trading_enabled"])
+            self.assertEqual(
+                candidate[
+                    "resting_grid_near_touch_offset_pct_by_source"
+                ],
+                {"range_low": offset, "range_median": offset},
+            )
+            comparison = dict(candidate)
+            comparison["paper_trading_enabled"] = False
+            comparison.pop(
+                "resting_grid_near_touch_offset_pct_by_source"
+            )
+            self.assertEqual(comparison, production)
+
     def test_ranked_profiles_use_observed_kraken_fee_schedule(self):
         strategy_set_path = os.path.join(
             ROOT,
