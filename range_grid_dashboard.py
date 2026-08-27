@@ -338,11 +338,19 @@ def compute_recent_metrics(trade_records, now=None):
     return summary, recent[-RECENT_EVENT_LIMIT:]
 
 
-def compute_open_sell_pnl(state, current_price=None, now=None):
+def compute_open_sell_pnl(
+    state,
+    current_price=None,
+    now=None,
+    round_trip_fee_pct=None,
+):
     now = now or utc_now()
+    fee_pct = safe_float(round_trip_fee_pct, DASHBOARD_ROUND_TRIP_FEE_PCT)
+    fee_pct = max(0.0, fee_pct or 0.0)
     open_sells = (state or {}).get("open_sell_orders") or {}
     summary = {
         "open_sell_count": len(open_sells),
+        "round_trip_fee_pct": fee_pct,
         "open_sell_volume": 0.0,
         "open_sell_buy_notional_usd": 0.0,
         "open_sell_target_notional_usd": 0.0,
@@ -370,7 +378,7 @@ def compute_open_sell_pnl(state, current_price=None, now=None):
         buy_notional = volume * buy_price
         target_notional = volume * sell_price
         target_gross = target_notional - buy_notional
-        estimated_fee = buy_notional * DASHBOARD_ROUND_TRIP_FEE_PCT
+        estimated_fee = buy_notional * fee_pct
 
         summary["open_sell_volume"] += volume
         summary["open_sell_buy_notional_usd"] += buy_notional
@@ -574,6 +582,82 @@ def render_grid_levels_table(levels):
     return "\n".join(rows)
 
 
+def compact_strategy_label(value):
+    if not value:
+        return "--"
+    return Path(str(value)).name.removesuffix(".json")
+
+
+def compact_grid_levels(status):
+    status = status or {}
+    levels = status.get("grid_levels") or []
+    chips = []
+    for level in levels[:6]:
+        numeric = safe_float(level)
+        if numeric is not None:
+            chips.append(f'<span class="chip">${html.escape(fmt_number(numeric, 2))}</span>')
+    if not chips:
+        chips.append('<span class="chip muted-chip">No actionable levels</span>')
+    return "".join(chips)
+
+
+def compact_order_rows(state, side, now=None, limit=5):
+    now = now or utc_now()
+    key = "open_buy_orders" if side == "buy" else "open_sell_orders"
+    raw_orders = (state or {}).get(key) or {}
+    if isinstance(raw_orders, dict):
+        orders = list(raw_orders.values())
+    elif isinstance(raw_orders, list):
+        orders = raw_orders
+    else:
+        orders = []
+
+    def order_price(order):
+        if side == "buy":
+            return safe_float(order.get("price"), safe_float(order.get("level"), 0.0)) or 0.0
+        return safe_float(order.get("sell_price"), 0.0) or 0.0
+
+    orders.sort(key=order_price, reverse=(side == "buy"))
+    rows = []
+    for order in orders[:limit]:
+        price = order_price(order)
+        volume = safe_float(order.get("volume"), 0.0) or 0.0
+        notional = price * volume
+        source = str(order.get("buy_source") or "unknown").replace("range_", "")
+        age = human_age(order.get("placed_at"), now)
+        detail = ""
+        if side == "sell":
+            buy_price = safe_float(
+                order.get("buy_price"),
+                safe_float(order.get("level"), 0.0),
+            ) or 0.0
+            target_gross = volume * max(0.0, price - buy_price)
+            detail = f"+${fmt_number(target_gross, 2)} gross"
+        else:
+            anchor = safe_float(order.get("entry_anchor_level"))
+            if anchor is not None and abs(anchor - price) > 0.005:
+                detail = f"anchor ${fmt_number(anchor, 2)}"
+            elif order.get("near_touch_applied"):
+                detail = "near-touch"
+            else:
+                detail = order.get("entry_placement_mode") or "resting"
+        rows.append(
+            "<tr>"
+            f"<td><strong>{html.escape(source)}</strong><span>{html.escape(str(detail))}</span></td>"
+            f"<td>${html.escape(fmt_number(price, 2))}</td>"
+            f"<td>${html.escape(fmt_number(notional, 2))}</td>"
+            f"<td>{html.escape(age)}</td>"
+            "</tr>"
+        )
+    if not rows:
+        return f'<tr><td colspan="4">No open {html.escape(side)} orders</td></tr>'
+    if len(orders) > limit:
+        rows.append(
+            f'<tr class="more-row"><td colspan="4">+{len(orders) - limit} more {html.escape(side)} orders</td></tr>'
+        )
+    return "".join(rows)
+
+
 def pnl_tone(value):
     if value is None:
         return "neutral"
@@ -649,17 +733,32 @@ def pnl_metric_rows(recent_summary, open_pnl, state):
         ),
         (
             "Dashboard Fee Assumption",
-            fmt_pct(DASHBOARD_ROUND_TRIP_FEE_PCT * 100, 4),
+            fmt_pct(
+                safe_float(
+                    open_pnl.get("round_trip_fee_pct"),
+                    DASHBOARD_ROUND_TRIP_FEE_PCT,
+                ) * 100,
+                4,
+            ),
         ),
     ])
 
 
 def render_dashboard(status, state, recent_summary, recent_events, alert_summary, open_pnl, now=None):
     now = now or utc_now()
+    status = status or {}
     health_state, health_message = classify_health(status, alert_summary["recent"], now)
-    inventory_buckets = (status or {}).get("inventory_buckets_usd") or {}
-    grid_levels = (status or {}).get("grid_levels") or []
-    status_timestamp = (status or {}).get("timestamp")
+    latest_activity = recent_summary.get("latest_activity_summary") or {}
+
+    def current_value(key, default=None):
+        value = status.get(key)
+        if value is None:
+            value = latest_activity.get(key)
+        return default if value is None else value
+
+    inventory_buckets = status.get("inventory_buckets_usd") or {}
+    grid_levels = status.get("grid_levels") or []
+    status_timestamp = status.get("timestamp")
     last_alert_ts = alert_summary["recent"][-1]["ts"] if alert_summary["recent"] else None
     top_actions = ", ".join(
         f"{name} ({count})"
@@ -668,26 +767,26 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
 
     cards = "\n".join([
         stat_card("Health", health_state.upper(), tone=health_state, subtext=health_message),
-        stat_card("Mode", (status or {}).get("operating_mode", "--")),
-        stat_card("Price", f"${fmt_number((status or {}).get('price'), 2)}"),
+        stat_card("Mode", status.get("operating_mode", "--")),
+        stat_card("Price", f"${fmt_number(status.get('price'), 2)}"),
         stat_card(
             "Weather",
-            (status or {}).get("weather_condition") or "--",
-            subtext=(status or {}).get("weather_alert_level") or None,
+            status.get("weather_condition") or "--",
+            subtext=status.get("weather_alert_level") or None,
         ),
         stat_card(
             "Leveling",
-            (status or {}).get("weather_leveling_state") or "--",
-            subtext=fmt_number((status or {}).get("weather_leveling_score"), 4),
+            status.get("weather_leveling_state") or "--",
+            subtext=fmt_number(status.get("weather_leveling_score"), 4),
         ),
-        stat_card("Signal", fmt_number((status or {}).get("execution_signal"), 4)),
-        stat_card("Action", (status or {}).get("action_recommendation", "--")),
-        stat_card("Runtime Block", (status or {}).get("runtime_block_reason", "none")),
-        stat_card("Open Buys", fmt_int((status or {}).get("open_buy_count"))),
-        stat_card("Open Sells", fmt_int((status or {}).get("open_sell_count"))),
+        stat_card("Signal", fmt_number(status.get("execution_signal"), 4)),
+        stat_card("Action", status.get("action_recommendation", "--")),
+        stat_card("Runtime Block", status.get("runtime_block_reason", "none")),
+        stat_card("Open Buys", fmt_int(status.get("open_buy_count"))),
+        stat_card("Open Sells", fmt_int(status.get("open_sell_count"))),
         stat_card(
             "Inventory",
-            f"${fmt_number((status or {}).get('deployed_inventory_usd'), 2)}",
+            f"${fmt_number(status.get('deployed_inventory_usd'), 2)}",
         ),
         stat_card(
             f"{int(LOOKBACK_HOURS)}h Net PnL",
@@ -714,15 +813,15 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
     weather_rows = weather_metric_rows(status)
     runtime_rows = key_value_rows([
         ("Timestamp", status_timestamp or "--"),
-        ("Strategy File", (status or {}).get("strategy_profile", "--")),
-        ("Strategy Modes", ", ".join((status or {}).get("strategy_modes") or []) or "--"),
-        ("Configured Modes", ", ".join((status or {}).get("configured_strategy_modes") or []) or "--"),
-        ("Grid Anchor", (status or {}).get("grid_anchor", "--")),
-        ("Signal Status", (status or {}).get("signal_status", "--")),
-        ("Range Fallback Active", (status or {}).get("range_fallback_active", False)),
-        ("Realized PnL Today", f"${fmt_number((status or {}).get('realized_pnl_today'), 4)}"),
-        ("Sell Backlog Count", fmt_int((status or {}).get("sell_backlog_count"))),
-        ("Oldest Sell Age", f"{fmt_number((status or {}).get('sell_backlog_oldest_minutes'), 2)}m"),
+        ("Strategy File", status.get("strategy_profile", "--")),
+        ("Strategy Modes", ", ".join(status.get("strategy_modes") or []) or "--"),
+        ("Configured Modes", ", ".join(status.get("configured_strategy_modes") or []) or "--"),
+        ("Grid Anchor", status.get("grid_anchor", "--")),
+        ("Signal Status", status.get("signal_status", "--")),
+        ("Range Fallback Active", status.get("range_fallback_active", False)),
+        ("Realized PnL Today", f"${fmt_number(status.get('realized_pnl_today'), 4)}"),
+        ("Sell Backlog Count", fmt_int(status.get("sell_backlog_count"))),
+        ("Oldest Sell Age", f"{fmt_number(status.get('sell_backlog_oldest_minutes'), 2)}m"),
         ("Last Alert Age", human_age(last_alert_ts, now)),
     ])
     pnl_rows = pnl_metric_rows(recent_summary, open_pnl, state)
@@ -767,6 +866,24 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
     ) or '<tr><td colspan="3">No recent events</td></tr>'
 
     state_summary = ((state or {}).get("stats") or {})
+    strategy_label = compact_strategy_label(current_value("strategy_profile"))
+    active_modes = ", ".join(current_value("strategy_modes", []) or []) or "--"
+    run_mode = "PAPER" if current_value("paper_trading_enabled", False) else "LIVE"
+    runtime_block = current_value("runtime_block_reason")
+    process_state = runtime_block or current_value("action_recommendation", "evaluating")
+    open_buy_count = len(((state or {}).get("open_buy_orders") or {}))
+    open_sell_count = len(((state or {}).get("open_sell_orders") or {}))
+    if not open_buy_count:
+        open_buy_count = int(safe_float(current_value("open_buy_count"), 0) or 0)
+    if not open_sell_count:
+        open_sell_count = int(safe_float(current_value("open_sell_count"), 0) or 0)
+    buy_order_rows = compact_order_rows(state, "buy", now)
+    sell_order_rows = compact_order_rows(state, "sell", now)
+    grid_chips = compact_grid_levels(status)
+    lifetime_net = state_summary.get("realized_estimated_net_pnl")
+    realized_today = current_value("realized_pnl_today")
+    open_target_net = open_pnl.get("open_sell_target_estimated_net_pnl")
+    open_mark_net = open_pnl.get("open_sell_current_estimated_net_pnl")
 
     return f"""<!doctype html>
 <html lang="en">
@@ -800,25 +917,137 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
         linear-gradient(160deg, #efe6d2 0%, #f8f5ef 55%, #e4ece9 100%);
     }}
     .wrap {{
-      max-width: 1280px;
+      max-width: 1480px;
       margin: 0 auto;
-      padding: 28px 20px 44px;
+      padding: 14px 18px 32px;
     }}
-    .hero {{
-      display: grid;
-      gap: 12px;
-      margin-bottom: 24px;
+    .topbar {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 12px;
     }}
     h1 {{
       margin: 0;
-      font-size: clamp(2rem, 4vw, 3.4rem);
-      letter-spacing: -0.04em;
-      line-height: 0.92;
+      font-size: clamp(1.45rem, 2.4vw, 2.2rem);
+      letter-spacing: -0.03em;
+      line-height: 1;
     }}
-    .lede {{
+    .freshness {{
       color: var(--muted);
-      font-size: 1rem;
-      max-width: 72ch;
+      font-size: 0.82rem;
+      text-align: right;
+    }}
+    .health-pill {{
+      display: inline-block;
+      margin-left: 8px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      color: white;
+      background: var(--healthy);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+    }}
+    .health-pill.guarded {{ background: var(--guarded); }}
+    .health-pill.degraded {{ background: var(--degraded); }}
+    .health-pill.stale, .health-pill.unknown {{ background: var(--stale); }}
+    .process-grid {{
+      display: grid;
+      grid-template-columns: 1.05fr 1.65fr 1.5fr 1fr 1.35fr;
+      gap: 10px;
+      margin-bottom: 10px;
+    }}
+    .process-card {{
+      min-width: 0;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      padding: 11px 13px;
+      box-shadow: var(--shadow);
+    }}
+    .process-label {{
+      color: var(--muted);
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }}
+    .process-value {{
+      font-size: 1.35rem;
+      font-weight: 700;
+      line-height: 1.05;
+    }}
+    .strategy-value {{
+      font-size: 0.94rem;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
+    }}
+    .process-sub {{
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 0.78rem;
+      line-height: 1.3;
+    }}
+    .range-line, .profit-line {{
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 0.78rem;
+      line-height: 1.5;
+    }}
+    .profit-line strong {{ font-variant-numeric: tabular-nums; }}
+    .chips {{
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+      margin-top: 7px;
+    }}
+    .chip {{
+      display: inline-block;
+      padding: 3px 6px;
+      border-radius: 999px;
+      background: rgba(13,122,95,0.10);
+      color: var(--positive);
+      font-size: 0.7rem;
+      font-weight: 700;
+    }}
+    .muted-chip {{ background: rgba(95,107,103,0.10); color: var(--muted); }}
+    .order-board {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 12px;
+    }}
+    .order-panel {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      padding: 9px 12px;
+      box-shadow: var(--shadow);
+    }}
+    .order-title {{
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 5px;
+    }}
+    .order-title h2 {{ margin: 0; font-size: 0.95rem; }}
+    .order-count {{ color: var(--muted); font-size: 0.76rem; }}
+    .compact-table {{ font-size: 0.76rem; }}
+    .compact-table th, .compact-table td {{ padding: 4px 5px 4px 0; }}
+    .compact-table th {{ width: auto; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.06em; }}
+    .compact-table td span {{ display: block; color: var(--muted); font-size: 0.66rem; }}
+    .more-row td {{ text-align: center; color: var(--muted); }}
+    details.diagnostics {{ margin-top: 10px; }}
+    details.diagnostics > summary {{
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 0.86rem;
+      font-weight: 700;
+      padding: 8px 2px;
     }}
     .cards {{
       display: grid;
@@ -910,18 +1139,74 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
       font-size: 0.88rem;
     }}
     @media (max-width: 900px) {{
-      .grid, .two {{ grid-template-columns: 1fr; }}
+      .process-grid {{ grid-template-columns: 1fr 1fr; }}
+      .order-board, .grid, .two {{ grid-template-columns: 1fr; }}
+      .topbar {{ align-items: flex-start; }}
     }}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <header class="hero">
-      <h1>Range Grid Bot<br>Operations Dashboard</h1>
-      <div class="lede">
-        Static operational snapshot generated at {html.escape(now.isoformat())}. This page summarizes runtime health, recent trading activity, alerting, and inventory posture from the bot's local status, state, and logs.
+    <header class="topbar">
+      <h1>Range Grid Bot</h1>
+      <div class="freshness">
+        Updated {html.escape(human_age(status_timestamp, now))} ago
+        <span class="health-pill {html.escape(health_state)}">{html.escape(health_state.upper())}</span>
       </div>
     </header>
+
+    <section class="process-grid" aria-label="Current Process">
+      <article class="process-card">
+        <div class="process-label">BTC / USD</div>
+        <div class="process-value">${fmt_number(current_value('price'), 2)}</div>
+        <div class="process-sub">{html.escape(str(current_value('weather_condition', '--')))} · {html.escape(str(current_value('weather_market_range_zone', '--')))}</div>
+      </article>
+      <article class="process-card">
+        <div class="process-label">Current Strategy · {html.escape(run_mode)}</div>
+        <div class="process-value strategy-value">{html.escape(strategy_label)}</div>
+        <div class="process-sub">{html.escape(active_modes)} · {html.escape(str(process_state))}</div>
+      </article>
+      <article class="process-card">
+        <div class="process-label">Current Grids</div>
+        <div class="range-line"><span>Low</span><strong>${fmt_number(current_value('range_low'), 2)}</strong></div>
+        <div class="range-line"><span>Median</span><strong>${fmt_number(current_value('range_median'), 2)}</strong></div>
+        <div class="range-line"><span>High</span><strong>${fmt_number(current_value('range_high'), 2)}</strong></div>
+        <div class="chips">{grid_chips}</div>
+      </article>
+      <article class="process-card">
+        <div class="process-label">Open Orders</div>
+        <div class="process-value">{open_buy_count} buy · {open_sell_count} sell</div>
+        <div class="process-sub">${fmt_number(current_value('deployed_inventory_usd'), 2)} deployed<br>{fmt_int(current_value('sell_backlog_count', open_sell_count))} in sell backlog</div>
+      </article>
+      <article class="process-card">
+        <div class="process-label">Profit</div>
+        <div class="profit-line"><span>Today</span><strong>${fmt_number(realized_today, 2)}</strong></div>
+        <div class="profit-line"><span>{LOOKBACK_HOURS:g}h realized</span><strong>${fmt_number(recent_summary.get('realized_net_pnl'), 2)}</strong></div>
+        <div class="profit-line"><span>Open at target</span><strong>${fmt_number(open_target_net, 2)}</strong></div>
+        <div class="profit-line"><span>Open mark</span><strong>${fmt_number(open_mark_net, 2)}</strong></div>
+        <div class="profit-line"><span>Lifetime net</span><strong>${fmt_number(lifetime_net, 2)}</strong></div>
+      </article>
+    </section>
+
+    <section class="order-board" aria-label="Open Order Details">
+      <div class="order-panel">
+        <div class="order-title"><h2>Open Buy Orders</h2><span class="order-count">{open_buy_count} total</span></div>
+        <table class="compact-table">
+          <thead><tr><th>Source</th><th>Buy price</th><th>Notional</th><th>Age</th></tr></thead>
+          <tbody>{buy_order_rows}</tbody>
+        </table>
+      </div>
+      <div class="order-panel">
+        <div class="order-title"><h2>Open Sell Orders</h2><span class="order-count">{open_sell_count} total</span></div>
+        <table class="compact-table">
+          <thead><tr><th>Source</th><th>Sell price</th><th>Notional</th><th>Age</th></tr></thead>
+          <tbody>{sell_order_rows}</tbody>
+        </table>
+      </div>
+    </section>
+
+    <details class="diagnostics">
+      <summary>Detailed diagnostics, weather, execution quality, alerts, and events</summary>
 
     <section class="cards">
       {cards}
@@ -988,6 +1273,7 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
         </table>
       </div>
     </section>
+    </details>
 
     <div class="foot">
       Sources: {html.escape(os.path.abspath(STATUS_FILE))}, {html.escape(os.path.abspath(ALERT_LOG_FILE))}, {html.escape(os.path.abspath(STATE_FILE))}, {html.escape(os.path.abspath(ACTIVITY_LOG_FILE))}, {html.escape(os.path.abspath(TRADE_LOG_FILE))}.
@@ -1023,7 +1309,12 @@ def build_dashboard(output_file=OUTPUT_FILE):
     recent_summary, recent_events = compute_recent_metrics(metrics_records, now)
     alert_summary = compute_alert_metrics(alert_records, now)
     current_price = safe_float((status or {}).get("price"))
-    open_pnl = compute_open_sell_pnl(state, current_price=current_price, now=now)
+    open_pnl = compute_open_sell_pnl(
+        state,
+        current_price=current_price,
+        now=now,
+        round_trip_fee_pct=(status or {}).get("round_trip_fee_pct"),
+    )
     html_content = render_dashboard(
         status,
         state,

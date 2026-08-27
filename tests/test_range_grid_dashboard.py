@@ -39,7 +39,12 @@ class RangeGridDashboardTests(unittest.TestCase):
                         "strategy_modes": ["low", "high"],
                         "configured_strategy_modes": ["low", "high", "llm_target"],
                         "grid_anchor": "low,high",
+                        "paper_trading_enabled": False,
+                        "range_low": 75400.0,
+                        "range_median": 76050.25,
+                        "range_high": 76800.0,
                         "grid_levels": [76100.5, 75750.25, 75400.0],
+                        "round_trip_fee_pct": 0.012,
                         "execution_quality": {
                             "approval_to_placement_rate": 0.8,
                             "placement_to_fill_rate": 0.5,
@@ -76,6 +81,24 @@ class RangeGridDashboardTests(unittest.TestCase):
             with open(state_file, "w", encoding="utf-8") as f:
                 json.dump(
                     {
+                        "open_buy_orders": {
+                            "76000.0": {
+                                "price": 76000.0,
+                                "volume": 0.0013,
+                                "buy_source": "range_low",
+                                "placed_at": buy_ts,
+                                "entry_placement_mode": "resting_grid",
+                            }
+                        },
+                        "open_sell_orders": {
+                            "SELL-1": {
+                                "buy_price": 76000.0,
+                                "sell_price": 77000.0,
+                                "volume": 0.001,
+                                "buy_source": "range_median",
+                                "placed_at": sell_ts,
+                            }
+                        },
                         "stats": {
                             "approved_buy_candidates": 15,
                             "buy_orders_placed": 12,
@@ -151,6 +174,16 @@ class RangeGridDashboardTests(unittest.TestCase):
             with open(output_file, encoding="utf-8") as f:
                 html_text = f.read()
             self.assertIn("Range Grid Bot", html_text)
+            self.assertIn("Current Process", html_text)
+            self.assertIn("BTC / USD", html_text)
+            self.assertIn("Current Strategy · LIVE", html_text)
+            self.assertIn("Current Grids", html_text)
+            self.assertIn("Open Buy Orders", html_text)
+            self.assertIn("Open Sell Orders", html_text)
+            self.assertIn("98.80", html_text)
+            self.assertIn("77,000.00", html_text)
+            self.assertIn("Lifetime net", html_text)
+            self.assertIn("1.2000%", html_text)
             self.assertIn("bullish_allowed", html_text)
             self.assertIn("76,543.20", html_text)
             self.assertIn("range_grid_strategy_recovery_range_only.json", html_text)

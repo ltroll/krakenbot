@@ -11198,6 +11198,7 @@ def main():
                 "operating_mode": operating_mode,
                 "sentiment_control_mode": sentiment_control_mode,
                 "strategy_profile": STRATEGY_PROFILE,
+                "paper_trading_enabled": paper_trading_enabled,
                 "base_strategy_fingerprint": base_strategy_fingerprint,
                 "effective_strategy": effective_strategy_status_snapshot(),
                 "grid_anchor": grid_anchor,
@@ -11209,6 +11210,24 @@ def main():
                     False
                 ),
                 "price_regime_range_position": price_regime_range_position,
+                "range_low": low,
+                "range_high": high,
+                "range_mean": mean,
+                "range_median": median,
+                "grid_levels": (
+                    [
+                        round(candidate["level"], PRICE_DECIMALS)
+                        for candidate in deduped_candidates
+                    ]
+                    if (
+                        range_signal_gates_allow
+                        and base_any_buys_allowed
+                        and active_strategy_modes
+                        and low
+                        and high
+                    )
+                    else []
+                ),
                 "effective_entry_step_pct": current_entry_step_pct,
                 "inventory_pressure_usage_ratio": (
                     inventory_pressure_usage_ratio
@@ -11227,6 +11246,8 @@ def main():
                     effective_max_open_sell_orders
                 ),
                 "sell_repricing_enabled": sell_repricing_enabled,
+                "round_trip_fee_pct": round(round_trip_fee_pct, 8),
+                "profit_target_pct": round(profit_target_pct, 8),
                 "high_anchor_enabled": effective_high_anchor_enabled,
                 "weather_high_anchor_allowed": weather_high_anchor_allowed,
                 "realized_pnl_today": round(realized_pnl_today, 8),
