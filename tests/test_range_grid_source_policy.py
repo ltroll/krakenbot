@@ -61,8 +61,10 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
                 ],
                 {"range_low": offset, "range_median": offset},
             )
+            self.assertEqual(candidate["round_trip_fee_pct"], 0.008)
             comparison = dict(candidate)
             comparison["paper_trading_enabled"] = False
+            comparison["round_trip_fee_pct"] = 0.012
             comparison.pop(
                 "resting_grid_near_touch_offset_pct_by_source"
             )
@@ -85,12 +87,19 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
             strategy_path = os.path.join(ROOT, strategy_file)
             with open(strategy_path, encoding="utf-8") as handle:
                 strategy = json.load(handle)
+            expected_round_trip = (
+                0.008
+                if strategy.get(
+                    "resting_grid_near_touch_offset_pct_by_source"
+                )
+                else 0.012
+            )
             actual = (
                 strategy.get("maker_fee_pct"),
                 strategy.get("taker_fee_pct"),
                 strategy.get("round_trip_fee_pct"),
             )
-            if actual != (0.004, 0.008, 0.012):
+            if actual != (0.004, 0.008, expected_round_trip):
                 mismatches.append((strategy_file, actual))
 
         self.assertEqual(mismatches, [])

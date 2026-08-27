@@ -2956,6 +2956,8 @@ def simulate_approved_order_lifecycle(replay, snapshots):
     max_drawdown_pct = 0.0
     counts = Counter()
     source_stats = defaultdict(Counter)
+    entry_fill_latency_minutes = []
+    source_entry_fill_latency_minutes = defaultdict(list)
     last_minimum_order_floor_at_by_source = {}
 
     def committed_inventory_usd():
@@ -3040,6 +3042,23 @@ def simulate_approved_order_lifecycle(replay, snapshots):
         })
         return position
 
+    def record_entry_fill(order, filled_at):
+        approved_at = parse_iso8601(order.get("approved_at"))
+        latency_minutes = 0.0
+        if approved_at is not None:
+            latency_minutes = max(
+                0.0,
+                (filled_at - approved_at).total_seconds() / 60.0,
+            )
+        order["filled_at"] = filled_at.isoformat()
+        order["entry_fill_latency_minutes"] = latency_minutes
+        entry_fill_latency_minutes.append(latency_minutes)
+        source_entry_fill_latency_minutes[order["buy_source"]].append(
+            latency_minutes
+        )
+        counts["filled_entries"] += 1
+        source_stats[order["buy_source"]]["filled_entries"] += 1
+
     for captured_at, snapshot in ordered_snapshots:
         price = snapshot_price(snapshot)
         if price is None or price <= 0:
@@ -3051,11 +3070,9 @@ def simulate_approved_order_lifecycle(replay, snapshots):
         for order in pending_orders:
             if price <= order["entry_price"]:
                 position = dict(order)
-                position["filled_at"] = captured_at.isoformat()
+                record_entry_fill(position, captured_at)
                 lock_position_target_at_fill(position, snapshot)
                 newly_filled.append(position)
-                counts["filled_entries"] += 1
-                source_stats[order["buy_source"]]["filled_entries"] += 1
             else:
                 still_pending.append(order)
         pending_orders = still_pending
@@ -3372,11 +3389,9 @@ def simulate_approved_order_lifecycle(replay, snapshots):
                     captured_at.isoformat()
                 )
             if price <= entry_price:
-                order["filled_at"] = captured_at.isoformat()
+                record_entry_fill(order, captured_at)
                 lock_position_target_at_fill(order, snapshot)
                 open_positions.append(order)
-                counts["filled_entries"] += 1
-                source_stats[buy_source]["filled_entries"] += 1
             else:
                 pending_orders.append(order)
 
@@ -3435,6 +3450,24 @@ def simulate_approved_order_lifecycle(replay, snapshots):
             key: (round(value, 8) if isinstance(value, float) else value)
             for key, value in stats.items()
         }
+        source_latencies = source_entry_fill_latency_minutes.get(source) or []
+        by_source[source].update({
+            "average_entry_fill_minutes": (
+                round(statistics.mean(source_latencies), 6)
+                if source_latencies
+                else None
+            ),
+            "median_entry_fill_minutes": (
+                round(statistics.median(source_latencies), 6)
+                if source_latencies
+                else None
+            ),
+            "max_entry_fill_minutes": (
+                round(max(source_latencies), 6)
+                if source_latencies
+                else None
+            ),
+        })
 
     return {
         "starting_cash_usd": round(starting_cash_usd, 8),
@@ -3476,6 +3509,21 @@ def simulate_approved_order_lifecycle(replay, snapshots):
         ],
         "fill_rate_after_placement": (
             round(fill_rate, 6) if fill_rate is not None else None
+        ),
+        "average_entry_fill_minutes": (
+            round(statistics.mean(entry_fill_latency_minutes), 6)
+            if entry_fill_latency_minutes
+            else None
+        ),
+        "median_entry_fill_minutes": (
+            round(statistics.median(entry_fill_latency_minutes), 6)
+            if entry_fill_latency_minutes
+            else None
+        ),
+        "max_entry_fill_minutes": (
+            round(max(entry_fill_latency_minutes), 6)
+            if entry_fill_latency_minutes
+            else None
         ),
         "close_rate_after_fill": (
             round(close_rate, 6) if close_rate is not None else None
@@ -4322,6 +4370,15 @@ def build_strategy_comparison_rows(
             "simulation_fill_rate_after_placement": simulation.get(
                 "fill_rate_after_placement"
             ),
+            "simulation_average_entry_fill_minutes": simulation.get(
+                "average_entry_fill_minutes"
+            ),
+            "simulation_median_entry_fill_minutes": simulation.get(
+                "median_entry_fill_minutes"
+            ),
+            "simulation_max_entry_fill_minutes": simulation.get(
+                "max_entry_fill_minutes"
+            ),
             "simulation_close_rate_after_fill": simulation.get(
                 "close_rate_after_fill"
             ),
@@ -5045,6 +5102,9 @@ def write_strategy_comparison_csv(comparison, output_path):
         "simulation_closed_positions",
         "simulation_open_positions",
         "simulation_fill_rate_after_placement",
+        "simulation_average_entry_fill_minutes",
+        "simulation_median_entry_fill_minutes",
+        "simulation_max_entry_fill_minutes",
         "simulation_close_rate_after_fill",
         "simulation_realized_net_pnl_usd",
         "simulation_unrealized_net_pnl_usd",
@@ -5195,6 +5255,9 @@ def write_ranked_strategy_csv(comparison, output_path):
         "simulation_closed_positions",
         "simulation_open_positions",
         "simulation_fill_rate_after_placement",
+        "simulation_average_entry_fill_minutes",
+        "simulation_median_entry_fill_minutes",
+        "simulation_max_entry_fill_minutes",
         "simulation_close_rate_after_fill",
         "simulation_realized_net_pnl_usd",
         "simulation_unrealized_net_pnl_usd",

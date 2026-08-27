@@ -1474,6 +1474,15 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(result["near_touch_orders_placed"], 1)
         self.assertEqual(result["filled_entries"], 1)
         self.assertEqual(result["unfilled_entries"], 0)
+        self.assertEqual(result["average_entry_fill_minutes"], 1.0)
+        self.assertEqual(result["median_entry_fill_minutes"], 1.0)
+        self.assertEqual(result["max_entry_fill_minutes"], 1.0)
+        self.assertEqual(
+            result["by_source"]["range_low"][
+                "average_entry_fill_minutes"
+            ],
+            1.0,
+        )
 
     def test_order_lifecycle_paces_floor_assisted_orders(self):
         strategy = {
@@ -4587,6 +4596,9 @@ class RangeGridBacktestTests(unittest.TestCase):
                 self.assertIn("potential_take_profit_reached_rate", row)
                 self.assertIn("potential_avg_net_end_return_pct", row)
                 self.assertIn("simulation_filled_entries", row)
+                self.assertIn("simulation_average_entry_fill_minutes", row)
+                self.assertIn("simulation_median_entry_fill_minutes", row)
+                self.assertIn("simulation_max_entry_fill_minutes", row)
                 self.assertIn("simulation_net_return_pct", row)
 
     def test_write_strategy_comparison_csv_outputs_digestible_table(self):
@@ -4680,6 +4692,9 @@ class RangeGridBacktestTests(unittest.TestCase):
             self.assertIn("potential_risk_sized_avg_end_return_pct", text)
             self.assertIn("simulation_net_return_pct", text)
             self.assertIn("simulation_max_equity_drawdown_pct", text)
+            self.assertIn("simulation_average_entry_fill_minutes", text)
+            self.assertIn("simulation_median_entry_fill_minutes", text)
+            self.assertIn("simulation_max_entry_fill_minutes", text)
             self.assertIn(
                 "simulation_max_open_high_anchor_orders_blocked",
                 text,

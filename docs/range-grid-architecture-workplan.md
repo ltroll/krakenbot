@@ -227,9 +227,15 @@ same payload that produced the ranked result.
   cannot intentionally cross the spread as taker buys.
 - Added paper/backtest candidates at 0.05% and 0.10% below the captured price.
   The existing production profile is unchanged and does not opt in.
+- Near-touch candidates use a 0.80% maker-plus-maker round-trip fee because an
+  accepted post-only entry cannot execute as a taker buy. Production retains
+  its observed 1.20% taker-buy/maker-sell assumption.
 - Replay now models the submitted near-touch price for fills, profit targets,
   potential outcomes, capital use, and drawdown instead of crediting the
   strategy with the lower historical anchor.
+- Lifecycle comparison output reports average, median, and maximum entry-fill
+  latency globally and per source so faster fills can be measured separately
+  from eventual fill rate.
 - Existing exchange orders are not canceled, amended, or migrated.
 - `python -m unittest discover -s tests`: 310 tests passed.
 - JSON validation and `git diff --check` passed.
