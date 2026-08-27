@@ -3,6 +3,7 @@ import os
 import unittest
 
 from range_grid_guardrails import validate_strategy_config
+from fee_config import effective_round_trip_fee_pct
 from range_grid_source_policy import (
     source_entry_policy_decision,
     source_entry_step_pct,
@@ -62,9 +63,15 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
                 {"range_low": offset, "range_median": offset},
             )
             self.assertEqual(candidate["round_trip_fee_pct"], 0.008)
+            self.assertEqual(
+                effective_round_trip_fee_pct(candidate),
+                0.008,
+            )
             comparison = dict(candidate)
             comparison["paper_trading_enabled"] = False
             comparison["round_trip_fee_pct"] = 0.012
+            comparison["maker_fee_pct"] = production["maker_fee_pct"]
+            comparison["taker_fee_pct"] = production["taker_fee_pct"]
             comparison.pop(
                 "resting_grid_near_touch_offset_pct_by_source"
             )
@@ -94,12 +101,8 @@ class RangeGridSourcePolicyTests(unittest.TestCase):
                 )
                 else 0.012
             )
-            actual = (
-                strategy.get("maker_fee_pct"),
-                strategy.get("taker_fee_pct"),
-                strategy.get("round_trip_fee_pct"),
-            )
-            if actual != (0.004, 0.008, expected_round_trip):
+            actual = effective_round_trip_fee_pct(strategy)
+            if actual != expected_round_trip:
                 mismatches.append((strategy_file, actual))
 
         self.assertEqual(mismatches, [])
