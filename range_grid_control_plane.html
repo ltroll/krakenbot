@@ -53,7 +53,16 @@
     .metric { background: var(--panel-2); border: 1px solid rgba(98,168,255,.14); border-radius: 12px; padding: 13px; }
     .metric strong { display: block; margin: 5px 0 10px; font-size: 1.12rem; }
     .metric-row { display: flex; justify-content: space-between; color: var(--muted); font-size: .77rem; margin-top: 4px; }
-    canvas { width: 100%; height: 270px; display: block; }
+    .chart-wrap { position: relative; }
+    canvas { width: 100%; height: 270px; display: block; cursor: crosshair; touch-action: pan-y; }
+    .chart-tooltip {
+      position: absolute; z-index: 2; min-width: 132px; padding: 9px 11px; border: 1px solid rgba(77,214,199,.45);
+      border-radius: 9px; background: rgba(5, 14, 22, .94); box-shadow: 0 10px 28px rgba(0,0,0,.35);
+      pointer-events: none; opacity: 0; transition: opacity .12s ease; color: var(--text); font-size: .78rem;
+    }
+    .chart-tooltip.show { opacity: 1; }
+    .chart-tooltip strong, .chart-tooltip span { display: block; }
+    .chart-tooltip span { color: var(--cyan); font-size: .92rem; font-weight: 800; margin-top: 3px; }
     .control-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
     .hold-button {
       width: 100%; border: 0; border-radius: 14px; padding: 17px 18px; margin: 14px 0;
@@ -128,7 +137,10 @@
           <h2 class="panel-title">200-day BTC close</h2>
           <span id="chartRange" class="subline"></span>
         </div>
-        <canvas id="priceChart"></canvas>
+        <div class="chart-wrap">
+          <canvas id="priceChart" tabindex="0" aria-label="Interactive 200-day BTC closing-price chart"></canvas>
+          <div id="chartTooltip" class="chart-tooltip" role="status"><strong id="chartTooltipDate"></strong><span id="chartTooltipPrice"></span></div>
+        </div>
       </section>
 
       <section class="panel control-panel">
@@ -166,7 +178,7 @@
   </div>
 
   <script>
-    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '' };
+    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '', chartCandles: [], chartHoverIndex: null, chartGeometry: null };
     const money = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', maximumFractionDigits: 0}).format(value);
     const money2 = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', minimumFractionDigits: 2, maximumFractionDigits: 2}).format(value);
     const request = async (url, options = {}, retry = true) => {
@@ -208,6 +220,7 @@
 
     function drawChart(candles) {
       const canvas = document.querySelector('#priceChart');
+      state.chartCandles = candles;
       const ratio = window.devicePixelRatio || 1;
       const width = canvas.clientWidth;
       const height = canvas.clientHeight;
@@ -219,6 +232,7 @@
       const min = Math.min(...values), max = Math.max(...values), span = Math.max(1, max - min);
       const x = i => 8 + i * (width - 16) / Math.max(1, values.length - 1);
       const y = value => 12 + (max - value) * (height - 28) / span;
+      state.chartGeometry = {width, height, min, max, span};
       const gradient = ctx.createLinearGradient(0, 0, width, 0);
       gradient.addColorStop(0, '#62a8ff'); gradient.addColorStop(1, '#4dd6c7');
       ctx.strokeStyle = gradient; ctx.lineWidth = 2.2; ctx.beginPath();
@@ -227,7 +241,48 @@
       ctx.lineTo(x(values.length - 1), height - 8); ctx.lineTo(8, height - 8); ctx.closePath();
       const fill = ctx.createLinearGradient(0, 0, 0, height); fill.addColorStop(0, 'rgba(77,214,199,.22)'); fill.addColorStop(1, 'rgba(77,214,199,0)');
       ctx.fillStyle = fill; ctx.fill();
+      if (Number.isInteger(state.chartHoverIndex) && candles[state.chartHoverIndex]) {
+        const hoverX = x(state.chartHoverIndex), hoverY = y(values[state.chartHoverIndex]);
+        ctx.save();
+        ctx.setLineDash([4, 5]); ctx.lineWidth = 1;
+        ctx.strokeStyle = 'rgba(236,246,251,.42)';
+        ctx.beginPath(); ctx.moveTo(hoverX, 8); ctx.lineTo(hoverX, height - 8); ctx.stroke();
+        ctx.setLineDash([]); ctx.fillStyle = '#071018'; ctx.strokeStyle = '#4dd6c7'; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.arc(hoverX, hoverY, 5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.restore();
+      }
       document.querySelector('#chartRange').textContent = `${money(min)} – ${money(max)}`;
+    }
+
+    function showChartPoint(clientX) {
+      const canvas = document.querySelector('#priceChart');
+      const candles = state.chartCandles;
+      if (!candles.length) return;
+      const rect = canvas.getBoundingClientRect();
+      const localX = Math.max(8, Math.min(rect.width - 8, clientX - rect.left));
+      const index = Math.max(0, Math.min(candles.length - 1, Math.round((localX - 8) * Math.max(1, candles.length - 1) / Math.max(1, rect.width - 16))));
+      state.chartHoverIndex = index;
+      drawChart(candles);
+
+      const candle = candles[index];
+      const tooltip = document.querySelector('#chartTooltip');
+      document.querySelector('#chartTooltipDate').textContent = new Date(candle.timestamp).toLocaleDateString('en-US', {year:'numeric', month:'short', day:'numeric', timeZone:'UTC'});
+      document.querySelector('#chartTooltipPrice').textContent = `${money2(candle.close)} close`;
+      tooltip.classList.add('show');
+
+      const pointX = 8 + index * (rect.width - 16) / Math.max(1, candles.length - 1);
+      const geometry = state.chartGeometry;
+      const pointY = 12 + (geometry.max - candle.close) * (geometry.height - 28) / geometry.span;
+      const tooltipWidth = tooltip.offsetWidth, tooltipHeight = tooltip.offsetHeight;
+      const preferredLeft = pointX > rect.width * .65 ? pointX - tooltipWidth - 14 : pointX + 14;
+      tooltip.style.left = `${Math.max(4, Math.min(rect.width - tooltipWidth - 4, preferredLeft))}px`;
+      tooltip.style.top = `${Math.max(4, Math.min(rect.height - tooltipHeight - 4, pointY - tooltipHeight / 2))}px`;
+    }
+
+    function hideChartPoint() {
+      state.chartHoverIndex = null;
+      document.querySelector('#chartTooltip').classList.remove('show');
+      drawChart(state.chartCandles);
     }
 
     function seedTargets(currentPrice) {
@@ -311,7 +366,18 @@
       } catch (error) { showError(error); } finally { button.disabled = false; }
     });
 
-    window.addEventListener('resize', () => state.payload && drawChart(state.payload.market.history.daily || []));
+    const priceChart = document.querySelector('#priceChart');
+    priceChart.addEventListener('pointermove', event => showChartPoint(event.clientX));
+    priceChart.addEventListener('pointerdown', event => showChartPoint(event.clientX));
+    priceChart.addEventListener('pointerleave', event => {
+      if (event.pointerType === 'mouse') hideChartPoint();
+    });
+    priceChart.addEventListener('blur', hideChartPoint);
+    window.addEventListener('resize', () => {
+      document.querySelector('#chartTooltip').classList.remove('show');
+      state.chartHoverIndex = null;
+      if (state.payload) drawChart(state.payload.market.history.daily || []);
+    });
     refresh(); setInterval(refresh, 60000);
   </script>
 </body>

@@ -91,6 +91,14 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertFalse(snapshot["stale"])
         self.assertLessEqual(len(snapshot["history"]["daily"]), 200)
 
+    def test_control_page_has_interactive_dated_chart_tooltip(self):
+        html = control_plane.HTML_FILE.read_text(encoding="utf-8")
+
+        self.assertIn('id="chartTooltip"', html)
+        self.assertIn("pointermove", html)
+        self.assertIn("candle.close", html)
+        self.assertIn("timeZone:'UTC'", html)
+
 
 if __name__ == "__main__":
     unittest.main()
