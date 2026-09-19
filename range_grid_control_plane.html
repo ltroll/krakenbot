@@ -165,11 +165,11 @@
 
       <section class="panel targets-panel">
         <h2 class="panel-title">Operator buy targets</h2>
-        <div class="target-head"><span>Use</span><span>Name</span><span>Buy price</span><span>Net profit target</span></div>
+        <div class="target-head"><span>Use</span><span>Name</span><span>Buy price</span><span id="profitTargetHeader">Net profit target</span></div>
         <div id="targetRows"></div>
         <div class="actions">
           <div class="notice">
-            Manual prices are GTC limit buys and must be at or below market when submitted. Profit targets apply only to new fills; the bot adds its configured round-trip fee allowance. Manual targets bypass forecast opinions but retain hard safety, cash, and inventory limits. HOLD cancels open buys on the next bot cycle, but existing sell orders remain untouched.
+            Manual prices are GTC limit buys and must be at or below market when submitted. A 0% net target is fee-adjusted break-even; the bot currently adds <span id="feeAllowance">its configured round-trip fee allowance</span> to the sell price. Profit targets apply only to new fills. Manual targets bypass forecast opinions but retain hard safety, cash, and inventory limits. HOLD cancels open buys on the next bot cycle, but existing sell orders remain untouched.
           </div>
           <button id="saveButton" class="save-button">SAVE CONTROLS</button>
         </div>
@@ -299,7 +299,7 @@
           <input class="target-enabled" type="checkbox" ${target.enabled ? 'checked' : ''} aria-label="Enable target ${index+1}">
           <input class="target-label" value="${target.label.replaceAll('&','&amp;').replaceAll('"','&quot;')}" maxlength="80">
           <div class="dual-input"><input class="price-range" type="range" min="${min}" max="${max}" step="10" value="${target.buy_price}"><input class="price-number" type="number" min="1" step=".1" value="${target.buy_price}"></div>
-          <div class="dual-input"><input class="profit-range" type="range" min=".1" max="5" step=".05" value="${target.profit_target_pct*100}"><input class="profit-number" type="number" min=".01" max="25" step=".01" value="${(target.profit_target_pct*100).toFixed(2)}"></div>
+          <div class="dual-input"><input class="profit-range" type="range" min="0" max="5" step=".05" value="${target.profit_target_pct*100}"><input class="profit-number" type="number" min="0" max="25" step=".01" value="${(target.profit_target_pct*100).toFixed(2)}"></div>
         </div>`).join('');
       document.querySelectorAll('.target-row').forEach(row => {
         const priceRange = row.querySelector('.price-range'), priceNumber = row.querySelector('.price-number');
@@ -327,6 +327,9 @@
       document.querySelector('#openSells').textContent = payload.orders.open_sell_count;
       document.querySelector('#inventory').textContent = money2(bot.deployed_inventory_usd);
       document.querySelector('#netPnl').textContent = money2(stats.realized_estimated_net_pnl);
+      const feeAllowancePct = Number(bot.round_trip_fee_pct || 0) * 100;
+      document.querySelector('#profitTargetHeader').textContent = 'Net profit target · min 0%';
+      document.querySelector('#feeAllowance').textContent = `${feeAllowancePct.toFixed(2)}% round-trip fees`;
       renderTargets(control.buy_targets || [], payload.market.current_price);
       document.querySelector('#statusDot').className = `dot ${payload.market.stale ? '' : 'ok'}`;
       document.querySelector('#statusText').textContent = control.buying_paused ? 'Buying held by operator' : 'Control plane online';

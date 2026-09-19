@@ -55,12 +55,33 @@ class RangeGridControlTests(unittest.TestCase):
     def test_rejects_unsafe_target_values(self):
         for payload in (
             {"buy_targets": [{"buy_price": 0, "profit_target_pct": 0.01}]},
-            {"buy_targets": [{"buy_price": 75000, "profit_target_pct": 0}]},
+            {"buy_targets": [{"buy_price": 75000, "profit_target_pct": -0.0001}]},
             {"buy_targets": [{"buy_price": 75000, "profit_target_pct": 0.5}]},
         ):
             with self.subTest(payload=payload):
                 with self.assertRaises(ControlStateError):
                     normalize_control_state(payload)
+
+    def test_zero_net_profit_target_is_fee_adjusted_break_even(self):
+        state = normalize_control_state({
+            "manual_targets_enabled": True,
+            "buy_targets": [{
+                "id": "break-even",
+                "buy_price": 75000,
+                "profit_target_pct": 0,
+            }],
+        })
+
+        self.assertEqual(state["buy_targets"][0]["profit_target_pct"], 0)
+        self.assertIsNone(operator_buy_cancel_reason(
+            state,
+            {
+                "operator_controlled": True,
+                "grid_slot": "operator:break-even",
+                "price": 75000,
+                "sell_pct_override": 0,
+            },
+        ))
 
     def test_manual_mode_requires_an_enabled_target(self):
         with self.assertRaisesRegex(

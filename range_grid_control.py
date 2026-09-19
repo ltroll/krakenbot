@@ -14,7 +14,7 @@ CONTROL_SCHEMA_VERSION = 1
 MAX_CONTROL_TARGETS = 8
 MIN_BUY_PRICE_USD = 1.0
 MAX_BUY_PRICE_USD = 10_000_000.0
-MIN_PROFIT_TARGET_PCT = 0.0001
+MIN_PROFIT_TARGET_PCT = 0.0
 MAX_PROFIT_TARGET_PCT = 0.25
 TARGET_ID_PATTERN = re.compile(r"[^a-zA-Z0-9_-]+")
 
@@ -212,6 +212,14 @@ def _positive_float(value):
     return parsed if parsed > 0 else None
 
 
+def _non_negative_float(value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
 def operator_buy_cancel_reason(state, order, *, price_decimals=2):
     """Return why a pending buy conflicts with the current operator state."""
     normalized = normalize_control_state(state)
@@ -251,8 +259,8 @@ def operator_buy_cancel_reason(state, order, *, price_decimals=2):
     ):
         return "operator_target_price_changed"
 
-    order_profit = _positive_float(order.get("sell_pct_override"))
-    desired_profit = _positive_float(desired.get("profit_target_pct"))
+    order_profit = _non_negative_float(order.get("sell_pct_override"))
+    desired_profit = _non_negative_float(desired.get("profit_target_pct"))
     if (
         order_profit is None
         or desired_profit is None

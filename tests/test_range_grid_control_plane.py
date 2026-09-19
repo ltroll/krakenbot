@@ -98,6 +98,8 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertIn("pointermove", html)
         self.assertIn("candle.close", html)
         self.assertIn("timeZone:'UTC'", html)
+        self.assertIn('class="profit-range" type="range" min="0"', html)
+        self.assertIn("A 0% net target is fee-adjusted break-even", html)
 
 
 if __name__ == "__main__":
