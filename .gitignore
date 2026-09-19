@@ -1,3 +1,82 @@
+# Local configuration and secrets
 .env
+.env.*
+!.env.example
+!.env_example
+env.local
+env.*.local
+secrets/
+credentials/
+*.pem
+*.key
+
+# Python environments and caches
 .venv/
 venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.hypothesis/
+.cache/
+build/
+dist/
+*.egg-info/
+node_modules/
+
+# Coverage and test output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit*.xml
+
+# Bot runtime state, logs, and local databases
+*.log
+*.jsonl
+*.csv
+*.sqlite
+*.sqlite3
+*.db
+*.pid
+*.lock
+*.kill
+last_state.json
+*_state.json
+*_status.json
+*_alerts.json
+*_anchor_winners.json
+
+# Generated backtest, dashboard, and report output
+backtest_archive/
+backtests/
+artifacts/
+output/
+reports/
+tmp/
+temp/
+*.tmp
+*.bak
+dashboard.html
+*_dashboard.html
+*_backtest.json
+*_backtest_output.json
+*_backtest_results.json
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local Codex workspace metadata
+.codex/
