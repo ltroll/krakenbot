@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Range Grid Control Plane</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #071018;
+      --panel: #101c27;
+      --panel-2: #162532;
+      --line: #294052;
+      --text: #ecf6fb;
+      --muted: #8fa9b8;
+      --cyan: #4dd6c7;
+      --blue: #62a8ff;
+      --amber: #ffc857;
+      --red: #ff6b6b;
+      --green: #6ee7a2;
+      --shadow: 0 18px 45px rgba(0, 0, 0, .28);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 80% 0%, rgba(77, 214, 199, .12), transparent 35rem),
+        linear-gradient(145deg, #071018, #09131d 48%, #08141b);
+      color: var(--text);
+    }
+    button, input { font: inherit; }
+    .shell { max-width: 1440px; margin: 0 auto; padding: 22px; }
+    header { display: flex; justify-content: space-between; gap: 20px; align-items: center; margin-bottom: 18px; }
+    h1 { margin: 0; font-size: clamp(1.35rem, 3vw, 2.15rem); letter-spacing: -.04em; }
+    .eyebrow { color: var(--cyan); text-transform: uppercase; letter-spacing: .14em; font-size: .7rem; font-weight: 800; }
+    .status-line { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: .85rem; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 14px currentColor; }
+    .dot.ok { background: var(--green); }
+    .dot.error { background: var(--red); }
+    .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 14px; }
+    .panel { background: rgba(16, 28, 39, .94); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }
+    .hero { grid-column: span 4; padding: 21px; }
+    .market { grid-column: span 8; padding: 18px; }
+    .chart-panel { grid-column: span 7; padding: 18px; }
+    .control-panel { grid-column: span 5; padding: 18px; }
+    .targets-panel { grid-column: 1 / -1; padding: 18px; }
+    .panel-title { margin: 0 0 13px; font-size: .78rem; color: var(--muted); text-transform: uppercase; letter-spacing: .11em; }
+    .price { font-size: clamp(2.2rem, 5vw, 4.4rem); font-weight: 760; letter-spacing: -.065em; line-height: .95; }
+    .subline { color: var(--muted); margin-top: 13px; font-size: .88rem; }
+    .market-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .metric { background: var(--panel-2); border: 1px solid rgba(98,168,255,.14); border-radius: 12px; padding: 13px; }
+    .metric strong { display: block; margin: 5px 0 10px; font-size: 1.12rem; }
+    .metric-row { display: flex; justify-content: space-between; color: var(--muted); font-size: .77rem; margin-top: 4px; }
+    canvas { width: 100%; height: 270px; display: block; }
+    .control-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .hold-button {
+      width: 100%; border: 0; border-radius: 14px; padding: 17px 18px; margin: 14px 0;
+      color: #071018; background: var(--amber); font-weight: 850; letter-spacing: .05em; cursor: pointer;
+    }
+    .hold-button.paused { background: var(--green); }
+    .switch-row { display: flex; justify-content: space-between; gap: 18px; align-items: center; padding: 12px 0; border-top: 1px solid var(--line); }
+    .switch-row small { display: block; color: var(--muted); margin-top: 4px; line-height: 1.35; }
+    .switch { position: relative; width: 46px; height: 26px; flex: 0 0 auto; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .switch span { position: absolute; inset: 0; border-radius: 99px; background: #314556; cursor: pointer; transition: .2s; }
+    .switch span::after { content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px; border-radius: 50%; background: white; transition: .2s; }
+    .switch input:checked + span { background: var(--cyan); }
+    .switch input:checked + span::after { transform: translateX(20px); }
+    .bot-facts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 12px; }
+    .fact { background: var(--panel-2); border-radius: 10px; padding: 10px; }
+    .fact span { display: block; color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; }
+    .fact strong { display: block; margin-top: 4px; font-size: .92rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .target-head, .target-row { display: grid; grid-template-columns: 42px 120px minmax(260px, 1fr) minmax(220px, .75fr); gap: 14px; align-items: center; }
+    .target-head { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; padding: 0 10px 8px; }
+    .target-row { padding: 13px 10px; border-top: 1px solid var(--line); }
+    .target-row:first-of-type { border-top: 0; }
+    .target-label { width: 100%; background: transparent; border: 1px solid transparent; color: var(--text); padding: 8px; border-radius: 8px; font-weight: 700; }
+    .target-label:focus { border-color: var(--blue); outline: none; background: var(--panel-2); }
+    .dual-input { display: grid; grid-template-columns: 1fr 116px; gap: 10px; align-items: center; }
+    input[type="range"] { width: 100%; accent-color: var(--cyan); }
+    input[type="number"] { width: 100%; background: #0a151f; color: var(--text); border: 1px solid var(--line); border-radius: 9px; padding: 9px; }
+    .actions { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--line); }
+    .save-button { border: 0; background: var(--cyan); color: #061412; padding: 12px 22px; border-radius: 10px; font-weight: 850; cursor: pointer; }
+    .save-button:disabled { opacity: .5; cursor: wait; }
+    .notice { color: var(--muted); font-size: .79rem; line-height: 1.5; max-width: 780px; }
+    .banner { display: none; margin-bottom: 14px; border-radius: 12px; padding: 12px 14px; background: rgba(255,107,107,.13); border: 1px solid rgba(255,107,107,.45); color: #ffd6d6; }
+    .banner.show { display: block; }
+    @media (max-width: 980px) {
+      .hero, .market, .chart-panel, .control-panel { grid-column: 1 / -1; }
+      .market-cards { grid-template-columns: repeat(2, 1fr); }
+      .target-head { display: none; }
+      .target-row { grid-template-columns: 38px 1fr; }
+      .target-row .dual-input { grid-column: 1 / -1; }
+    }
+    @media (max-width: 520px) {
+      .shell { padding: 12px; }
+      header { align-items: flex-start; flex-direction: column; }
+      .market-cards { grid-template-columns: 1fr; }
+      .actions { align-items: stretch; flex-direction: column; }
+      .save-button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div><div class="eyebrow">Operator console</div><h1>Range Grid Control Plane</h1></div>
+      <div class="status-line"><span id="statusDot" class="dot"></span><span id="statusText">Connecting…</span></div>
+    </header>
+    <div id="banner" class="banner"></div>
+
+    <main class="grid">
+      <section class="panel hero">
+        <h2 class="panel-title">BTC / USD</h2>
+        <div id="currentPrice" class="price">—</div>
+        <div id="marketTimestamp" class="subline">Waiting for Kraken market data</div>
+      </section>
+
+      <section class="panel market">
+        <h2 class="panel-title">Rolling market context · average close / low / high</h2>
+        <div id="marketCards" class="market-cards"></div>
+      </section>
+
+      <section class="panel chart-panel">
+        <div class="control-head">
+          <h2 class="panel-title">200-day BTC close</h2>
+          <span id="chartRange" class="subline"></span>
+        </div>
+        <canvas id="priceChart"></canvas>
+      </section>
+
+      <section class="panel control-panel">
+        <div class="control-head">
+          <h2 class="panel-title">Buying control</h2>
+          <span id="revision" class="subline">Revision —</span>
+        </div>
+        <button id="holdButton" class="hold-button">HOLD BUYING</button>
+        <div class="switch-row">
+          <div><strong>Manual target mode</strong><small>Replaces automatic buy candidates while enabled.</small></div>
+          <label class="switch"><input id="manualEnabled" type="checkbox"><span></span></label>
+        </div>
+        <div class="bot-facts">
+          <div class="fact"><span>Strategy</span><strong id="strategy">—</strong></div>
+          <div class="fact"><span>Active mode</span><strong id="mode">—</strong></div>
+          <div class="fact"><span>Open buys</span><strong id="openBuys">—</strong></div>
+          <div class="fact"><span>Open sells</span><strong id="openSells">—</strong></div>
+          <div class="fact"><span>Inventory</span><strong id="inventory">—</strong></div>
+          <div class="fact"><span>Net P&amp;L</span><strong id="netPnl">—</strong></div>
+        </div>
+      </section>
+
+      <section class="panel targets-panel">
+        <h2 class="panel-title">Operator buy targets</h2>
+        <div class="target-head"><span>Use</span><span>Name</span><span>Buy price</span><span>Net profit target</span></div>
+        <div id="targetRows"></div>
+        <div class="actions">
+          <div class="notice">
+            Manual prices are GTC limit buys and must be at or below market when submitted. Profit targets apply only to new fills; the bot adds its configured round-trip fee allowance. Manual targets bypass forecast opinions but retain hard safety, cash, and inventory limits. HOLD cancels open buys on the next bot cycle, but existing sell orders remain untouched.
+          </div>
+          <button id="saveButton" class="save-button">SAVE CONTROLS</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '' };
+    const money = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', maximumFractionDigits: 0}).format(value);
+    const money2 = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', minimumFractionDigits: 2, maximumFractionDigits: 2}).format(value);
+    const request = async (url, options = {}, retry = true) => {
+      const headers = {...(options.headers || {})};
+      if (state.token) headers.Authorization = `Bearer ${state.token}`;
+      const response = await fetch(url, {...options, headers});
+      if (response.status === 401 && retry) {
+        const token = window.prompt('Control-plane token');
+        if (token) {
+          state.token = token.trim();
+          sessionStorage.setItem('rangeGridToken', state.token);
+          return request(url, options, false);
+        }
+      }
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      return payload;
+    };
+    const showError = error => {
+      document.querySelector('#banner').textContent = error.message || String(error);
+      document.querySelector('#banner').classList.add('show');
+      document.querySelector('#statusDot').className = 'dot error';
+      document.querySelector('#statusText').textContent = 'Attention required';
+    };
+    const clearError = () => document.querySelector('#banner').classList.remove('show');
+
+    function renderMarket(market) {
+      document.querySelector('#currentPrice').textContent = money2(market.current_price);
+      document.querySelector('#marketTimestamp').textContent = market.error
+        ? `Stale market data · ${market.error}`
+        : `Kraken · updated ${new Date(market.captured_at).toLocaleString()}`;
+      const order = ['24h', '7d', '50d', '200d'];
+      document.querySelector('#marketCards').innerHTML = order.map(key => {
+        const item = market.periods[key] || {};
+        return `<article class="metric"><span class="eyebrow">${key}</span><strong>${money(item.average)}</strong><div class="metric-row"><span>Low</span><span>${money(item.low)}</span></div><div class="metric-row"><span>High</span><span>${money(item.high)}</span></div></article>`;
+      }).join('');
+      drawChart(market.history.daily || []);
+    }
+
+    function drawChart(candles) {
+      const canvas = document.querySelector('#priceChart');
+      const ratio = window.devicePixelRatio || 1;
+      const width = canvas.clientWidth;
+      const height = canvas.clientHeight;
+      canvas.width = width * ratio; canvas.height = height * ratio;
+      const ctx = canvas.getContext('2d'); ctx.scale(ratio, ratio);
+      ctx.clearRect(0, 0, width, height);
+      if (!candles.length) return;
+      const values = candles.map(c => c.close);
+      const min = Math.min(...values), max = Math.max(...values), span = Math.max(1, max - min);
+      const x = i => 8 + i * (width - 16) / Math.max(1, values.length - 1);
+      const y = value => 12 + (max - value) * (height - 28) / span;
+      const gradient = ctx.createLinearGradient(0, 0, width, 0);
+      gradient.addColorStop(0, '#62a8ff'); gradient.addColorStop(1, '#4dd6c7');
+      ctx.strokeStyle = gradient; ctx.lineWidth = 2.2; ctx.beginPath();
+      values.forEach((value, i) => i ? ctx.lineTo(x(i), y(value)) : ctx.moveTo(x(i), y(value)));
+      ctx.stroke();
+      ctx.lineTo(x(values.length - 1), height - 8); ctx.lineTo(8, height - 8); ctx.closePath();
+      const fill = ctx.createLinearGradient(0, 0, 0, height); fill.addColorStop(0, 'rgba(77,214,199,.22)'); fill.addColorStop(1, 'rgba(77,214,199,0)');
+      ctx.fillStyle = fill; ctx.fill();
+      document.querySelector('#chartRange').textContent = `${money(min)} – ${money(max)}`;
+    }
+
+    function seedTargets(currentPrice) {
+      const discounts = [.01, .03, .05, .07];
+      return discounts.map((discount, index) => ({id:`target-${index+1}`, label:`Level ${index+1}`, enabled:false, buy_price:Math.round(currentPrice * (1-discount) / 10) * 10, profit_target_pct:.009}));
+    }
+
+    function renderTargets(targets, currentPrice) {
+      const values = targets.length ? targets : seedTargets(currentPrice || 80000);
+      const min = Math.max(1000, Math.floor((currentPrice || 80000) * .70 / 100) * 100);
+      const max = Math.ceil((currentPrice || 80000) * 1.01 / 100) * 100;
+      document.querySelector('#targetRows').innerHTML = values.map((target, index) => `
+        <div class="target-row" data-id="${target.id}">
+          <input class="target-enabled" type="checkbox" ${target.enabled ? 'checked' : ''} aria-label="Enable target ${index+1}">
+          <input class="target-label" value="${target.label.replaceAll('&','&amp;').replaceAll('"','&quot;')}" maxlength="80">
+          <div class="dual-input"><input class="price-range" type="range" min="${min}" max="${max}" step="10" value="${target.buy_price}"><input class="price-number" type="number" min="1" step=".1" value="${target.buy_price}"></div>
+          <div class="dual-input"><input class="profit-range" type="range" min=".1" max="5" step=".05" value="${target.profit_target_pct*100}"><input class="profit-number" type="number" min=".01" max="25" step=".01" value="${(target.profit_target_pct*100).toFixed(2)}"></div>
+        </div>`).join('');
+      document.querySelectorAll('.target-row').forEach(row => {
+        const priceRange = row.querySelector('.price-range'), priceNumber = row.querySelector('.price-number');
+        const profitRange = row.querySelector('.profit-range'), profitNumber = row.querySelector('.profit-number');
+        priceRange.addEventListener('input', () => priceNumber.value = priceRange.value);
+        priceNumber.addEventListener('input', () => priceRange.value = priceNumber.value);
+        profitRange.addEventListener('input', () => profitNumber.value = Number(profitRange.value).toFixed(2));
+        profitNumber.addEventListener('input', () => profitRange.value = profitNumber.value);
+      });
+    }
+
+    function render(payload) {
+      state.payload = payload; state.revision = payload.control.revision;
+      renderMarket(payload.market);
+      const control = payload.control, bot = payload.bot || {}, stats = bot.stats || {};
+      document.querySelector('#revision').textContent = `Revision ${control.revision}`;
+      document.querySelector('#manualEnabled').checked = control.manual_targets_enabled;
+      const hold = document.querySelector('#holdButton');
+      hold.dataset.paused = control.buying_paused ? 'true' : 'false';
+      hold.textContent = control.buying_paused ? 'RESUME BUYING' : 'HOLD BUYING';
+      hold.classList.toggle('paused', control.buying_paused);
+      document.querySelector('#strategy').textContent = bot.strategy_profile || '—';
+      document.querySelector('#mode').textContent = (bot.strategy_modes || []).join(', ') || '—';
+      document.querySelector('#openBuys').textContent = payload.orders.open_buy_count;
+      document.querySelector('#openSells').textContent = payload.orders.open_sell_count;
+      document.querySelector('#inventory').textContent = money2(bot.deployed_inventory_usd);
+      document.querySelector('#netPnl').textContent = money2(stats.realized_estimated_net_pnl);
+      renderTargets(control.buy_targets || [], payload.market.current_price);
+      document.querySelector('#statusDot').className = `dot ${payload.market.stale ? '' : 'ok'}`;
+      document.querySelector('#statusText').textContent = control.buying_paused ? 'Buying held by operator' : 'Control plane online';
+      if (control.load_error) showError(new Error(`Control state fail-safe hold: ${control.load_error}`)); else clearError();
+    }
+
+    function collectTargets() {
+      return [...document.querySelectorAll('.target-row')].map(row => ({
+        id: row.dataset.id,
+        label: row.querySelector('.target-label').value,
+        enabled: row.querySelector('.target-enabled').checked,
+        buy_price: Number(row.querySelector('.price-number').value),
+        profit_target_pct: Number(row.querySelector('.profit-number').value) / 100,
+      }));
+    }
+
+    async function refresh() {
+      try { render(await request('/api/status')); } catch (error) { showError(error); }
+    }
+
+    document.querySelector('#holdButton').addEventListener('click', async () => {
+      const button = document.querySelector('#holdButton'); button.disabled = true;
+      try {
+        await request('/api/hold', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({buying_paused:button.dataset.paused !== 'true', expected_revision:state.revision})});
+        await refresh();
+      } catch (error) { showError(error); } finally { button.disabled = false; }
+    });
+
+    document.querySelector('#saveButton').addEventListener('click', async () => {
+      const button = document.querySelector('#saveButton'); button.disabled = true;
+      try {
+        const manualTargetsEnabled = document.querySelector('#manualEnabled').checked;
+        const buyTargets = collectTargets();
+        if (manualTargetsEnabled && !buyTargets.some(target => target.enabled)) throw new Error('Enable at least one buy target before turning on manual mode.');
+        await request('/api/control', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({expected_revision:state.revision, manual_targets_enabled:manualTargetsEnabled, buy_targets:buyTargets})});
+        await refresh();
+      } catch (error) { showError(error); } finally { button.disabled = false; }
+    });
+
+    window.addEventListener('resize', () => state.payload && drawChart(state.payload.market.history.daily || []));
+    refresh(); setInterval(refresh, 60000);
+  </script>
+</body>
+</html>

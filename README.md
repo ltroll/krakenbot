@@ -303,6 +303,41 @@ Important values in the selected strategy file, such as [`range_grid_strategy_de
 - `position_size_pct`: fraction of available USD allocated per buy level
 - `execution_signal_threshold`: minimum signal required before placing new buys
 
+### HTTP operator control plane
+
+Run `range_grid_control_plane.py` beside the bot to get a single-page HTTP
+console with the current BTC price, rolling 24-hour, 7-day, 50-day, and 200-day
+average/low/high values, a 200-day chart, bot status, manual buy targets, and a
+buying hold control.
+
+The control plane writes `RANGE_GRID_CONTROL_FILE`; the bot reads that file on
+every cycle. Manual target mode replaces automatic buy candidates while it is
+enabled. Each enabled target is a GTC limit buy at the exact selected price. A
+target above the current market waits rather than becoming a marketable order.
+Its selected profit percentage is locked to a new fill as the net target, with
+the strategy's configured round-trip fee allowance added to the sell price.
+Operator targets bypass forecast/sentiment opinions and automatic buy cooldowns,
+but still respect hard-safety flags, operating mode, available cash, exchange
+minimums, inventory limits, and other execution guardrails.
+
+HOLD blocks new buys and, by default, requests cancellation of pending buy
+orders on the next bot cycle. It never cancels or reprices existing sell orders,
+and filled inventory continues through the normal sell-management path. A
+missing control file means normal automatic operation; an invalid control file
+causes a fail-safe buy hold.
+
+For local access, bind to `127.0.0.1` and use an SSH tunnel. LAN binding requires
+`RANGE_GRID_CONTROL_TOKEN`:
+
+```env
+RANGE_GRID_CONTROL_FILE=range_grid_control_state.json
+RANGE_GRID_CONTROL_AUDIT_FILE=range_grid_control_audit.jsonl
+RANGE_GRID_CONTROL_HOST=0.0.0.0
+RANGE_GRID_CONTROL_PORT=8787
+RANGE_GRID_CONTROL_TOKEN=<strong-random-token>
+RANGE_GRID_CONTROL_MARKET_CACHE_SECONDS=60
+```
+
 ### State file
 
 The bot persists state in JSON so it can survive restarts without forgetting working orders.

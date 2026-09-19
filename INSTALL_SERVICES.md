@@ -242,6 +242,60 @@ journalctl -u kraken-range-grid.service -f
 tail -f /home/<user>/tradingbot/krakenbot/range_grid_trade_log.jsonl
 ```
 
+### Install The Range Grid Control Plane
+
+Add these values to the same `.env` used by the range-grid service. For direct
+LAN access, use a long random token and restrict port 8787 to your trusted LAN
+with the host firewall. Keep `127.0.0.1` instead if you prefer an SSH tunnel.
+
+```env
+RANGE_GRID_CONTROL_FILE=range_grid_control_state.json
+RANGE_GRID_CONTROL_AUDIT_FILE=range_grid_control_audit.jsonl
+RANGE_GRID_CONTROL_HOST=0.0.0.0
+RANGE_GRID_CONTROL_PORT=8787
+RANGE_GRID_CONTROL_TOKEN=<strong-random-token>
+RANGE_GRID_CONTROL_MARKET_CACHE_SECONDS=60
+```
+
+Create `/etc/systemd/system/kraken-range-grid-control.service`:
+
+```ini
+[Unit]
+Description=Kraken Range Grid HTTP Control Plane
+After=network-online.target kraken-range-grid.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<user>
+Group=<user>
+WorkingDirectory=/home/<user>/tradingbot/krakenbot
+EnvironmentFile=/home/<user>/tradingbot/krakenbot/.env
+ExecStart=/home/<user>/tradingbot/krakenbot/.venv/bin/python /home/<user>/tradingbot/krakenbot/range_grid_control_plane.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable it and open the page at `http://<bot-host>:8787/`:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now kraken-range-grid-control.service
+sudo systemctl status kraken-range-grid-control.service
+journalctl -u kraken-range-grid-control.service -f
+```
+
+The page asks for the token on its first API request and keeps it only in the
+browser tab's session storage. HOLD blocks new buys and requests cancellation
+of pending buys; it leaves existing sell orders and filled inventory alone.
+Manual target mode replaces the strategy's automatic buy candidates until it
+is disabled.
+
 ## 4. Install The Sentiment Executor Service
 
 Create `/etc/systemd/system/kraken-sentiment.service`:
@@ -424,6 +478,7 @@ Stop a bot:
 
 ```bash
 sudo systemctl stop kraken-range-grid.service
+sudo systemctl stop kraken-range-grid-control.service
 sudo systemctl stop kraken-sentiment.service
 sudo systemctl stop kraken-llm-target.service
 sudo systemctl stop kraken-status-display.service
@@ -433,6 +488,7 @@ Restart after changing `.env` or config:
 
 ```bash
 sudo systemctl restart kraken-range-grid.service
+sudo systemctl restart kraken-range-grid-control.service
 sudo systemctl restart kraken-sentiment.service
 sudo systemctl restart kraken-llm-target.service
 sudo systemctl restart kraken-status-display.service
@@ -442,6 +498,7 @@ Disable a bot from starting on boot:
 
 ```bash
 sudo systemctl disable kraken-range-grid.service
+sudo systemctl disable kraken-range-grid-control.service
 sudo systemctl disable kraken-sentiment.service
 sudo systemctl disable kraken-llm-target.service
 sudo systemctl disable kraken-status-display.service
@@ -451,6 +508,7 @@ View recent service logs:
 
 ```bash
 journalctl -u kraken-range-grid.service -n 100 --no-pager
+journalctl -u kraken-range-grid-control.service -n 100 --no-pager
 journalctl -u kraken-sentiment.service -n 100 --no-pager
 journalctl -u kraken-llm-target.service -n 100 --no-pager
 journalctl -u kraken-status-display.service -n 100 --no-pager
@@ -466,6 +524,9 @@ Before enabling live trading:
 - Confirm only one service is controlling the same strategy state file.
 - Confirm `LLM_SIGNAL_URL` and `PRICE_LOG_URL` are reachable from the server.
 - Confirm Kraken API keys have only the permissions the bot needs.
+- If the control plane binds beyond localhost, set a strong control token and
+  restrict its port to a trusted network. The control plane never needs Kraken
+  API credentials in the browser.
 - For the LLM target bot, confirm `LLM_TARGET_STRATEGY_PROFILE` is
   `llm_target_strategy_weather_dryrun.json` before the first service run.
 - Before switching the LLM target bot live, confirm the logs contain weather

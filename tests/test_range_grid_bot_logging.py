@@ -267,6 +267,37 @@ class RangeGridBotLoggingTests(unittest.TestCase):
 
         self.assertIs(profile["sell_repricing_enabled"], False)
 
+    def test_operator_control_is_loaded_and_reconciled_in_main_loop(self):
+        tree = self._bot_tree()
+        main = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "main"
+        )
+        called_functions = {
+            node.func.id
+            for node in ast.walk(main)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+
+        self.assertIn("load_control_state_fail_safe", called_functions)
+        self.assertIn("reconcile_operator_control_open_buys", called_functions)
+        self.assertIn("active_buy_targets", called_functions)
+        self.assertIn("operator_grid_slot", called_functions)
+
+    def test_operator_targets_lock_exact_profit_without_fear_greed_multiplier(self):
+        tree = self._bot_tree()
+        string_values = {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+
+        self.assertIn("operator_target_exact", string_values)
+        self.assertIn("operator_target_above_market", string_values)
+        self.assertIn("operator_buy_hold", string_values)
+        self.assertIn("operator_controlled", string_values)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,6 +35,13 @@ from range_grid_guardrails import (
     summarize_sell_backlog,
     validate_strategy_config,
 )
+from range_grid_control import (
+    active_buy_targets,
+    control_status,
+    load_control_state_fail_safe,
+    operator_buy_cancel_reason,
+    operator_grid_slot,
+)
 from range_grid_effective_strategy import resolve_effective_strategy
 from range_grid_entry_placement import (
     entry_grid_levels,
@@ -131,6 +138,10 @@ ALERT_LOG_FILE = (
     os.getenv("RANGE_GRID_ALERT_LOG_FILE")
     or os.getenv("BOT_ALERT_LOG_FILE")
     or "range_grid_alerts.jsonl"
+)
+CONTROL_FILE = os.getenv(
+    "RANGE_GRID_CONTROL_FILE",
+    "range_grid_control_state.json",
 )
 ANCHOR_STRATEGY_ROUTER_FILE = (
     os.getenv("RANGE_GRID_ANCHOR_ROUTER_FILE")
@@ -4255,6 +4266,83 @@ def cancel_order(txid):
     return safe_kraken_private("CANCEL_ORDER", "/0/private/CancelOrder", {"txid": txid})
 
 
+def reconcile_operator_control_open_buys(
+    operator_control,
+    order_details_map,
+    cycle_id,
+    actions,
+):
+    """Cancel pending buys that conflict with an explicit operator mode.
+
+    A partially-filled buy may have its unfilled remainder canceled; the normal
+    fill path still preserves the executed volume and creates its sell order.
+    """
+    if paper_trading_enabled:
+        return
+
+    state_changed = False
+    for level, order in list(state["open_buy_orders"].items()):
+        txid = order.get("txid")
+        order_details = order_details_map.get(txid)
+        if not isinstance(order_details, dict):
+            continue
+        if order_details.get("status") not in ("open", "pending"):
+            continue
+
+        grid_slot = str(order.get("grid_slot") or "")
+        cancel_reason = operator_buy_cancel_reason(
+            operator_control,
+            order,
+            price_decimals=PRICE_DECIMALS,
+        )
+
+        if cancel_reason is None or order.get("control_cancel_requested_at"):
+            continue
+
+        response = cancel_order(txid)
+        if not response or response.get("error"):
+            log_event(
+                "CONTROL_BUY_CANCEL_FAILED",
+                cycle_id=cycle_id,
+                txid=txid,
+                level=level,
+                grid_slot=grid_slot,
+                reason=cancel_reason,
+                error=None if not response else response.get("error"),
+            )
+            continue
+
+        order["control_cancel_requested_at"] = cycle_id
+        order["control_cancel_reason"] = cancel_reason
+        state_changed = True
+        actions.append("control_buy_cancel_requested")
+        log_and_console(
+            "CONTROL_BUY_CANCEL_REQUESTED",
+            message=f"Canceling pending BUY for {grid_slot or level}",
+            cycle_id=cycle_id,
+            txid=txid,
+            level=level,
+            price=order.get("price"),
+            grid_slot=grid_slot,
+            buy_source=order.get("buy_source"),
+            reason=cancel_reason,
+        )
+        log_trade_activity(
+            "CONTROL_BUY_CANCEL_REQUESTED",
+            mode="live",
+            cycle_id=cycle_id,
+            txid=txid,
+            level=level,
+            price=order.get("price"),
+            grid_slot=grid_slot,
+            buy_source=order.get("buy_source"),
+            reason=cancel_reason,
+        )
+
+    if state_changed:
+        save_state(state)
+
+
 def amend_order(txid, price):
     return safe_kraken_private(
         "AMEND_ORDER",
@@ -6292,6 +6380,8 @@ def maybe_periodic_state_reconcile(now, cycle_id):
 
 def main():
     instance_identity = acquire_instance_lock()
+    startup_operator_control = load_control_state_fail_safe(CONTROL_FILE)
+    startup_operator_status = control_status(startup_operator_control)
     log_and_console(
         "BOT_START",
         message="Range Grid Average bot starting",
@@ -6379,6 +6469,8 @@ def main():
         pending_order_intent_count=len(state.get("pending_order_intents", {})),
         status_file=os.path.abspath(STATUS_FILE),
         alert_log_file=os.path.abspath(ALERT_LOG_FILE),
+        control_file=os.path.abspath(CONTROL_FILE),
+        operator_control=startup_operator_status,
         activity_log_file=os.path.abspath(ACTIVITY_LOG_FILE),
         activity_log_rotate_daily=ACTIVITY_LOG_ROTATE_DAILY,
         activity_log_rotate_max_bytes=(
@@ -6663,6 +6755,31 @@ def main():
             deduped_candidates = []
             cycle_candidate_skip_reason_counts = {}
             active_strategy_modes = list(strategy_modes)
+            operator_control = load_control_state_fail_safe(CONTROL_FILE)
+            operator_control_snapshot = control_status(operator_control)
+            operator_control_revision = operator_control_snapshot["revision"]
+            operator_control_error = operator_control_snapshot.get("load_error")
+            if (
+                state.get("last_operator_control_revision")
+                != operator_control_revision
+                or state.get("last_operator_control_error")
+                != operator_control_error
+            ):
+                log_and_console(
+                    "CONTROL_STATE_APPLIED",
+                    message=(
+                        "Operator control state applied"
+                        if not operator_control_error
+                        else "Operator control file failed validation; buying held"
+                    ),
+                    cycle_id=cycle_id,
+                    operator_control=operator_control_snapshot,
+                )
+                state["last_operator_control_revision"] = (
+                    operator_control_revision
+                )
+                state["last_operator_control_error"] = operator_control_error
+                save_state(state)
 
             # Periodically resync tracked state against Kraken as source of truth.
             if maybe_periodic_state_reconcile(now, cycle_id):
@@ -6886,7 +7003,14 @@ def main():
                     True,
                 ),
             )
-            if runtime_block_reason:
+            operator_block_reason = None
+            if operator_control_error:
+                operator_block_reason = "operator_control_error"
+            elif operator_control.get("buying_paused"):
+                operator_block_reason = "operator_buy_hold"
+            if operator_block_reason:
+                runtime_block_reason = operator_block_reason
+            if runtime_block_reason and not operator_block_reason:
                 emit_alert(
                     "buy_guardrail_blocked",
                     "warning",
@@ -6918,14 +7042,32 @@ def main():
             range_signal_gates_allow = (
                 llm_signal_gates_allow or range_fallback_active
             )
+            operator_manual_targets = active_buy_targets(operator_control)
+            operator_manual_mode = bool(
+                operator_control.get("manual_targets_enabled")
+            )
+            operator_manual_buy_available = bool(
+                operator_manual_mode
+                and operator_manual_targets
+                and not runtime_block_reason
+            )
             any_buys_allowed = (
-                (llm_buys_allowed and llm_signal_gates_allow)
-                or (range_buys_allowed and range_signal_gates_allow)
-                or (
-                    range_source_policy_bypass_available
-                    and range_signal_gates_allow
+                operator_manual_buy_available
+                if operator_manual_mode
+                else (
+                    (llm_buys_allowed and llm_signal_gates_allow)
+                    or (range_buys_allowed and range_signal_gates_allow)
+                    or (
+                        range_source_policy_bypass_available
+                        and range_signal_gates_allow
+                    )
                 )
             )
+            if operator_manual_mode:
+                llm_buys_allowed = False
+                range_buys_allowed = False
+                base_any_buys_allowed = False
+                range_source_policy_bypass_available = False
             if runtime_block_reason:
                 llm_buys_allowed = False
                 range_buys_allowed = False
@@ -7118,6 +7260,12 @@ def main():
                     order.get("txid")
                     for order in state["open_buy_orders"].values()
                 ]
+            )
+            reconcile_operator_control_open_buys(
+                operator_control,
+                order_details_map,
+                cycle_id,
+                actions,
             )
 
             # SELL EXIT CHECK
@@ -8026,24 +8174,39 @@ def main():
                     order.get("locked_sell_profit_target_pct")
                 )
                 if target_profit_pct is None:
-                    base_target_profit_pct = effective_sell_profit_target(
-                        age_minutes=0,
-                        base_profit_target=sell_pct_override,
-                        buy_source=buy_source,
-                        regime=regime,
-                    )
-                    fear_greed_target = fear_greed_profit_target_adjustment(
-                        order.get("fear_greed_profit_target_policy")
-                        or strategy_config,
-                        buy_source=buy_source,
-                        fear_greed_index=sentiment_payload.get(
-                            "fear_greed_index"
-                        ),
-                        base_profit_target_pct=base_target_profit_pct,
-                    )
-                    target_profit_pct = fear_greed_target[
-                        "effective_profit_target_pct"
-                    ]
+                    if order.get("operator_controlled"):
+                        base_target_profit_pct = optional_float(
+                            sell_pct_override
+                        )
+                        if base_target_profit_pct is None:
+                            base_target_profit_pct = profit_target_pct
+                        target_profit_pct = base_target_profit_pct
+                        fear_greed_target = {
+                            "fear_greed_index": sentiment_payload.get(
+                                "fear_greed_index"
+                            ),
+                            "multiplier": 1.0,
+                            "reason": "operator_target_exact",
+                        }
+                    else:
+                        base_target_profit_pct = effective_sell_profit_target(
+                            age_minutes=0,
+                            base_profit_target=sell_pct_override,
+                            buy_source=buy_source,
+                            regime=regime,
+                        )
+                        fear_greed_target = fear_greed_profit_target_adjustment(
+                            order.get("fear_greed_profit_target_policy")
+                            or strategy_config,
+                            buy_source=buy_source,
+                            fear_greed_index=sentiment_payload.get(
+                                "fear_greed_index"
+                            ),
+                            base_profit_target_pct=base_target_profit_pct,
+                        )
+                        target_profit_pct = fear_greed_target[
+                            "effective_profit_target_pct"
+                        ]
                     order.update({
                         "locked_sell_profit_target_pct": target_profit_pct,
                         "base_sell_profit_target_pct": base_target_profit_pct,
@@ -8267,6 +8430,13 @@ def main():
                         "reason"
                     ],
                     "buy_source": buy_source,
+                    "operator_controlled": bool(
+                        order.get("operator_controlled")
+                    ),
+                    "control_target_id": order.get("control_target_id"),
+                    "control_target_label": order.get(
+                        "control_target_label"
+                    ),
                     "trade_id": order.get("trade_id") or order.get("txid"),
                     "buy_cost": order.get("buy_cost"),
                     "buy_fee": order.get("buy_fee"),
@@ -8510,8 +8680,9 @@ def main():
             )
 
             # BUY CANDIDATES
-            if (
-                range_signal_gates_allow
+            automatic_candidate_ready = (
+                not operator_manual_mode
+                and range_signal_gates_allow
                 and (
                     effective_position_size_pct > 0
                     or resting_grid_source_configured
@@ -8522,9 +8693,34 @@ def main():
                     base_any_buys_allowed
                     or range_source_policy_bypass_available
                 )
-            ):
+            )
+            if operator_manual_buy_available or automatic_candidate_ready:
                 candidate_levels = []
-                if llm_buy_allowed:
+                if operator_manual_buy_available:
+                    for target in operator_manual_targets:
+                        candidate_levels.append({
+                            "level": target["buy_price"],
+                            "grid_slot": operator_grid_slot(target["id"]),
+                            "grid_slot_depth": 1,
+                            "sell_pct_override": target[
+                                "profit_target_pct"
+                            ],
+                            "buy_source": "range_low",
+                            "anchor_router_anchor": None,
+                            "anchor_router_route": None,
+                            "anchor_router_block_reason": None,
+                            "effective_strategy": (
+                                base_effective_strategy_for_source(
+                                    "range_low"
+                                )
+                            ),
+                            "route_strategy_config": strategy_config,
+                            "route_entry_step_pct": entry_step_pct,
+                            "operator_controlled": True,
+                            "control_target_id": target["id"],
+                            "control_target_label": target["label"],
+                        })
+                elif llm_buy_allowed:
                     candidate_levels = [
                         {
                             "level": llm_target["buy_price"],
@@ -8760,6 +8956,13 @@ def main():
                     grid_slot = candidate.get("grid_slot")
                     active_sell_pct_override = candidate["sell_pct_override"]
                     buy_source = candidate["buy_source"]
+                    operator_controlled = bool(
+                        candidate.get("operator_controlled")
+                    )
+                    control_target_id = candidate.get("control_target_id")
+                    control_target_label = candidate.get(
+                        "control_target_label"
+                    )
                     effective_strategy = candidate.get(
                         "effective_strategy"
                     ) or base_effective_strategy_for_source(buy_source)
@@ -8769,10 +8972,14 @@ def main():
                     route_block_reason = candidate.get(
                         "anchor_router_block_reason"
                     )
-                    candidate_entry_placement_mode = entry_placement_mode(
-                        route_config,
-                        buy_source,
-                        strategy_config,
+                    candidate_entry_placement_mode = (
+                        "resting_grid"
+                        if operator_controlled
+                        else entry_placement_mode(
+                            route_config,
+                            buy_source,
+                            strategy_config,
+                        )
                     )
                     resting_grid_entry = (
                         candidate_entry_placement_mode == "resting_grid"
@@ -8891,25 +9098,49 @@ def main():
                             strategy_config
                         )
                     )
-                    entry_placement = entry_price_placement_decision(
-                        price,
-                        level,
-                        route_config,
-                        buy_source,
-                        fallback_config=strategy_config,
-                        triggered_tolerance_pct=(
-                            momentum_entry_tolerance_pct
-                        ),
-                    )
                     entry_anchor_level = level
-                    entry_order_placement = entry_order_price_decision(
-                        price,
-                        entry_anchor_level,
-                        route_config,
-                        buy_source,
-                        grid_depth=candidate.get("grid_slot_depth", 1),
-                        fallback_config=strategy_config,
-                    )
+                    if operator_controlled:
+                        operator_above_level_pct = max(
+                            0.0,
+                            (price / level) - 1.0,
+                        )
+                        entry_placement = {
+                            "allowed": price >= level,
+                            "reason": (
+                                "operator_target"
+                                if price >= level
+                                else "operator_target_above_market"
+                            ),
+                            "max_above_level_pct": operator_above_level_pct,
+                            "above_level_pct": operator_above_level_pct,
+                        }
+                        entry_order_placement = {
+                            "anchor_level": entry_anchor_level,
+                            "order_price": entry_anchor_level,
+                            "near_touch_enabled": False,
+                            "near_touch_applied": False,
+                            "near_touch_offset_pct": None,
+                            "post_only": False,
+                        }
+                    else:
+                        entry_placement = entry_price_placement_decision(
+                            price,
+                            level,
+                            route_config,
+                            buy_source,
+                            fallback_config=strategy_config,
+                            triggered_tolerance_pct=(
+                                momentum_entry_tolerance_pct
+                            ),
+                        )
+                        entry_order_placement = entry_order_price_decision(
+                            price,
+                            entry_anchor_level,
+                            route_config,
+                            buy_source,
+                            grid_depth=candidate.get("grid_slot_depth", 1),
+                            fallback_config=strategy_config,
+                        )
                     if (
                         entry_placement["allowed"]
                         and entry_order_placement["near_touch_applied"]
@@ -8994,6 +9225,9 @@ def main():
                         source_policy_size_multiplier
                     )
                     source_policy_log_fields = {
+                        "operator_controlled": operator_controlled,
+                        "control_target_id": control_target_id,
+                        "control_target_label": control_target_label,
                         "source_entry_policy_enabled": source_policy.get(
                             "policy_enabled",
                             False,
@@ -9192,7 +9426,10 @@ def main():
                         and not weather_entry_guard["allowed"]
                     ):
                         skip_reason = weather_entry_guard["reason"]
-                    elif buy_cooldown["remaining_minutes"] > 0:
+                    elif (
+                        not operator_controlled
+                        and buy_cooldown["remaining_minutes"] > 0
+                    ):
                         skip_reason = "buy_cooldown"
                     elif (
                         not resting_grid_entry
@@ -9223,6 +9460,7 @@ def main():
                         )
                     elif (
                         buy_source != "llm_target"
+                        and not operator_controlled
                         and not range_signal_gates_allow
                     ):
                         skip_reason = (
@@ -9244,6 +9482,7 @@ def main():
                         )
                     elif (
                         buy_source != "llm_target"
+                        and not operator_controlled
                         and not range_core_buys_allowed
                         and not source_policy["bypass_sentiment_gate"]
                     ):
@@ -10327,7 +10566,11 @@ def main():
                         )
                         reserved_buy_usd += level * volume
                         available_usd = max(0.0, usd - reserved_buy_usd)
-                        record_buy_cooldown_timestamp(buy_source, cycle_id)
+                        if not operator_controlled:
+                            record_buy_cooldown_timestamp(
+                                buy_source,
+                                cycle_id,
+                            )
                         if minimum_floor.get("applied"):
                             record_minimum_order_floor_timestamp(
                                 buy_source,
@@ -10378,9 +10621,14 @@ def main():
                         "placed_at": cycle_id,
                         "sell_pct_override": active_sell_pct_override,
                         "fear_greed_profit_target_policy": (
-                            fear_greed_profit_target_policy(route_config)
+                            fear_greed_profit_target_policy(
+                                {} if operator_controlled else route_config
+                            )
                         ),
                         "buy_source": buy_source,
+                        "operator_controlled": operator_controlled,
+                        "control_target_id": control_target_id,
+                        "control_target_label": control_target_label,
                         "source_entry_authority": source_policy.get("authority"),
                         "source_entry_policy_reason": source_policy.get("reason"),
                         "source_entry_policy_size_multiplier": (
@@ -10527,7 +10775,11 @@ def main():
                         high_anchor_cooldown_remaining = (
                             high_anchor_buy_cooldown_minutes
                         )
-                    record_buy_cooldown_timestamp(buy_source, cycle_id)
+                    if not operator_controlled:
+                        record_buy_cooldown_timestamp(
+                            buy_source,
+                            cycle_id,
+                        )
                     if minimum_floor.get("applied"):
                         record_minimum_order_floor_timestamp(
                             buy_source,
@@ -10893,6 +11145,7 @@ def main():
                         high_anchor_enabled=effective_high_anchor_enabled,
                         weather_high_anchor_allowed=weather_high_anchor_allowed,
                         runtime_block_reason=runtime_block_reason,
+                        operator_control=operator_control_snapshot,
                         realized_pnl_today=round(realized_pnl_today, 8),
                         sell_backlog_count=sell_backlog["count"],
                         sell_backlog_effective_count=round(
@@ -11030,6 +11283,7 @@ def main():
                 sentiment_control_mode=sentiment_control_mode,
                 source_guard_allows_trading=source_guard_allows_trading,
                 runtime_block_reason=runtime_block_reason,
+                operator_control=operator_control_snapshot,
                 activity_summary_written=activity_summary_written,
                 realized_pnl_today=round(realized_pnl_today, 8),
                 sell_backlog_count=sell_backlog["count"],
@@ -11109,25 +11363,19 @@ def main():
                 grid_anchor=grid_anchor,
                 configured_strategy_modes=configured_strategy_modes,
                 buy_source=(
-                    "llm_target"
-                    if llm_buy_allowed
-                    else ",".join(active_strategy_modes) or "disabled"
+                    "operator_targets"
+                    if operator_manual_mode
+                    else (
+                        "llm_target"
+                        if llm_buy_allowed
+                        else ",".join(active_strategy_modes) or "disabled"
+                    )
                 ),
                 strategy_modes=active_strategy_modes,
-                grid_levels=(
-                    [
-                        round(candidate["level"], PRICE_DECIMALS)
-                        for candidate in deduped_candidates
-                    ]
-                    if (
-                        range_signal_gates_allow
-                        and base_any_buys_allowed
-                        and active_strategy_modes
-                        and low
-                        and high
-                    )
-                    else []
-                ),
+                grid_levels=[
+                    round(candidate["level"], PRICE_DECIMALS)
+                    for candidate in deduped_candidates
+                ],
                 high_anchor_order_count=cycle_high_anchor_exposure["raw_count"],
                 high_anchor_effective_order_count=round(
                     cycle_high_anchor_exposure["effective_count"],
@@ -11214,20 +11462,10 @@ def main():
                 "range_high": high,
                 "range_mean": mean,
                 "range_median": median,
-                "grid_levels": (
-                    [
-                        round(candidate["level"], PRICE_DECIMALS)
-                        for candidate in deduped_candidates
-                    ]
-                    if (
-                        range_signal_gates_allow
-                        and base_any_buys_allowed
-                        and active_strategy_modes
-                        and low
-                        and high
-                    )
-                    else []
-                ),
+                "grid_levels": [
+                    round(candidate["level"], PRICE_DECIMALS)
+                    for candidate in deduped_candidates
+                ],
                 "effective_entry_step_pct": current_entry_step_pct,
                 "inventory_pressure_usage_ratio": (
                     inventory_pressure_usage_ratio
@@ -11240,6 +11478,7 @@ def main():
                 "signal_status": signal_status,
                 "action_recommendation": action_recommendation,
                 "runtime_block_reason": runtime_block_reason,
+                "operator_control": operator_control_snapshot,
                 "effective_position_size_pct": effective_position_size_pct,
                 "effective_max_inventory_usd": effective_max_inventory_usd,
                 "effective_max_open_sell_orders": (
