@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -70,6 +70,28 @@ KRAKEN_OHLC_ENDPOINT = os.getenv(
 )
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL", "").strip()
 SIGNAL_ASSET_ID = os.getenv("SIGNAL_ASSET_ID", "BTC").strip().upper() or "BTC"
+
+
+def configured_backtest_source():
+    explicit = (
+        os.getenv("RANGE_GRID_CONTROL_BACKTEST_URL")
+        or os.getenv("RANGE_GRID_BACKTEST_URL")
+        or os.getenv("RANGE_GRID_BACKTEST_OUTPUT_FILE")
+        or ""
+    ).strip()
+    if explicit:
+        return explicit
+    router_source = os.getenv("RANGE_GRID_ANCHOR_ROUTER_FILE", "").strip()
+    if router_source.startswith(("http://", "https://")):
+        return urljoin(router_source, "range_grid_backtest.json")
+    return ""
+
+
+CONTROL_BACKTEST_SOURCE = configured_backtest_source()
+CONTROL_BACKTEST_CACHE_SECONDS = max(
+    30,
+    int(os.getenv("RANGE_GRID_CONTROL_BACKTEST_CACHE_SECONDS", "300")),
+)
 HTML_FILE = Path(__file__).with_name("range_grid_control_plane.html")
 
 
@@ -417,6 +439,223 @@ class SentimentData:
             )
 
 
+BACKTEST_STRATEGY_FIELDS = (
+    "strategy_label",
+    "strategy_file",
+    "practical_score",
+    "range_window_hours",
+    "grid_anchor",
+    "operating_mode",
+    "sentiment_control_mode",
+    "raw_candidates",
+    "approved_candidates",
+    "candidate_efficiency",
+    "potential_take_profit_reached_rate",
+    "potential_avg_end_return_pct",
+    "potential_avg_max_runup_pct",
+    "potential_avg_max_drawdown_pct",
+    "simulation_filled_entries",
+    "simulation_closed_positions",
+    "simulation_open_positions",
+    "simulation_net_return_pct",
+    "simulation_max_equity_drawdown_pct",
+)
+
+
+def _selected_fields(payload, fields):
+    if not isinstance(payload, dict):
+        return {}
+    return {field: payload.get(field) for field in fields if field in payload}
+
+
+def unavailable_backtest_snapshot(source, error=None):
+    return {
+        "available": False,
+        "captured_at": utc_now_iso(),
+        "timestamp": None,
+        "since": None,
+        "window_hours": None,
+        "source": source or None,
+        "stale": True,
+        "error": error or "range-grid backtest source is not configured",
+        "snapshot_count": 0,
+        "trade_event_count": 0,
+        "strategy_count": 0,
+        "top_summary": {},
+        "replay": {},
+        "actual": {},
+        "missed": {},
+        "watchlist": {"status": "unavailable", "items": []},
+        "strategies": [],
+    }
+
+
+def build_backtest_snapshot(report, *, source, captured_at, fetch_error=None):
+    comparison = report.get("strategy_comparison")
+    comparison = comparison if isinstance(comparison, dict) else {}
+    raw_rows = comparison.get("rows")
+    raw_rows = raw_rows if isinstance(raw_rows, list) else []
+    strategies = [
+        _selected_fields(row, BACKTEST_STRATEGY_FIELDS)
+        for row in raw_rows
+        if isinstance(row, dict)
+    ]
+
+    def practical_score(row):
+        try:
+            return float(row.get("practical_score"))
+        except (TypeError, ValueError):
+            return float("-inf")
+
+    strategies.sort(key=practical_score, reverse=True)
+    timestamp = report.get("timestamp")
+    since = report.get("since")
+    timestamp_dt = parse_iso8601(timestamp)
+    since_dt = parse_iso8601(since)
+    window_hours = None
+    if timestamp_dt is not None and since_dt is not None:
+        window_hours = round(
+            (timestamp_dt - since_dt).total_seconds() / 3600.0,
+            2,
+        )
+
+    replay = report.get("replay")
+    replay = replay if isinstance(replay, dict) else {}
+    replay_summary = replay.get("summary")
+    replay_summary = replay_summary if isinstance(replay_summary, dict) else {}
+    actual = report.get("actual_live")
+    actual = actual if isinstance(actual, dict) else {}
+    missed = report.get("missed_opportunities")
+    missed = missed if isinstance(missed, dict) else {}
+    watchlist = report.get("watchlist")
+    watchlist = watchlist if isinstance(watchlist, dict) else {}
+    watch_items = watchlist.get("items")
+    watch_items = watch_items if isinstance(watch_items, list) else []
+
+    return {
+        "available": True,
+        "captured_at": captured_at,
+        "timestamp": timestamp,
+        "since": since,
+        "window_hours": window_hours,
+        "source": source,
+        "stale": bool(fetch_error),
+        "error": fetch_error,
+        "snapshot_count": report.get("snapshot_count", 0),
+        "trade_event_count": report.get("trade_event_count", 0),
+        "strategy_count": len(strategies),
+        "top_summary": _selected_fields(report.get("top_summary"), (
+            "replay_scope",
+            "approved_candidates",
+            "raw_candidates",
+            "actual_buy_orders_placed",
+            "approved_but_not_placed",
+            "placement_rate_vs_approved",
+            "actual_buy_orders_filled",
+            "actual_sell_orders_filled",
+            "actual_realized_estimated_net_pnl",
+            "notes",
+        )),
+        "replay": _selected_fields(replay_summary, (
+            "raw_candidates",
+            "approved_candidates",
+            "hold_snapshots",
+            "candidate_counts_by_source",
+            "approved_counts_by_source",
+            "blocked_reason_counts",
+        )),
+        "actual": _selected_fields(actual, (
+            "buy_orders_placed",
+            "buy_orders_filled",
+            "sell_orders_placed",
+            "sell_orders_filled",
+            "order_rejected",
+            "realized_gross_pnl",
+            "realized_estimated_net_pnl",
+            "average_buy_notional_usd",
+        )),
+        "missed": _selected_fields(missed, (
+            "approved_but_not_placed",
+            "placement_rate_vs_approved",
+            "approved_without_later_buy",
+            "missed_by_source",
+            "missed_reason_counts",
+        )),
+        "watchlist": {
+            "status": watchlist.get("status") or "unknown",
+            "items": [
+                _selected_fields(item, ("severity", "code", "message"))
+                for item in watch_items[:20]
+                if isinstance(item, dict)
+            ],
+        },
+        "strategies": strategies[:100],
+    }
+
+
+class BacktestData:
+    def __init__(
+        self,
+        session=None,
+        source=CONTROL_BACKTEST_SOURCE,
+        cache_seconds=CONTROL_BACKTEST_CACHE_SECONDS,
+    ):
+        self.session = session or requests.Session()
+        self.source = str(source or "").strip()
+        self.cache_seconds = cache_seconds
+        self._lock = threading.Lock()
+        self._cached_at = 0.0
+        self._captured_at = None
+        self._cached_report = None
+
+    def _load_report(self):
+        if self.source.startswith(("http://", "https://")):
+            response = self.session.get(
+                self.source,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            return response.json()
+        with open(os.path.expanduser(self.source), encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def snapshot(self, force=False):
+        if not self.source:
+            return unavailable_backtest_snapshot(self.source)
+        with self._lock:
+            now_monotonic = time.monotonic()
+            should_fetch = (
+                force
+                or self._cached_report is None
+                or now_monotonic - self._cached_at >= self.cache_seconds
+            )
+            fetch_error = None
+            if should_fetch:
+                try:
+                    report = self._load_report()
+                    if not isinstance(report, dict):
+                        raise RuntimeError(
+                            "backtest response must be a JSON object"
+                        )
+                    self._cached_report = report
+                    self._captured_at = utc_now_iso()
+                    self._cached_at = now_monotonic
+                except Exception as exc:
+                    fetch_error = str(exc)
+
+            if self._cached_report is None:
+                return unavailable_backtest_snapshot(
+                    self.source,
+                    fetch_error,
+                )
+            return build_backtest_snapshot(
+                self._cached_report,
+                source=self.source,
+                captured_at=self._captured_at,
+                fetch_error=fetch_error,
+            )
+
+
 def host_is_loopback(host):
     normalized = str(host or "").strip().lower()
     if normalized in {"localhost", "ip6-localhost"}:
@@ -435,7 +674,10 @@ def append_audit_event(event):
         handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
 
 
-def build_status_payload(market_data, sentiment_data=None):
+def build_status_payload(
+    market_data,
+    sentiment_data=None,
+):
     control = load_control_state_fail_safe(CONTROL_FILE)
     bot_status = read_json_object(STATUS_FILE)
     bot_state = read_json_object(STATE_FILE)
@@ -484,11 +726,13 @@ class ControlPlaneServer(ThreadingHTTPServer):
         token,
         market_data,
         sentiment_data=None,
+        backtest_data=None,
     ):
         super().__init__(address, handler)
         self.control_token = token
         self.market_data = market_data
         self.sentiment_data = sentiment_data or SentimentData()
+        self.backtest_data = backtest_data or BacktestData()
         self.control_write_lock = threading.Lock()
 
 
@@ -589,6 +833,11 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 ),
             )
             return
+        if path == "/api/backtest":
+            if not self._require_auth():
+                return
+            self._send_json(200, self.server.backtest_data.snapshot())
+            return
         self._send_json(404, {"error": "not found"})
 
     def do_POST(self):
@@ -663,6 +912,7 @@ def main():
         token=CONTROL_TOKEN,
         market_data=KrakenMarketData(),
         sentiment_data=SentimentData(),
+        backtest_data=BacktestData(),
     )
     print(json.dumps({
         "status": "starting",

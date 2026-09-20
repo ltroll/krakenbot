@@ -1,3 +1,4 @@
+import os
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -191,6 +192,99 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertTrue(snapshot["stale"])
         self.assertIn("LLM_SIGNAL_URL", snapshot["error"])
 
+    def test_backtest_source_can_follow_anchor_router_location(self):
+        with patch.dict(os.environ, {
+            "RANGE_GRID_CONTROL_BACKTEST_URL": "",
+            "RANGE_GRID_BACKTEST_URL": "",
+            "RANGE_GRID_BACKTEST_OUTPUT_FILE": "",
+            "RANGE_GRID_ANCHOR_ROUTER_FILE": (
+                "http://backtest.test/bot/range_grid_anchor_winners.json"
+            ),
+        }):
+            source = control_plane.configured_backtest_source()
+
+        self.assertEqual(
+            source,
+            "http://backtest.test/bot/range_grid_backtest.json",
+        )
+
+    def test_backtest_snapshot_ranks_and_summarizes_latest_report(self):
+        report = {
+            "timestamp": "2026-09-19T18:00:00+00:00",
+            "since": "2026-09-12T18:00:00+00:00",
+            "snapshot_count": 168,
+            "trade_event_count": 42,
+            "replay": {
+                "summary": {
+                    "raw_candidates": 90,
+                    "approved_candidates": 8,
+                    "blocked_reason_counts": {"price_above_level": 22},
+                },
+            },
+            "actual_live": {
+                "buy_orders_placed": 5,
+                "buy_orders_filled": 4,
+                "sell_orders_filled": 3,
+                "realized_estimated_net_pnl": 12.34,
+            },
+            "missed_opportunities": {
+                "approved_but_not_placed": 3,
+                "placement_rate_vs_approved": 0.625,
+            },
+            "watchlist": {
+                "status": "attention",
+                "items": [{
+                    "severity": "warning",
+                    "code": "placement_gap",
+                    "message": "Three approved entries were not placed.",
+                }],
+            },
+            "strategy_comparison": {
+                "rows": [
+                    {
+                        "strategy_label": "runner_up",
+                        "practical_score": 0.4,
+                        "approved_candidates": 3,
+                        "potential_avg_end_return_pct": 0.2,
+                    },
+                    {
+                        "strategy_label": "winner",
+                        "practical_score": 1.2,
+                        "approved_candidates": 5,
+                        "simulation_net_return_pct": 0.8,
+                    },
+                ],
+            },
+        }
+        session = FakeSignalSession(report)
+        backtest = control_plane.BacktestData(
+            session=session,
+            source="http://backtest.test/bot/range_grid_backtest.json",
+            cache_seconds=300,
+        )
+
+        snapshot = backtest.snapshot()
+        cached_snapshot = backtest.snapshot()
+
+        self.assertTrue(snapshot["available"])
+        self.assertFalse(snapshot["stale"])
+        self.assertEqual(snapshot["window_hours"], 168.0)
+        self.assertEqual(snapshot["snapshot_count"], 168)
+        self.assertEqual(snapshot["actual"]["buy_orders_filled"], 4)
+        self.assertEqual(snapshot["missed"]["placement_rate_vs_approved"], 0.625)
+        self.assertEqual(snapshot["strategies"][0]["strategy_label"], "winner")
+        self.assertEqual(snapshot["strategies"][1]["strategy_label"], "runner_up")
+        self.assertEqual(snapshot["watchlist"]["items"][0]["code"], "placement_gap")
+        self.assertEqual(cached_snapshot["strategy_count"], 2)
+        self.assertEqual(session.calls, 1)
+
+    def test_backtest_snapshot_is_unavailable_without_source(self):
+        snapshot = control_plane.BacktestData(source="").snapshot()
+
+        self.assertFalse(snapshot["available"])
+        self.assertTrue(snapshot["stale"])
+        self.assertIn("not configured", snapshot["error"])
+
     def test_control_page_has_interactive_dated_chart_tooltip(self):
         html = control_plane.HTML_FILE.read_text(encoding="utf-8")
 
@@ -206,9 +300,14 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertIn("moving any one by $250 moves every level", html)
         self.assertIn('data-tab="trading"', html)
         self.assertIn('data-tab="weather"', html)
+        self.assertIn('data-tab="backtest"', html)
         self.assertIn('id="weatherView"', html)
+        self.assertIn('id="backtestView"', html)
         self.assertIn('id="weatherCondition"', html)
         self.assertIn("function renderSentiment", html)
+        self.assertIn("function renderBacktest", html)
+        self.assertIn("request('/api/backtest')", html)
+        self.assertIn("Ranked strategies", html)
         self.assertIn("Suggested bot tuning", html)
 
 

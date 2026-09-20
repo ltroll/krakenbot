@@ -137,8 +137,28 @@
     .tag { padding: 5px 8px; border-radius: 7px; background: rgba(77,214,199,.10); color: var(--cyan); font-size: .73rem; }
     .tag.warning { background: rgba(255,200,87,.10); color: var(--amber); }
     .empty-weather { color: var(--muted); line-height: 1.55; }
+    .backtest-hero { grid-column: span 4; padding: 21px; }
+    .backtest-summary { grid-column: span 8; padding: 18px; }
+    .backtest-half { grid-column: span 6; padding: 18px; }
+    .backtest-full { grid-column: 1 / -1; padding: 18px; }
+    .backtest-title { margin: 5px 0 9px; font-size: clamp(1.5rem, 3.5vw, 2.8rem); font-weight: 780; line-height: 1; letter-spacing: -.04em; }
+    .backtest-table-wrap { overflow: auto; max-height: 520px; border: 1px solid var(--line); border-radius: 11px; }
+    .backtest-table { width: 100%; min-width: 1120px; border-collapse: separate; border-spacing: 0; font-size: .77rem; }
+    .backtest-table th, .backtest-table td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+    .backtest-table th { position: sticky; top: 0; z-index: 1; color: var(--muted); background: #172734; text-transform: uppercase; letter-spacing: .055em; font-size: .65rem; }
+    .backtest-table th:first-child, .backtest-table td:first-child { position: sticky; left: 0; text-align: left; }
+    .backtest-table th:first-child { z-index: 2; }
+    .backtest-table td:first-child { max-width: 330px; overflow: hidden; text-overflow: ellipsis; background: var(--panel); font-weight: 720; }
+    .backtest-table tr:first-child td { background-color: rgba(77,214,199,.07); }
+    .backtest-table tr:last-child td { border-bottom: 0; }
+    .number-positive { color: var(--green); }
+    .number-negative { color: var(--red); }
+    .watch-list { display: grid; gap: 8px; }
+    .watch-item { padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
+    .watch-item strong { display: block; margin-bottom: 4px; font-size: .79rem; }
+    .watch-item span { color: var(--muted); font-size: .77rem; line-height: 1.45; }
     @media (max-width: 980px) {
-      .hero, .market, .chart-panel, .control-panel, .weather-hero, .weather-summary, .weather-half { grid-column: 1 / -1; }
+      .hero, .market, .chart-panel, .control-panel, .weather-hero, .weather-summary, .weather-half, .backtest-hero, .backtest-summary, .backtest-half { grid-column: 1 / -1; }
       .market-cards { grid-template-columns: repeat(2, 1fr); }
       .weather-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .target-head { display: none; }
@@ -170,6 +190,7 @@
     <nav class="tabs" aria-label="Control plane views">
       <button class="tab-button active" type="button" data-tab="trading" aria-selected="true" aria-controls="tradingView">Trading</button>
       <button class="tab-button" type="button" data-tab="weather" aria-selected="false" aria-controls="weatherView">Weather &amp; Sentiment</button>
+      <button class="tab-button" type="button" data-tab="backtest" aria-selected="false" aria-controls="backtestView">Backtest</button>
     </nav>
 
     <main id="tradingView" class="grid tab-view active" data-view="trading">
@@ -283,10 +304,52 @@
         <p class="weather-copy">These values explain the weather engine’s advice. This page does not apply or override them; the active strategy decides which weather inputs it uses.</p>
       </section>
     </main>
+
+    <main id="backtestView" class="grid tab-view" data-view="backtest">
+      <section class="panel backtest-hero">
+        <h2 class="panel-title">Latest range-grid backtest</h2>
+        <div id="backtestWindow" class="backtest-title">—</div>
+        <span id="backtestStatus" class="badge unavailable">Waiting</span>
+        <div class="weather-meta">
+          <span id="backtestTimestamp">Run —</span>
+          <span id="backtestSource">Source —</span>
+        </div>
+      </section>
+
+      <section class="panel backtest-summary">
+        <h2 class="panel-title">Run summary</h2>
+        <div id="backtestSummaryFacts" class="weather-facts"></div>
+        <p id="backtestSummaryNote" class="weather-copy">Waiting for the latest report.</p>
+      </section>
+
+      <section class="panel backtest-half">
+        <h2 class="panel-title">Top-ranked strategy</h2>
+        <div id="backtestTopFacts" class="weather-facts"></div>
+        <p id="backtestTopName" class="weather-copy">—</p>
+      </section>
+
+      <section class="panel backtest-half">
+        <h2 class="panel-title">Replay versus live</h2>
+        <div id="backtestLiveFacts" class="weather-facts"></div>
+      </section>
+
+      <section class="panel backtest-full">
+        <div class="control-head">
+          <h2 class="panel-title">Ranked strategies</h2>
+          <span id="backtestStrategyCount" class="subline">—</span>
+        </div>
+        <div id="backtestTable" class="backtest-table-wrap"><div class="empty-weather" style="padding:20px">Waiting for strategy results.</div></div>
+      </section>
+
+      <section class="panel backtest-full">
+        <h2 class="panel-title">Backtest watchlist</h2>
+        <div id="backtestWatchlist" class="watch-list"></div>
+      </section>
+    </main>
   </div>
 
   <script>
-    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '', chartCandles: [], chartHoverIndex: null, chartGeometry: null, priceLock: localStorage.getItem('rangeGridPriceLock') === 'true' };
+    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '', chartCandles: [], chartHoverIndex: null, chartGeometry: null, priceLock: localStorage.getItem('rangeGridPriceLock') === 'true', activeTab: 'trading', backtestLoadedAt: 0 };
     const money = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', maximumFractionDigits: 0}).format(value);
     const money2 = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', minimumFractionDigits: 2, maximumFractionDigits: 2}).format(value);
     const request = async (url, options = {}, retry = true) => {
@@ -435,6 +498,103 @@
         ['Risk posture', humanize(risk.risk_context_recommended_posture || risk.risk_adjusted_posture)],
         ['Weather present', booleanText(risk.weather_report_available)],
       ]);
+    }
+
+    const percentValue = value => value == null || !Number.isFinite(Number(value)) ? '—' : `${Number(value).toFixed(3)}%`;
+    const rateValue = value => value == null || !Number.isFinite(Number(value)) ? '—' : `${(Math.abs(Number(value)) <= 1 ? Number(value) * 100 : Number(value)).toFixed(1)}%`;
+    const integerValue = value => value == null || !Number.isFinite(Number(value)) ? '—' : String(Math.round(Number(value)));
+    const backtestNumberClass = value => Number(value) > 0 ? 'number-positive' : Number(value) < 0 ? 'number-negative' : '';
+
+    function renderBacktest(backtest) {
+      const available = backtest.available === true;
+      const replay = backtest.replay || {}, actual = backtest.actual || {};
+      const missed = backtest.missed || {}, topSummary = backtest.top_summary || {};
+      const strategies = Array.isArray(backtest.strategies) ? backtest.strategies : [];
+      const top = strategies[0] || {};
+      document.querySelector('#backtestWindow').textContent = backtest.window_hours == null
+        ? 'No report'
+        : `${Number(backtest.window_hours).toFixed(Number(backtest.window_hours) % 1 ? 1 : 0)}h window`;
+      const status = document.querySelector('#backtestStatus');
+      status.className = `badge ${!available || backtest.stale ? 'stale' : 'fresh'}`;
+      status.textContent = !available ? 'Unavailable' : backtest.stale ? 'Cached · source error' : 'Latest report';
+      document.querySelector('#backtestTimestamp').textContent = backtest.timestamp
+        ? `Run ${new Date(backtest.timestamp).toLocaleString()}`
+        : 'Run —';
+      document.querySelector('#backtestSource').textContent = backtest.source
+        ? `Source ${backtest.source}`
+        : 'Source —';
+
+      document.querySelector('#backtestSummaryFacts').innerHTML = factMarkup([
+        ['Snapshots', integerValue(backtest.snapshot_count)],
+        ['Trade events', integerValue(backtest.trade_event_count)],
+        ['Strategies tested', integerValue(backtest.strategy_count)],
+        ['Raw candidates', integerValue(replay.raw_candidates ?? topSummary.raw_candidates)],
+        ['Approved candidates', integerValue(replay.approved_candidates ?? topSummary.approved_candidates)],
+        ['Live buy fills', integerValue(actual.buy_orders_filled ?? topSummary.actual_buy_orders_filled)],
+        ['Live sell fills', integerValue(actual.sell_orders_filled ?? topSummary.actual_sell_orders_filled)],
+        ['Live net P&L', money2(actual.realized_estimated_net_pnl ?? topSummary.actual_realized_estimated_net_pnl)],
+      ]);
+      const notes = Array.isArray(topSummary.notes) ? topSummary.notes.join(' ') : '';
+      document.querySelector('#backtestSummaryNote').textContent = backtest.error
+        ? `Report source issue: ${backtest.error}`
+        : notes || 'Latest range-grid comparison loaded.';
+
+      document.querySelector('#backtestTopName').textContent = top.strategy_label
+        ? `${top.strategy_label}${top.strategy_file ? ` · ${top.strategy_file}` : ''}`
+        : available ? 'No ranked strategy rows were included in this report.' : (backtest.error || 'Backtest unavailable.');
+      document.querySelector('#backtestTopFacts').innerHTML = factMarkup([
+        ['Practical score', decimal(top.practical_score)],
+        ['Approved', integerValue(top.approved_candidates)],
+        ['Raw candidates', integerValue(top.raw_candidates)],
+        ['Efficiency', decimal(top.candidate_efficiency, 5)],
+        ['TP reached', rateValue(top.potential_take_profit_reached_rate)],
+        ['Avg end return', percentValue(top.potential_avg_end_return_pct)],
+        ['Simulation return', percentValue(top.simulation_net_return_pct)],
+        ['Simulation drawdown', percentValue(top.simulation_max_equity_drawdown_pct)],
+      ]);
+
+      document.querySelector('#backtestLiveFacts').innerHTML = factMarkup([
+        ['Replay approved', integerValue(replay.approved_candidates)],
+        ['Live buys placed', integerValue(actual.buy_orders_placed ?? topSummary.actual_buy_orders_placed)],
+        ['Live buys filled', integerValue(actual.buy_orders_filled)],
+        ['Live sells filled', integerValue(actual.sell_orders_filled)],
+        ['Approved not placed', integerValue(missed.approved_but_not_placed ?? topSummary.approved_but_not_placed)],
+        ['Placement rate', rateValue(missed.placement_rate_vs_approved ?? topSummary.placement_rate_vs_approved)],
+        ['Rejected orders', integerValue(actual.order_rejected)],
+        ['Estimated net P&L', money2(actual.realized_estimated_net_pnl)],
+      ]);
+
+      document.querySelector('#backtestStrategyCount').textContent = `${strategies.length} ranked row${strategies.length === 1 ? '' : 's'}`;
+      const table = document.querySelector('#backtestTable');
+      if (!strategies.length) {
+        table.innerHTML = `<div class="empty-weather" style="padding:20px">${escapeHtml(backtest.error || 'No strategy comparison rows in the latest report.')}</div>`;
+      } else {
+        const headers = ['Strategy', 'Score', 'Approved', 'Efficiency', 'TP hit', 'Avg end', 'Max runup', 'Max drawdown', 'Sim fills', 'Sim closed', 'Sim return', 'Sim drawdown'];
+        const rows = strategies.map(row => {
+          const cells = [
+            escapeHtml(row.strategy_label || 'Unnamed'),
+            escapeHtml(decimal(row.practical_score)),
+            escapeHtml(integerValue(row.approved_candidates)),
+            escapeHtml(decimal(row.candidate_efficiency, 5)),
+            escapeHtml(rateValue(row.potential_take_profit_reached_rate)),
+            `<span class="${backtestNumberClass(row.potential_avg_end_return_pct)}">${escapeHtml(percentValue(row.potential_avg_end_return_pct))}</span>`,
+            `<span class="${backtestNumberClass(row.potential_avg_max_runup_pct)}">${escapeHtml(percentValue(row.potential_avg_max_runup_pct))}</span>`,
+            `<span class="${backtestNumberClass(row.potential_avg_max_drawdown_pct)}">${escapeHtml(percentValue(row.potential_avg_max_drawdown_pct))}</span>`,
+            escapeHtml(integerValue(row.simulation_filled_entries)),
+            escapeHtml(integerValue(row.simulation_closed_positions)),
+            `<span class="${backtestNumberClass(row.simulation_net_return_pct)}">${escapeHtml(percentValue(row.simulation_net_return_pct))}</span>`,
+            `<span class="${backtestNumberClass(row.simulation_max_equity_drawdown_pct)}">${escapeHtml(percentValue(row.simulation_max_equity_drawdown_pct))}</span>`,
+          ];
+          return `<tr>${cells.map(cell => `<td>${cell}</td>`).join('')}</tr>`;
+        }).join('');
+        table.innerHTML = `<table class="backtest-table"><thead><tr>${headers.map(header => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>`;
+      }
+
+      const watchlist = backtest.watchlist || {};
+      const watchItems = Array.isArray(watchlist.items) ? watchlist.items : [];
+      document.querySelector('#backtestWatchlist').innerHTML = watchItems.length
+        ? watchItems.map(item => `<div class="watch-item"><strong>${escapeHtml(humanize(item.severity || 'info'))} · ${escapeHtml(humanize(item.code || 'watch'))}</strong><span>${escapeHtml(item.message || '')}</span></div>`).join('')
+        : `<div class="watch-item"><strong>${available ? 'No watchlist issues' : 'Watchlist unavailable'}</strong><span>${escapeHtml(backtest.error || 'The latest report did not include any watchlist items.')}</span></div>`;
     }
 
     function renderMarket(market) {
@@ -619,7 +779,17 @@
       try { render(await request('/api/status')); } catch (error) { showError(error); }
     }
 
+    async function refreshBacktest() {
+      try {
+        renderBacktest(await request('/api/backtest'));
+        state.backtestLoadedAt = Date.now();
+      } catch (error) {
+        renderBacktest({available:false, stale:true, error:error.message || String(error), strategies:[], watchlist:{items:[]}});
+      }
+    }
+
     function activateTab(tabName) {
+      state.activeTab = tabName;
       document.querySelectorAll('.tab-button').forEach(button => {
         const active = button.dataset.tab === tabName;
         button.classList.toggle('active', active);
@@ -627,6 +797,7 @@
       });
       document.querySelectorAll('.tab-view').forEach(view => view.classList.toggle('active', view.dataset.view === tabName));
       if (tabName === 'trading' && state.payload) requestAnimationFrame(() => drawChart(state.payload.market.history.daily || []));
+      if (tabName === 'backtest' && Date.now() - state.backtestLoadedAt > 60000) refreshBacktest();
     }
 
     document.querySelectorAll('.tab-button').forEach(button => button.addEventListener('click', () => activateTab(button.dataset.tab)));
@@ -668,7 +839,9 @@
       state.chartHoverIndex = null;
       if (state.payload) drawChart(state.payload.market.history.daily || []);
     });
-    refresh(); setInterval(refresh, 60000);
+    refresh();
+    setInterval(refresh, 60000);
+    setInterval(() => { if (state.activeTab === 'backtest') refreshBacktest(); }, 300000);
   </script>
 </body>
 </html>
