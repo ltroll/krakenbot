@@ -308,7 +308,10 @@ Important values in the selected strategy file, such as [`range_grid_strategy_de
 Run `range_grid_control_plane.py` beside the bot to get a single-page HTTP
 console with the current BTC price, rolling 24-hour, 7-day, 50-day, and 200-day
 average/low/high values, a 200-day chart, bot status, manual buy targets, and a
-buying hold control.
+buying hold control. A separate Weather & Sentiment tab reads `LLM_SIGNAL_URL`
+for `SIGNAL_ASSET_ID` and shows feed freshness, engine recommendations, market
+location, risk/opportunity scores, warnings, and suggested tuning. That tab is
+read-only; it does not apply the engine's suggested multipliers.
 
 The control plane writes `RANGE_GRID_CONTROL_FILE`; the bot reads that file on
 every cycle. Manual target mode replaces automatic buy candidates while it is
@@ -336,6 +339,9 @@ RANGE_GRID_CONTROL_HOST=0.0.0.0
 RANGE_GRID_CONTROL_PORT=8787
 RANGE_GRID_CONTROL_TOKEN=<strong-random-token>
 RANGE_GRID_CONTROL_MARKET_CACHE_SECONDS=60
+RANGE_GRID_CONTROL_SENTIMENT_CACHE_SECONDS=60
+LLM_SIGNAL_URL=http://<signal-host>/bot/multi_asset_signal.json
+SIGNAL_ASSET_ID=BTC
 ```
 
 ### State file

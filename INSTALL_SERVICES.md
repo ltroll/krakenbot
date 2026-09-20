@@ -255,6 +255,9 @@ RANGE_GRID_CONTROL_HOST=0.0.0.0
 RANGE_GRID_CONTROL_PORT=8787
 RANGE_GRID_CONTROL_TOKEN=<strong-random-token>
 RANGE_GRID_CONTROL_MARKET_CACHE_SECONDS=60
+RANGE_GRID_CONTROL_SENTIMENT_CACHE_SECONDS=60
+LLM_SIGNAL_URL=http://<signal-host>/bot/multi_asset_signal.json
+SIGNAL_ASSET_ID=BTC
 ```
 
 Create `/etc/systemd/system/kraken-range-grid-control.service`:

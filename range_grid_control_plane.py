@@ -27,6 +27,8 @@ from range_grid_control import (
     merge_control_update,
     save_control_state,
 )
+from risk_context import derive_risk_context, parse_iso8601
+from signal_normalizer import normalize_signal_payload
 
 
 load_dotenv()
@@ -48,6 +50,10 @@ CONTROL_MARKET_CACHE_SECONDS = max(
     15,
     int(os.getenv("RANGE_GRID_CONTROL_MARKET_CACHE_SECONDS", "60")),
 )
+CONTROL_SENTIMENT_CACHE_SECONDS = max(
+    15,
+    int(os.getenv("RANGE_GRID_CONTROL_SENTIMENT_CACHE_SECONDS", "60")),
+)
 REQUEST_TIMEOUT_SECONDS = max(
     2,
     int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10")),
@@ -62,6 +68,8 @@ KRAKEN_OHLC_ENDPOINT = os.getenv(
     "RANGE_GRID_CONTROL_OHLC_URL",
     f"{KRAKEN_API_URL}/0/public/OHLC",
 )
+LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL", "").strip()
+SIGNAL_ASSET_ID = os.getenv("SIGNAL_ASSET_ID", "BTC").strip().upper() or "BTC"
 HTML_FILE = Path(__file__).with_name("range_grid_control_plane.html")
 
 
@@ -231,6 +239,184 @@ class KrakenMarketData:
                 }
 
 
+def _freshness_state(signal, now):
+    freshness = signal.get("freshness")
+    freshness = freshness if isinstance(freshness, dict) else {}
+    processed_at = parse_iso8601(
+        signal.get("processed_at") or freshness.get("processed_at")
+    )
+    age_minutes = None
+    if processed_at is not None:
+        age_minutes = max(0.0, (now - processed_at).total_seconds() / 60.0)
+
+    def threshold(name):
+        try:
+            value = float(freshness.get(name))
+            return value if value >= 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    stale_after = threshold("stale_after_minutes")
+    warn_after = threshold("warn_after_minutes")
+    fresh_for = threshold("fresh_for_minutes")
+    if (
+        age_minutes is not None
+        and stale_after is not None
+        and age_minutes > stale_after
+    ):
+        state = "stale"
+    elif (
+        age_minutes is not None
+        and warn_after is not None
+        and age_minutes > warn_after
+    ):
+        state = "warn"
+    elif age_minutes is not None and fresh_for is not None and age_minutes <= fresh_for:
+        state = "fresh"
+    else:
+        state = str(signal.get("signal_status") or "unknown").lower()
+    return state, round(age_minutes, 2) if age_minutes is not None else None
+
+
+def unavailable_sentiment_snapshot(error=None):
+    return {
+        "available": False,
+        "captured_at": utc_now_iso(),
+        "processed_at": None,
+        "age_minutes": None,
+        "freshness_state": "unavailable",
+        "source": "Sentiment and weather engine",
+        "stale": True,
+        "error": error or "LLM_SIGNAL_URL is not configured",
+        "signal": {},
+        "risk": derive_risk_context({}),
+        "price_regime": {},
+        "market_structure": {},
+        "source_status": {},
+    }
+
+
+def build_sentiment_snapshot(signal, *, captured_at, fetch_error=None):
+    now = utc_now()
+    freshness_state, age_minutes = _freshness_state(signal, now)
+    stale = bool(fetch_error) or freshness_state == "stale"
+    risk_context = signal.get("risk_context")
+    risk_context = risk_context if isinstance(risk_context, dict) else {}
+    risk = derive_risk_context(
+        risk_context,
+        fallback_processed_at=signal.get("processed_at"),
+        stale=stale,
+        now=now,
+    )
+    action_policy = signal.get("action_policy")
+    action_policy = action_policy if isinstance(action_policy, dict) else {}
+    active_strategy = signal.get("active_strategy")
+    active_strategy = active_strategy if isinstance(active_strategy, dict) else {}
+    return {
+        "available": True,
+        "captured_at": captured_at,
+        "processed_at": signal.get("processed_at"),
+        "age_minutes": age_minutes,
+        "freshness_state": freshness_state,
+        "source": "Sentiment and weather engine",
+        "stale": stale,
+        "error": fetch_error,
+        "signal": {
+            "asset_id": signal.get("asset_id"),
+            "asset_price": signal.get("asset_price"),
+            "asset_sentiment": signal.get("asset_sentiment"),
+            "execution_signal": signal.get("execution_signal"),
+            "confidence": signal.get("confidence"),
+            "direction_bias": signal.get("direction_bias"),
+            "fear_greed_index": signal.get("fear_greed_index"),
+            "flow_pressure": signal.get("flow_pressure"),
+            "mean_reversion_opportunity": signal.get(
+                "mean_reversion_opportunity"
+            ),
+            "signal_status": signal.get("signal_status"),
+            "bot_action_allowed": signal.get("bot_action_allowed"),
+            "action_recommendation": signal.get("action_recommendation"),
+            "action_policy": action_policy,
+            "market_interpretation": signal.get("market_interpretation"),
+            "active_strategy": active_strategy,
+            "contributor_count": signal.get("contributor_count"),
+            "active_observation_count": signal.get(
+                "active_observation_count"
+            ),
+        },
+        "risk": risk,
+        "price_regime": signal.get("price_regime") or {},
+        "market_structure": signal.get("market_structure") or {},
+        "source_status": signal.get("source_status") or {},
+    }
+
+
+class SentimentData:
+    def __init__(
+        self,
+        session=None,
+        url=LLM_SIGNAL_URL,
+        asset_id=SIGNAL_ASSET_ID,
+        cache_seconds=CONTROL_SENTIMENT_CACHE_SECONDS,
+    ):
+        self.session = session or requests.Session()
+        self.url = str(url or "").strip()
+        self.asset_id = str(asset_id or "BTC").strip().upper()
+        self.cache_seconds = cache_seconds
+        self._lock = threading.Lock()
+        self._cached_at = 0.0
+        self._captured_at = None
+        self._cached_signal = None
+
+    def snapshot(self, force=False):
+        if not self.url:
+            return unavailable_sentiment_snapshot()
+        with self._lock:
+            now_monotonic = time.monotonic()
+            should_fetch = (
+                force
+                or self._cached_signal is None
+                or now_monotonic - self._cached_at >= self.cache_seconds
+            )
+            fetch_error = None
+            if should_fetch:
+                try:
+                    response = self.session.get(
+                        self.url,
+                        timeout=REQUEST_TIMEOUT_SECONDS,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    if not isinstance(payload, dict):
+                        raise RuntimeError(
+                            "sentiment response must be a JSON object"
+                        )
+                    if (
+                        isinstance(payload.get("assets"), dict)
+                        and self.asset_id not in payload["assets"]
+                    ):
+                        raise RuntimeError(
+                            f"sentiment response does not contain {self.asset_id}"
+                        )
+                    self._cached_signal = normalize_signal_payload(
+                        payload,
+                        asset_id=self.asset_id,
+                        pair=KRAKEN_PAIR,
+                    )
+                    self._captured_at = utc_now_iso()
+                    self._cached_at = now_monotonic
+                except Exception as exc:
+                    fetch_error = str(exc)
+
+            if self._cached_signal is None:
+                return unavailable_sentiment_snapshot(fetch_error)
+            return build_sentiment_snapshot(
+                self._cached_signal,
+                captured_at=self._captured_at,
+                fetch_error=fetch_error,
+            )
+
+
 def host_is_loopback(host):
     normalized = str(host or "").strip().lower()
     if normalized in {"localhost", "ip6-localhost"}:
@@ -249,7 +435,7 @@ def append_audit_event(event):
         handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
 
 
-def build_status_payload(market_data):
+def build_status_payload(market_data, sentiment_data=None):
     control = load_control_state_fail_safe(CONTROL_FILE)
     bot_status = read_json_object(STATUS_FILE)
     bot_state = read_json_object(STATE_FILE)
@@ -259,6 +445,11 @@ def build_status_payload(market_data):
         "generated_at": utc_now_iso(),
         "control": control_status(control),
         "market": market_data.snapshot(),
+        "sentiment": (
+            sentiment_data.snapshot()
+            if sentiment_data is not None
+            else unavailable_sentiment_snapshot()
+        ),
         "bot": bot_status,
         "orders": {
             "open_buy_count": len(open_buy_orders),
@@ -285,10 +476,19 @@ def build_status_payload(market_data):
 class ControlPlaneServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, handler, *, token, market_data):
+    def __init__(
+        self,
+        address,
+        handler,
+        *,
+        token,
+        market_data,
+        sentiment_data=None,
+    ):
         super().__init__(address, handler)
         self.control_token = token
         self.market_data = market_data
+        self.sentiment_data = sentiment_data or SentimentData()
         self.control_write_lock = threading.Lock()
 
 
@@ -383,7 +583,10 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(
                 200,
-                build_status_payload(self.server.market_data),
+                build_status_payload(
+                    self.server.market_data,
+                    self.server.sentiment_data,
+                ),
             )
             return
         self._send_json(404, {"error": "not found"})
@@ -459,6 +662,7 @@ def main():
         ControlPlaneHandler,
         token=CONTROL_TOKEN,
         market_data=KrakenMarketData(),
+        sentiment_data=SentimentData(),
     )
     print(json.dumps({
         "status": "starting",

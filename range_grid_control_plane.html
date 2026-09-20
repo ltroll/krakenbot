@@ -39,7 +39,13 @@
     .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 14px currentColor; }
     .dot.ok { background: var(--green); }
     .dot.error { background: var(--red); }
+    .tabs { display: flex; gap: 7px; margin: 0 0 15px; padding: 5px; width: fit-content; border: 1px solid var(--line); border-radius: 12px; background: rgba(10, 21, 31, .78); }
+    .tab-button { border: 0; border-radius: 8px; padding: 10px 16px; color: var(--muted); background: transparent; font-weight: 780; cursor: pointer; }
+    .tab-button:hover { color: var(--text); }
+    .tab-button.active { color: #061412; background: var(--cyan); }
     .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 14px; }
+    .tab-view { display: none; }
+    .tab-view.active { display: grid; }
     .panel { background: rgba(16, 28, 39, .94); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }
     .hero { grid-column: span 4; padding: 21px; }
     .market { grid-column: span 8; padding: 18px; }
@@ -106,9 +112,35 @@
     .notice { color: var(--muted); font-size: .79rem; line-height: 1.5; max-width: 780px; }
     .banner { display: none; margin-bottom: 14px; border-radius: 12px; padding: 12px 14px; background: rgba(255,107,107,.13); border: 1px solid rgba(255,107,107,.45); color: #ffd6d6; }
     .banner.show { display: block; }
+    .weather-hero { grid-column: span 4; padding: 21px; }
+    .weather-summary { grid-column: span 8; padding: 18px; }
+    .weather-half { grid-column: span 6; padding: 18px; }
+    .weather-condition { margin: 5px 0 10px; font-size: clamp(1.7rem, 4vw, 3.2rem); font-weight: 780; line-height: 1; letter-spacing: -.045em; }
+    .badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 9px; border-radius: 999px; background: rgba(98,168,255,.12); border: 1px solid rgba(98,168,255,.28); color: var(--blue); font-size: .73rem; font-weight: 800; text-transform: uppercase; letter-spacing: .07em; }
+    .badge.normal, .badge.fresh { color: var(--green); border-color: rgba(110,231,162,.34); background: rgba(110,231,162,.10); }
+    .badge.watch, .badge.warn, .badge.caution { color: var(--amber); border-color: rgba(255,200,87,.34); background: rgba(255,200,87,.10); }
+    .badge.danger, .badge.stale, .badge.unavailable { color: var(--red); border-color: rgba(255,107,107,.36); background: rgba(255,107,107,.10); }
+    .weather-meta { display: grid; gap: 5px; margin-top: 14px; color: var(--muted); font-size: .78rem; }
+    .weather-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+    .weather-fact { min-width: 0; padding: 12px; border: 1px solid rgba(98,168,255,.14); border-radius: 11px; background: var(--panel-2); }
+    .weather-fact span { display: block; color: var(--muted); font-size: .68rem; text-transform: uppercase; letter-spacing: .075em; }
+    .weather-fact strong { display: block; margin-top: 6px; font-size: .96rem; overflow-wrap: anywhere; }
+    .weather-copy { margin: 14px 0 0; color: var(--muted); font-size: .82rem; line-height: 1.55; }
+    .score-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px 16px; }
+    .score-head { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: .76rem; }
+    .score-head strong { color: var(--text); }
+    .score-track { height: 6px; margin-top: 7px; overflow: hidden; border-radius: 99px; background: #263746; }
+    .score-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--blue), var(--cyan)); }
+    .tag-group { margin-top: 14px; }
+    .tag-group > span { display: block; margin-bottom: 7px; color: var(--muted); font-size: .69rem; text-transform: uppercase; letter-spacing: .08em; }
+    .tag-list { display: flex; flex-wrap: wrap; gap: 6px; }
+    .tag { padding: 5px 8px; border-radius: 7px; background: rgba(77,214,199,.10); color: var(--cyan); font-size: .73rem; }
+    .tag.warning { background: rgba(255,200,87,.10); color: var(--amber); }
+    .empty-weather { color: var(--muted); line-height: 1.55; }
     @media (max-width: 980px) {
-      .hero, .market, .chart-panel, .control-panel { grid-column: 1 / -1; }
+      .hero, .market, .chart-panel, .control-panel, .weather-hero, .weather-summary, .weather-half { grid-column: 1 / -1; }
       .market-cards { grid-template-columns: repeat(2, 1fr); }
+      .weather-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .target-head { display: none; }
       .target-row { grid-template-columns: 38px 1fr; }
       .target-row .dual-input { grid-column: 1 / -1; }
@@ -122,6 +154,9 @@
       .save-button { width: 100%; }
       .targets-toolbar { align-items: flex-start; flex-direction: column; }
       .explainer-grid { grid-template-columns: 1fr; }
+      .tabs { width: 100%; }
+      .tab-button { flex: 1; padding: 10px 8px; }
+      .weather-facts, .score-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -132,8 +167,12 @@
       <div class="status-line"><span id="statusDot" class="dot"></span><span id="statusText">Connecting…</span></div>
     </header>
     <div id="banner" class="banner"></div>
+    <nav class="tabs" aria-label="Control plane views">
+      <button class="tab-button active" type="button" data-tab="trading" aria-selected="true" aria-controls="tradingView">Trading</button>
+      <button class="tab-button" type="button" data-tab="weather" aria-selected="false" aria-controls="weatherView">Weather &amp; Sentiment</button>
+    </nav>
 
-    <main class="grid">
+    <main id="tradingView" class="grid tab-view active" data-view="trading">
       <section class="panel hero">
         <h2 class="panel-title">BTC / USD</h2>
         <div id="currentPrice" class="price">—</div>
@@ -201,6 +240,49 @@
         </div>
       </section>
     </main>
+
+    <main id="weatherView" class="grid tab-view" data-view="weather">
+      <section class="panel weather-hero">
+        <h2 class="panel-title">Market weather</h2>
+        <div id="weatherCondition" class="weather-condition">—</div>
+        <span id="weatherAlert" class="badge unavailable">Waiting</span>
+        <div class="weather-meta">
+          <span id="weatherFeedStatus">Waiting for the sentiment engine</span>
+          <span id="weatherProcessedAt">Processed —</span>
+        </div>
+      </section>
+
+      <section class="panel weather-summary">
+        <h2 class="panel-title">Sentiment engine decision context</h2>
+        <div id="sentimentFacts" class="weather-facts"></div>
+        <p id="sentimentExplanation" class="weather-copy">Waiting for sentiment data.</p>
+        <div class="tag-group"><span>Engine input health</span><div id="sourceStatus" class="tag-list"></div></div>
+      </section>
+
+      <section class="panel weather-half">
+        <h2 class="panel-title">Risk and opportunity scores</h2>
+        <div id="riskScores" class="score-grid"></div>
+      </section>
+
+      <section class="panel weather-half">
+        <h2 class="panel-title">Market location</h2>
+        <div id="marketLocationFacts" class="weather-facts"></div>
+      </section>
+
+      <section class="panel weather-half">
+        <h2 class="panel-title">Weather opportunity</h2>
+        <div id="opportunityFacts" class="weather-facts"></div>
+        <p id="weatherHint" class="weather-copy">—</p>
+        <div class="tag-group"><span>Opportunity and pattern tags</span><div id="opportunityTags" class="tag-list"></div></div>
+        <div class="tag-group"><span>Risk warnings</span><div id="riskWarnings" class="tag-list"></div></div>
+      </section>
+
+      <section class="panel weather-half">
+        <h2 class="panel-title">Suggested bot tuning</h2>
+        <div id="tuningFacts" class="weather-facts"></div>
+        <p class="weather-copy">These values explain the weather engine’s advice. This page does not apply or override them; the active strategy decides which weather inputs it uses.</p>
+      </section>
+    </main>
   </div>
 
   <script>
@@ -230,6 +312,130 @@
       document.querySelector('#statusText').textContent = 'Attention required';
     };
     const clearError = () => document.querySelector('#banner').classList.remove('show');
+    const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
+    const humanize = value => value == null || value === '' ? '—' : String(value).replaceAll('_', ' ').replace(/\b\w/g, character => character.toUpperCase());
+    const decimal = (value, places = 3) => value == null || !Number.isFinite(Number(value)) ? '—' : Number(value).toFixed(places);
+    const scoreText = value => value == null || !Number.isFinite(Number(value)) ? '—' : `${(Number(value) * 100).toFixed(0)}%`;
+    const ratioText = value => value == null || !Number.isFinite(Number(value)) ? '—' : `${(Number(value) * 100).toFixed(1)}%`;
+    const signedPercent = value => value == null || !Number.isFinite(Number(value)) ? '—' : `${Number(value) > 0 ? '+' : ''}${Number(value).toFixed(2)}%`;
+    const multiplier = value => value == null || !Number.isFinite(Number(value)) ? '—' : `${Number(value).toFixed(2)}×`;
+    const booleanText = value => value === true ? 'Yes' : value === false ? 'No' : '—';
+    const factMarkup = facts => facts.map(([label, value]) => `<div class="weather-fact"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('');
+    const scoreMarkup = scores => scores.map(([label, value]) => {
+      const numeric = Number(value);
+      const width = value != null && Number.isFinite(numeric) ? Math.max(0, Math.min(100, numeric * 100)) : 0;
+      return `<div><div class="score-head"><span>${escapeHtml(label)}</span><strong>${scoreText(value)}</strong></div><div class="score-track"><div class="score-fill" style="width:${width}%"></div></div></div>`;
+    }).join('');
+    const tagsMarkup = (values, warning = false) => values.length
+      ? values.map(value => `<span class="tag ${warning ? 'warning' : ''}">${escapeHtml(humanize(value))}</span>`).join('')
+      : '<span class="empty-weather">None reported</span>';
+
+    function renderSentiment(sentiment) {
+      const signal = sentiment.signal || {}, risk = sentiment.risk || {};
+      const regime = sentiment.price_regime || {}, structure = sentiment.market_structure || {};
+      const available = sentiment.available === true;
+      const condition = available && risk.weather_report_available
+        ? humanize(risk.weather_condition)
+        : available ? 'No Weather Report' : 'Unavailable';
+      document.querySelector('#weatherCondition').textContent = condition;
+
+      const alert = risk.weather_emergency_bell
+        ? 'Emergency'
+        : (risk.weather_alert_level || sentiment.freshness_state || 'unavailable');
+      const badge = document.querySelector('#weatherAlert');
+      const normalizedAlert = String(alert).toLowerCase();
+      const badgeClass = normalizedAlert === 'emergency'
+        ? 'danger'
+        : ['normal', 'fresh', 'watch', 'warn', 'caution', 'danger', 'stale', 'unavailable'].includes(normalizedAlert)
+        ? normalizedAlert
+        : '';
+      badge.className = `badge ${badgeClass}`;
+      badge.textContent = humanize(alert);
+
+      const age = sentiment.age_minutes == null ? '' : ` · ${Number(sentiment.age_minutes).toFixed(1)} min old`;
+      document.querySelector('#weatherFeedStatus').textContent = sentiment.error
+        ? `Feed issue · ${sentiment.error}`
+        : `${humanize(sentiment.freshness_state)} feed${age}`;
+      document.querySelector('#weatherProcessedAt').textContent = sentiment.processed_at
+        ? `Processed ${new Date(sentiment.processed_at).toLocaleString()}`
+        : 'Processed —';
+
+      const actionPolicy = signal.action_policy || {};
+      const activeStrategy = signal.active_strategy || {};
+      const strategyName = activeStrategy.active_strategy || activeStrategy.strategy_label || activeStrategy.name;
+      document.querySelector('#sentimentFacts').innerHTML = factMarkup([
+        ['Recommendation', humanize(signal.action_recommendation)],
+        ['Signal status', humanize(signal.signal_status)],
+        ['Execution signal', decimal(signal.execution_signal)],
+        ['Confidence', scoreText(signal.confidence)],
+        ['Fear & Greed', signal.fear_greed_index ?? '—'],
+        ['Asset sentiment', decimal(signal.asset_sentiment)],
+        ['Direction bias', decimal(signal.direction_bias)],
+        ['Flow pressure', decimal(signal.flow_pressure)],
+        ['Mean reversion', scoreText(signal.mean_reversion_opportunity)],
+        ['Contributors', signal.contributor_count ?? '—'],
+        ['Bot action allowed', booleanText(signal.bot_action_allowed)],
+        ['Engine strategy', humanize(strategyName)],
+      ]);
+      document.querySelector('#sentimentExplanation').textContent = !available
+        ? (sentiment.error || 'The sentiment engine is unavailable.')
+        : (actionPolicy.reason || signal.market_interpretation || risk.risk_adjusted_reason || 'No narrative explanation was supplied.');
+      const sourceStatuses = Object.entries(sentiment.source_status || {});
+      document.querySelector('#sourceStatus').innerHTML = sourceStatuses.length
+        ? sourceStatuses.map(([name, details]) => {
+          const status = details && typeof details === 'object' ? details.status : details;
+          const warning = !['fresh', 'not_configured'].includes(String(status || '').toLowerCase());
+          return `<span class="tag ${warning ? 'warning' : ''}">${escapeHtml(humanize(name))}: ${escapeHtml(humanize(status))}</span>`;
+        }).join('')
+        : '<span class="empty-weather">No per-source health data reported</span>';
+
+      document.querySelector('#riskScores').innerHTML = scoreMarkup([
+        ['Market risk', risk.risk_context_market_risk_score],
+        ['Downside risk', risk.risk_context_downside_risk_score],
+        ['Buy aggression', risk.risk_context_buy_aggression_score],
+        ['Bottoming', risk.risk_context_bottoming_score],
+        ['Rebound', risk.risk_context_rebound_score],
+        ['Breakout', risk.risk_context_breakout_score],
+      ]);
+
+      document.querySelector('#marketLocationFacts').innerHTML = factMarkup([
+        ['Engine BTC price', money2(risk.weather_market_current_price ?? signal.asset_price)],
+        ['Range zone', humanize(risk.weather_market_range_zone)],
+        ['Range position', ratioText(risk.weather_market_range_position ?? regime.range_position_24h)],
+        ['24h return', signedPercent(risk.weather_market_price_return_24h_pct ?? regime.return_24h_pct)],
+        ['4h return', signedPercent(risk.weather_market_price_return_4h_pct)],
+        ['Range low', money2(risk.weather_market_range_low ?? regime.price_low_24h)],
+        ['Range high', money2(risk.weather_market_range_high ?? regime.price_high_24h)],
+        ['Support / resistance', `${money(structure.support_price)} / ${money(structure.resistance_price)}`],
+      ]);
+
+      document.querySelector('#opportunityFacts').innerHTML = factMarkup([
+        ['Cycle phase', humanize(risk.weather_opportunity_phase)],
+        ['Short trend', humanize(risk.weather_short_term_direction)],
+        ['Leveling state', humanize(risk.weather_leveling_state)],
+        ['Entry opportunity', scoreText(risk.weather_entry_opportunity_score)],
+        ['Rebound confirmation', scoreText(risk.weather_rebound_confirmation_score)],
+        ['Exit pressure', scoreText(risk.weather_exit_pressure_score)],
+        ['Hold through', scoreText(risk.weather_hold_through_score)],
+        ['Failed rebound risk', scoreText(risk.weather_failed_rebound_risk)],
+      ]);
+      document.querySelector('#weatherHint').textContent = risk.weather_opportunity_bot_hint || 'No weather-engine hint was supplied.';
+      const opportunityTags = [...(risk.weather_opportunity_tags || []), ...(risk.weather_pattern_tags || [])];
+      const warningTags = [...(risk.weather_risk_warnings || []), ...(risk.risk_context_hard_safety_flags || [])];
+      document.querySelector('#opportunityTags').innerHTML = tagsMarkup([...new Set(opportunityTags)]);
+      document.querySelector('#riskWarnings').innerHTML = tagsMarkup([...new Set(warningTags)], true);
+
+      document.querySelector('#tuningFacts').innerHTML = factMarkup([
+        ['Position size', multiplier(risk.suggested_position_size_multiplier)],
+        ['Grid aggression', multiplier(risk.suggested_grid_aggression_multiplier)],
+        ['Entry discount', multiplier(risk.suggested_entry_discount_multiplier)],
+        ['Take profit', multiplier(risk.suggested_take_profit_multiplier)],
+        ['Trade permission', humanize(risk.weather_trade_permission)],
+        ['Decision authority', humanize(risk.weather_bot_decision_authority)],
+        ['Risk posture', humanize(risk.risk_context_recommended_posture || risk.risk_adjusted_posture)],
+        ['Weather present', booleanText(risk.weather_report_available)],
+      ]);
+    }
 
     function renderMarket(market) {
       document.querySelector('#currentPrice').textContent = money2(market.current_price);
@@ -376,6 +582,7 @@
     function render(payload) {
       state.payload = payload; state.revision = payload.control.revision;
       renderMarket(payload.market);
+      renderSentiment(payload.sentiment || {});
       const control = payload.control, bot = payload.bot || {}, stats = bot.stats || {};
       document.querySelector('#revision').textContent = `Revision ${control.revision}`;
       document.querySelector('#manualEnabled').checked = control.manual_targets_enabled;
@@ -411,6 +618,18 @@
     async function refresh() {
       try { render(await request('/api/status')); } catch (error) { showError(error); }
     }
+
+    function activateTab(tabName) {
+      document.querySelectorAll('.tab-button').forEach(button => {
+        const active = button.dataset.tab === tabName;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', String(active));
+      });
+      document.querySelectorAll('.tab-view').forEach(view => view.classList.toggle('active', view.dataset.view === tabName));
+      if (tabName === 'trading' && state.payload) requestAnimationFrame(() => drawChart(state.payload.market.history.daily || []));
+    }
+
+    document.querySelectorAll('.tab-button').forEach(button => button.addEventListener('click', () => activateTab(button.dataset.tab)));
 
     document.querySelector('#holdButton').addEventListener('click', async () => {
       const button = document.querySelector('#holdButton'); button.disabled = true;
