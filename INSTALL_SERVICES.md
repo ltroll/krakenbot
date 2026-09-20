@@ -260,6 +260,8 @@ RANGE_GRID_CONTROL_BACKTEST_URL=http://<backtest-host>/bot/range_grid_backtest.j
 RANGE_GRID_CONTROL_BACKTEST_CACHE_SECONDS=300
 LLM_SIGNAL_URL=http://<signal-host>/bot/multi_asset_signal.json
 SIGNAL_ASSET_ID=BTC
+# Optional; defaults to the directory containing range_grid_control_plane.py.
+RANGE_GRID_STRATEGY_DIRECTORY=/home/<user>/tradingbot/krakenbot
 ```
 
 Create `/etc/systemd/system/kraken-range-grid-control.service`:
@@ -301,6 +303,10 @@ of pending buys; it leaves existing sell orders and filled inventory alone.
 Operator buy-price bounds veto automatic candidates outside the allowed zone;
 the strategy continues choosing its own ladder inside it. Saving a bound also
 requests cancellation of pending buys outside the zone on the next bot cycle.
+The Strategy control section lists valid `range_grid_strategy_*.json` files.
+Applying one restarts the bot process at its next cycle boundary and preserves
+existing inventory and open orders. “Use environment default” returns to the
+profile named by `RANGE_GRID_STRATEGY_PROFILE`.
 
 ## 4. Install The Sentiment Executor Service
 

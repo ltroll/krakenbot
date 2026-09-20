@@ -5,6 +5,7 @@ import unittest
 
 from range_grid_control import (
     ControlStateError,
+    control_status,
     default_control_state,
     load_control_state,
     load_control_state_fail_safe,
@@ -92,7 +93,7 @@ class RangeGridControlTests(unittest.TestCase):
             }],
         })
 
-        self.assertEqual(state["schema_version"], 2)
+        self.assertEqual(state["schema_version"], 3)
         self.assertNotIn("manual_targets_enabled", state)
         self.assertNotIn("buy_targets", state)
         self.assertTrue(state["buy_price_floor_enabled"])
@@ -122,6 +123,30 @@ class RangeGridControlTests(unittest.TestCase):
         self.assertEqual(updated["buy_price_floor_usd"], 75000)
         self.assertEqual(updated["buy_price_ceiling_usd"], 80000)
         self.assertEqual(updated["updated_by"], "test")
+
+    def test_strategy_profile_override_is_persisted_and_path_safe(self):
+        profile = "range_grid_strategy_production_test.json"
+        updated = merge_control_update(
+            default_control_state(),
+            {"strategy_profile_override": profile},
+            updated_by="test",
+        )
+
+        self.assertEqual(updated["strategy_profile_override"], profile)
+        self.assertEqual(
+            control_status(updated)["strategy_profile_override"],
+            profile,
+        )
+        cleared = merge_control_update(
+            updated,
+            {"strategy_profile_override": None},
+            updated_by="test",
+        )
+        self.assertIsNone(cleared["strategy_profile_override"])
+        with self.assertRaises(ControlStateError):
+            normalize_control_state({
+                "strategy_profile_override": "../range_grid_strategy_bad.json",
+            })
 
     def test_round_trip_and_corruption_fail_safe(self):
         with tempfile.TemporaryDirectory() as directory:

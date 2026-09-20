@@ -283,6 +283,7 @@ class RangeGridBotLoggingTests(unittest.TestCase):
         self.assertIn("load_control_state_fail_safe", called_functions)
         self.assertIn("reconcile_operator_control_open_buys", called_functions)
         self.assertIn("operator_buy_price_rule_reason", called_functions)
+        self.assertIn("restart_for_strategy_profile", called_functions)
 
     def test_operator_price_rules_do_not_replace_sell_management(self):
         tree = self._bot_tree()

@@ -7,9 +7,10 @@ import os
 from datetime import datetime, timezone
 
 from range_grid_order_safety import atomic_write_json, load_json_with_backup
+from range_grid_strategy_catalog import normalize_strategy_filename
 
 
-CONTROL_SCHEMA_VERSION = 2
+CONTROL_SCHEMA_VERSION = 3
 MIN_BUY_PRICE_USD = 1.0
 MAX_BUY_PRICE_USD = 10_000_000.0
 
@@ -32,6 +33,7 @@ def default_control_state():
         "buy_price_floor_usd": None,
         "buy_price_ceiling_enabled": False,
         "buy_price_ceiling_usd": None,
+        "strategy_profile_override": None,
         "updated_at": None,
         "updated_by": None,
     }
@@ -115,6 +117,13 @@ def normalize_control_state(payload):
             "buy_price_floor_usd cannot be above buy_price_ceiling_usd"
         )
 
+    try:
+        strategy_profile_override = normalize_strategy_filename(
+            payload.get("strategy_profile_override")
+        )
+    except ValueError as exc:
+        raise ControlStateError(str(exc)) from exc
+
     normalized = default_control_state()
     normalized.update({
         "revision": max(0, int(payload.get("revision", 0) or 0)),
@@ -127,6 +136,7 @@ def normalize_control_state(payload):
         "buy_price_floor_usd": floor_price,
         "buy_price_ceiling_enabled": ceiling_enabled,
         "buy_price_ceiling_usd": ceiling_price,
+        "strategy_profile_override": strategy_profile_override,
         "updated_at": payload.get("updated_at"),
         "updated_by": payload.get("updated_by"),
     })
@@ -144,6 +154,7 @@ def merge_control_update(current, update, *, updated_by=None):
         "buy_price_floor_usd",
         "buy_price_ceiling_enabled",
         "buy_price_ceiling_usd",
+        "strategy_profile_override",
     }
     merged = dict(current)
     for key in allowed_fields:
@@ -235,6 +246,9 @@ def control_status(state):
         "buy_price_floor_usd": normalized["buy_price_floor_usd"],
         "buy_price_ceiling_enabled": normalized["buy_price_ceiling_enabled"],
         "buy_price_ceiling_usd": normalized["buy_price_ceiling_usd"],
+        "strategy_profile_override": normalized[
+            "strategy_profile_override"
+        ],
         "updated_at": normalized["updated_at"],
         "updated_by": normalized["updated_by"],
         "load_error": state.get("load_error") if isinstance(state, dict) else None,

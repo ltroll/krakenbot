@@ -333,6 +333,15 @@ and filled inventory continues through the normal sell-management path. A
 missing control file means normal automatic operation; an invalid control file
 causes a fail-safe buy hold.
 
+The Trading tab also lists every valid `range_grid_strategy_*.json` file from
+the repository (or `RANGE_GRID_STRATEGY_DIRECTORY`, when set). Applying a
+selection records a base-profile override in the operator control file. At the
+start of the next cycle, the bot replaces its process and reloads the complete
+profile atomically. Existing inventory and open orders are preserved. The UI
+identifies live, paper, observe-only, and sell-only profiles before asking for
+confirmation. Selecting “Use environment default” clears the override and
+returns control to `RANGE_GRID_STRATEGY_PROFILE`.
+
 For local access, bind to `127.0.0.1` and use an SSH tunnel. LAN binding requires
 `RANGE_GRID_CONTROL_TOKEN`:
 

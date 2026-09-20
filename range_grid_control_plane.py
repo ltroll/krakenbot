@@ -27,6 +27,10 @@ from range_grid_control import (
     merge_control_update,
     save_control_state,
 )
+from range_grid_strategy_catalog import (
+    strategy_catalog,
+    validate_strategy_profile_selection,
+)
 from risk_context import derive_risk_context, parse_iso8601
 from signal_normalizer import normalize_signal_payload
 
@@ -70,6 +74,15 @@ KRAKEN_OHLC_ENDPOINT = os.getenv(
 )
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL", "").strip()
 SIGNAL_ASSET_ID = os.getenv("SIGNAL_ASSET_ID", "BTC").strip().upper() or "BTC"
+CONFIGURED_STRATEGY_PROFILE = (
+    os.getenv("RANGE_GRID_STRATEGY_PROFILE")
+    or os.getenv("STRATEGY_PROFILE")
+    or "range_grid_strategy_default.json"
+)
+STRATEGY_DIRECTORY = os.getenv(
+    "RANGE_GRID_STRATEGY_DIRECTORY",
+    str(Path(__file__).resolve().parent),
+)
 
 
 def configured_backtest_source():
@@ -685,6 +698,33 @@ def append_audit_event(event):
         handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
 
 
+def build_strategy_control_snapshot(control, bot_status, directory=None):
+    control = control if isinstance(control, dict) else {}
+    bot_status = bot_status if isinstance(bot_status, dict) else {}
+    options = strategy_catalog(directory or STRATEGY_DIRECTORY)
+    override = control.get("strategy_profile_override")
+    desired = override or CONFIGURED_STRATEGY_PROFILE
+    active = bot_status.get("strategy_profile")
+    by_filename = {entry["filename"]: entry for entry in options}
+    desired_entry = by_filename.get(os.path.basename(str(desired or "")))
+    active_entry = by_filename.get(os.path.basename(str(active or "")))
+    return {
+        "active_profile": active,
+        "desired_profile": desired,
+        "configured_profile": CONFIGURED_STRATEGY_PROFILE,
+        "selected_override": override,
+        "restart_pending": bool(
+            active
+            and desired
+            and os.path.basename(str(active))
+            != os.path.basename(str(desired))
+        ),
+        "active": active_entry,
+        "desired": desired_entry,
+        "options": options,
+    }
+
+
 def build_status_payload(
     market_data,
     sentiment_data=None,
@@ -697,6 +737,10 @@ def build_status_payload(
     return {
         "generated_at": utc_now_iso(),
         "control": control_status(control),
+        "strategy_control": build_strategy_control_snapshot(
+            control,
+            bot_status,
+        ),
         "market": market_data.snapshot(),
         "sentiment": (
             sentiment_data.snapshot()
@@ -853,7 +897,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/control", "/api/hold"}:
+        if path not in {"/api/control", "/api/hold", "/api/strategy"}:
             self._send_json(404, {"error": "not found"})
             return
         if not self._require_auth():
@@ -865,6 +909,29 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                     "buying_paused": payload.get("buying_paused", True),
                     "expected_revision": payload.get("expected_revision"),
                 }
+            elif path == "/api/strategy":
+                selected = payload.get("strategy_profile")
+                if selected in (None, ""):
+                    selected = None
+                else:
+                    selected = validate_strategy_profile_selection(
+                        selected,
+                        STRATEGY_DIRECTORY,
+                    )
+                payload = {
+                    "strategy_profile_override": selected,
+                    "expected_revision": payload.get("expected_revision"),
+                }
+            elif "strategy_profile_override" in payload:
+                selected = payload.get("strategy_profile_override")
+                if selected in (None, ""):
+                    selected = None
+                else:
+                    selected = validate_strategy_profile_selection(
+                        selected,
+                        STRATEGY_DIRECTORY,
+                    )
+                payload["strategy_profile_override"] = selected
 
             expected_revision = payload.pop("expected_revision", None)
             with self.server.control_write_lock:
@@ -905,6 +972,9 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                     ],
                     "buy_price_ceiling_usd": updated[
                         "buy_price_ceiling_usd"
+                    ],
+                    "strategy_profile_override": updated[
+                        "strategy_profile_override"
                     ],
                 })
             self._send_json(200, {"control": control_status(updated)})

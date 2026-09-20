@@ -1,4 +1,6 @@
 import os
+import json
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -312,6 +314,54 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertTrue(snapshot["stale"])
         self.assertIn("not configured", snapshot["error"])
 
+    def test_strategy_control_lists_profiles_and_reports_pending_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            filename = "range_grid_strategy_selected.json"
+            with open(
+                os.path.join(directory, filename),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                json.dump({
+                    "operating_mode": "range_only",
+                    "paper_trading_enabled": False,
+                    "grid_anchor": "low,median",
+                    "range_window_hours": 24,
+                    "max_grid_size": 4,
+                    "profit_target_pct": 0.012,
+                }, handle)
+            with patch.object(
+                control_plane,
+                "CONFIGURED_STRATEGY_PROFILE",
+                "range_grid_strategy_default.json",
+            ):
+                snapshot = control_plane.build_strategy_control_snapshot(
+                    {"strategy_profile_override": filename},
+                    {"strategy_profile": "range_grid_strategy_default.json"},
+                    directory,
+                )
+
+        self.assertEqual(snapshot["selected_override"], filename)
+        self.assertEqual(snapshot["desired_profile"], filename)
+        self.assertTrue(snapshot["restart_pending"])
+        self.assertEqual(snapshot["desired"]["grid_anchor"], "low,median")
+        self.assertEqual(snapshot["options"][0]["filename"], filename)
+
+    def test_strategy_control_treats_absolute_active_profile_as_same_file(self):
+        filename = "range_grid_strategy_default.json"
+        with patch.object(
+            control_plane,
+            "CONFIGURED_STRATEGY_PROFILE",
+            filename,
+        ):
+            snapshot = control_plane.build_strategy_control_snapshot(
+                {},
+                {"strategy_profile": f"/opt/krakenbot/{filename}"},
+                tempfile.gettempdir(),
+            )
+
+        self.assertFalse(snapshot["restart_pending"])
+
     def test_control_page_has_interactive_dated_chart_tooltip(self):
         html = control_plane.HTML_FILE.read_text(encoding="utf-8")
 
@@ -321,6 +371,8 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertIn("timeZone:'UTC'", html)
         self.assertIn('id="floorEnabled"', html)
         self.assertIn('id="ceilingEnabled"', html)
+        self.assertIn('id="strategySelect"', html)
+        self.assertIn('id="applyStrategyButton"', html)
         self.assertIn("function renderPermissions", html)
         self.assertIn("Don’t buy below", html)
         self.assertIn("Don’t buy above", html)
@@ -335,6 +387,7 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertIn("function renderSentiment", html)
         self.assertIn("function renderBacktest", html)
         self.assertIn("request('/api/backtest')", html)
+        self.assertIn("request('/api/strategy',", html)
         self.assertIn("Ranked strategies", html)
         self.assertIn("Suggested bot tuning", html)
 

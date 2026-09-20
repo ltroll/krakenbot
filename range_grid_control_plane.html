@@ -30,7 +30,7 @@
         linear-gradient(145deg, #071018, #09131d 48%, #08141b);
       color: var(--text);
     }
-    button, input { font: inherit; }
+    button, input, select { font: inherit; }
     .shell { max-width: 1440px; margin: 0 auto; padding: 22px; }
     header { display: flex; justify-content: space-between; gap: 20px; align-items: center; margin-bottom: 18px; }
     h1 { margin: 0; font-size: clamp(1.35rem, 3vw, 2.15rem); letter-spacing: -.04em; }
@@ -51,6 +51,7 @@
     .market { grid-column: span 8; padding: 18px; }
     .chart-panel { grid-column: span 7; padding: 18px; }
     .control-panel { grid-column: span 5; padding: 18px; }
+    .strategy-panel { grid-column: 1 / -1; padding: 18px; }
     .targets-panel { grid-column: 1 / -1; padding: 18px; }
     .panel-title { margin: 0 0 13px; font-size: .78rem; color: var(--muted); text-transform: uppercase; letter-spacing: .11em; }
     .price { font-size: clamp(2.2rem, 5vw, 4.4rem); font-weight: 760; letter-spacing: -.065em; line-height: .95; }
@@ -92,6 +93,11 @@
     .dual-input { display: grid; grid-template-columns: 1fr 116px; gap: 10px; align-items: center; }
     input[type="range"] { width: 100%; accent-color: var(--cyan); }
     input[type="number"] { width: 100%; background: #0a151f; color: var(--text); border: 1px solid var(--line); border-radius: 9px; padding: 9px; }
+    .strategy-selector { display: grid; grid-template-columns: minmax(280px, 1fr) auto; gap: 10px; margin-top: 14px; }
+    .strategy-selector select { width: 100%; min-width: 0; padding: 11px 12px; color: var(--text); background: #0a151f; border: 1px solid var(--line); border-radius: 10px; }
+    .strategy-selector select:focus { outline: 2px solid rgba(77,214,199,.38); outline-offset: 1px; }
+    .strategy-meta { margin: 11px 0 0; color: var(--muted); font-size: .79rem; line-height: 1.55; }
+    .strategy-warning { color: var(--amber); }
     .actions { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--line); }
     .save-button { border: 0; background: var(--cyan); color: #061412; padding: 12px 22px; border-radius: 10px; font-weight: 850; cursor: pointer; }
     .save-button:disabled { opacity: .5; cursor: wait; }
@@ -144,7 +150,7 @@
     .watch-item strong { display: block; margin-bottom: 4px; font-size: .79rem; }
     .watch-item span { color: var(--muted); font-size: .77rem; line-height: 1.45; }
     @media (max-width: 980px) {
-      .hero, .market, .chart-panel, .control-panel, .weather-hero, .weather-summary, .weather-half, .backtest-hero, .backtest-summary, .backtest-half { grid-column: 1 / -1; }
+      .hero, .market, .chart-panel, .control-panel, .strategy-panel, .weather-hero, .weather-summary, .weather-half, .backtest-hero, .backtest-summary, .backtest-half { grid-column: 1 / -1; }
       .market-cards { grid-template-columns: repeat(2, 1fr); }
       .weather-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .permission-head { display: none; }
@@ -157,6 +163,7 @@
       header { align-items: flex-start; flex-direction: column; }
       .market-cards { grid-template-columns: 1fr; }
       .actions { align-items: stretch; flex-direction: column; }
+      .strategy-selector { grid-template-columns: 1fr; }
       .save-button { width: 100%; }
       .explainer-grid { grid-template-columns: 1fr; }
       .tabs { width: 100%; }
@@ -208,13 +215,30 @@
         </div>
         <button id="holdButton" class="hold-button">HOLD BUYING</button>
         <div class="bot-facts">
-          <div class="fact"><span>Strategy</span><strong id="strategy">—</strong></div>
-          <div class="fact"><span>Active mode</span><strong id="mode">—</strong></div>
           <div class="fact"><span>Open buys</span><strong id="openBuys">—</strong></div>
           <div class="fact"><span>Open sells</span><strong id="openSells">—</strong></div>
           <div class="fact"><span>Inventory</span><strong id="inventory">—</strong></div>
           <div class="fact"><span>Net P&amp;L</span><strong id="netPnl">—</strong></div>
         </div>
+      </section>
+
+      <section class="panel strategy-panel">
+        <div class="control-head">
+          <h2 class="panel-title">Strategy control</h2>
+          <span id="strategyApplyStatus" class="badge fresh">Active</span>
+        </div>
+        <div class="bot-facts">
+          <div class="fact"><span>Current strategy</span><strong id="strategy">—</strong></div>
+          <div class="fact"><span>Trading environment</span><strong id="strategyEnvironment">—</strong></div>
+          <div class="fact"><span>Operating mode</span><strong id="strategyOperatingMode">—</strong></div>
+          <div class="fact"><span>Active anchors</span><strong id="mode">—</strong></div>
+        </div>
+        <div class="strategy-selector">
+          <select id="strategySelect" aria-label="Select range-grid strategy"></select>
+          <button id="applyStrategyButton" class="save-button" type="button">APPLY STRATEGY</button>
+        </div>
+        <p id="strategyDetails" class="strategy-meta">Loading available strategies.</p>
+        <p class="strategy-meta strategy-warning">Applying a strategy restarts the bot at the start of its next cycle so every setting is loaded together. Existing inventory and open orders are preserved. The selected file becomes the base profile; an enabled anchor router can still apply per-anchor overrides.</p>
       </section>
 
       <section class="panel targets-panel">
@@ -334,7 +358,7 @@
   </div>
 
   <script>
-    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '', chartCandles: [], chartHoverIndex: null, chartGeometry: null, activeTab: 'trading', backtestLoadedAt: 0 };
+    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '', chartCandles: [], chartHoverIndex: null, chartGeometry: null, activeTab: 'trading', backtestLoadedAt: 0, strategySelectionDirty: false };
     const money = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', maximumFractionDigits: 0}).format(value);
     const money2 = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', minimumFractionDigits: 2, maximumFractionDigits: 2}).format(value);
     const request = async (url, options = {}, retry = true) => {
@@ -695,6 +719,71 @@
       setPermissionPrice('ceiling', control.buy_price_ceiling_usd ?? Math.round(marketPrice / 10) * 10);
     }
 
+    const strategyEntryForValue = value => {
+      const strategyControl = (state.payload || {}).strategy_control || {};
+      const filename = value || String(strategyControl.configured_profile || '').split('/').pop();
+      return (strategyControl.options || []).find(entry => entry.filename === filename) || null;
+    };
+
+    function renderStrategyDetails() {
+      const select = document.querySelector('#strategySelect');
+      const entry = strategyEntryForValue(select.value);
+      const strategyControl = (state.payload || {}).strategy_control || {};
+      const useEnvironment = !select.value;
+      const prefix = useEnvironment
+        ? `Environment default · ${strategyControl.configured_profile || 'not configured'}`
+        : entry ? entry.filename : select.value;
+      const facts = entry ? [
+        entry.paper_trading_enabled ? 'PAPER' : 'LIVE',
+        humanize(entry.operating_mode),
+        `anchors ${entry.grid_anchor || '—'}`,
+        entry.range_window_hours == null ? null : `${entry.range_window_hours}h range`,
+        entry.max_grid_size == null ? null : `${entry.max_grid_size} grid slots`,
+        entry.profit_target_pct == null ? null : `${(Number(entry.profit_target_pct) * 100).toFixed(2)}% target`,
+      ].filter(Boolean) : [];
+      document.querySelector('#strategyDetails').textContent = facts.length
+        ? `${prefix} · ${facts.join(' · ')}`
+        : `${prefix} · Profile details are unavailable.`;
+      const currentOverride = strategyControl.selected_override || '';
+      document.querySelector('#applyStrategyButton').disabled = select.value === currentOverride || Boolean(entry && !entry.valid);
+    }
+
+    function renderStrategyControl(strategyControl, bot) {
+      strategyControl = strategyControl || {};
+      const select = document.querySelector('#strategySelect');
+      const preservedValue = state.strategySelectionDirty ? select.value : null;
+      select.replaceChildren();
+
+      const defaultOption = document.createElement('option');
+      defaultOption.value = '';
+      defaultOption.textContent = `Use environment default · ${strategyControl.configured_profile || 'not configured'}`;
+      select.appendChild(defaultOption);
+      (strategyControl.options || []).forEach(entry => {
+        const option = document.createElement('option');
+        option.value = entry.filename;
+        option.disabled = entry.valid === false;
+        const environment = entry.paper_trading_enabled ? 'PAPER' : 'LIVE';
+        option.textContent = `${entry.label} · ${environment} · ${humanize(entry.operating_mode)}`;
+        select.appendChild(option);
+      });
+
+      const desiredValue = strategyControl.selected_override || '';
+      const selection = preservedValue != null && [...select.options].some(option => option.value === preservedValue)
+        ? preservedValue
+        : desiredValue;
+      select.value = selection;
+
+      document.querySelector('#strategy').textContent = strategyControl.active_profile || bot.strategy_profile || '—';
+      document.querySelector('#strategyEnvironment').textContent = bot.paper_trading_enabled === true ? 'Paper trading' : bot.paper_trading_enabled === false ? 'Live trading' : '—';
+      document.querySelector('#strategyOperatingMode').textContent = humanize(bot.operating_mode || (strategyControl.active || {}).operating_mode);
+      document.querySelector('#mode').textContent = (bot.strategy_modes || []).join(', ') || (strategyControl.active || {}).grid_anchor || '—';
+      const status = document.querySelector('#strategyApplyStatus');
+      const activeAvailable = Boolean(strategyControl.active_profile || bot.strategy_profile);
+      status.className = `badge ${strategyControl.restart_pending ? 'watch' : activeAvailable ? 'fresh' : 'unavailable'}`;
+      status.textContent = strategyControl.restart_pending ? 'Restart pending' : activeAvailable ? 'Active' : 'Waiting';
+      renderStrategyDetails();
+    }
+
     function render(payload) {
       state.payload = payload; state.revision = payload.control.revision;
       renderMarket(payload.market);
@@ -705,8 +794,7 @@
       hold.dataset.paused = control.buying_paused ? 'true' : 'false';
       hold.textContent = control.buying_paused ? 'RESUME BUYING' : 'HOLD BUYING';
       hold.classList.toggle('paused', control.buying_paused);
-      document.querySelector('#strategy').textContent = bot.strategy_profile || '—';
-      document.querySelector('#mode').textContent = (bot.strategy_modes || []).join(', ') || '—';
+      renderStrategyControl(payload.strategy_control || {}, bot);
       document.querySelector('#openBuys').textContent = payload.orders.open_buy_count;
       document.querySelector('#openSells').textContent = payload.orders.open_sell_count;
       document.querySelector('#inventory').textContent = money2(bot.deployed_inventory_usd);
@@ -766,6 +854,34 @@
         await request('/api/control', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({expected_revision:state.revision, buy_price_floor_enabled:floorEnabled, buy_price_floor_usd:Number.isFinite(floorPrice) && floorPrice >= 1 ? floorPrice : null, buy_price_ceiling_enabled:ceilingEnabled, buy_price_ceiling_usd:Number.isFinite(ceilingPrice) && ceilingPrice >= 1 ? ceilingPrice : null})});
         await refresh();
       } catch (error) { showError(error); } finally { button.disabled = false; }
+    });
+
+    document.querySelector('#strategySelect').addEventListener('change', () => {
+      state.strategySelectionDirty = true;
+      renderStrategyDetails();
+    });
+
+    document.querySelector('#applyStrategyButton').addEventListener('click', async () => {
+      const button = document.querySelector('#applyStrategyButton');
+      const select = document.querySelector('#strategySelect');
+      const selectedProfile = select.value || null;
+      const entry = strategyEntryForValue(select.value);
+      const target = selectedProfile || ((state.payload || {}).strategy_control || {}).configured_profile || 'environment default';
+      const environment = entry
+        ? (entry.paper_trading_enabled ? 'PAPER' : 'LIVE')
+        : 'CONFIGURED';
+      const operatingMode = entry ? humanize(entry.operating_mode) : 'configured mode';
+      if (!window.confirm(`Apply ${target}?\n\nMode: ${environment} · ${operatingMode}\n\nThe bot will restart at the start of its next cycle. Existing inventory and open orders will not be canceled or repriced.`)) return;
+      button.disabled = true;
+      try {
+        await request('/api/strategy', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({strategy_profile:selectedProfile, expected_revision:state.revision})});
+        state.strategySelectionDirty = false;
+        await refresh();
+        setTimeout(refresh, 3000);
+      } catch (error) { showError(error); } finally {
+        button.disabled = false;
+        renderStrategyDetails();
+      }
     });
 
     const priceChart = document.querySelector('#priceChart');

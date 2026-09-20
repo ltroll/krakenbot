@@ -14,6 +14,7 @@ import json
 import os
 import socket
 import statistics
+import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -69,6 +70,7 @@ from range_grid_source_policy import (
     source_entry_policy_decision,
     source_entry_step_pct,
 )
+from range_grid_strategy_catalog import validate_strategy_profile_selection
 from signal_normalizer import normalize_signal_payload
 
 load_dotenv()
@@ -82,11 +84,12 @@ CONFIG_FILE = (
     or os.getenv("BOT_CONFIG_FILE")
     or "range_grid_config.json"
 )
-STRATEGY_PROFILE = (
+CONFIGURED_STRATEGY_PROFILE = (
     os.getenv("RANGE_GRID_STRATEGY_PROFILE")
     or os.getenv("STRATEGY_PROFILE")
     or "range_grid_strategy_default.json"
 )
+STRATEGY_PROFILE = CONFIGURED_STRATEGY_PROFILE
 STATE_FILE = (
     os.getenv("RANGE_GRID_STATE_FILE")
     or os.getenv("BOT_STATE_FILE")
@@ -142,6 +145,21 @@ CONTROL_FILE = os.getenv(
     "RANGE_GRID_CONTROL_FILE",
     "range_grid_control_state.json",
 )
+STRATEGY_DIRECTORY = os.getenv(
+    "RANGE_GRID_STRATEGY_DIRECTORY",
+    os.path.dirname(os.path.abspath(__file__)),
+)
+STARTUP_STRATEGY_SELECTION_ERROR = None
+_startup_control = load_control_state_fail_safe(CONTROL_FILE)
+_startup_strategy_override = _startup_control.get("strategy_profile_override")
+if _startup_strategy_override and not _startup_control.get("load_error"):
+    try:
+        STRATEGY_PROFILE = validate_strategy_profile_selection(
+            _startup_strategy_override,
+            STRATEGY_DIRECTORY,
+        )
+    except ValueError as exc:
+        STARTUP_STRATEGY_SELECTION_ERROR = str(exc)
 ANCHOR_STRATEGY_ROUTER_FILE = (
     os.getenv("RANGE_GRID_ANCHOR_ROUTER_FILE")
     or "/var/www/html/bot/range_grid_anchor_winners.json"
@@ -457,12 +475,39 @@ def select_strategy_profile(config_data):
 def load_strategy_config():
     if strategy_profile_is_file():
         path = os.path.expanduser(STRATEGY_PROFILE)
+        if not os.path.isabs(path):
+            catalog_path = os.path.join(STRATEGY_DIRECTORY, path)
+            if os.path.exists(catalog_path):
+                path = catalog_path
         if not os.path.exists(path):
             raise RuntimeError(f"Strategy profile file not found: {path}")
 
         return load_json_file(path)
 
     return select_strategy_profile(load_config())
+
+
+def desired_strategy_profile(operator_control):
+    operator_control = (
+        operator_control if isinstance(operator_control, dict) else {}
+    )
+    return (
+        operator_control.get("strategy_profile_override")
+        or CONFIGURED_STRATEGY_PROFILE
+    )
+
+
+def restart_for_strategy_profile(profile, cycle_id):
+    log_and_console(
+        "STRATEGY_PROFILE_RESTART",
+        message="Restarting range-grid bot to apply operator strategy",
+        cycle_id=cycle_id,
+        previous_strategy_profile=STRATEGY_PROFILE,
+        selected_strategy_profile=profile,
+    )
+    executable = sys.executable or "python3"
+    script = os.path.abspath(sys.argv[0])
+    os.execv(executable, [executable, script, *sys.argv[1:]])
 
 
 def resolve_local_path(path):
@@ -6388,6 +6433,13 @@ def main():
         operating_mode=operating_mode,
         paper_trading_enabled=paper_trading_enabled,
         base_strategy_fingerprint=base_strategy_fingerprint,
+        configured_strategy_profile=CONFIGURED_STRATEGY_PROFILE,
+        strategy_profile_source=(
+            "operator_control"
+            if STRATEGY_PROFILE != CONFIGURED_STRATEGY_PROFILE
+            else "environment"
+        ),
+        startup_strategy_selection_error=STARTUP_STRATEGY_SELECTION_ERROR,
         effective_strategy_composition_mode=(
             base_effective_strategy["composition_mode"]
         ),
@@ -6754,6 +6806,31 @@ def main():
             cycle_candidate_skip_reason_counts = {}
             active_strategy_modes = list(strategy_modes)
             operator_control = load_control_state_fail_safe(CONTROL_FILE)
+            selected_strategy_profile = desired_strategy_profile(
+                operator_control
+            )
+            strategy_selection_error = None
+            if selected_strategy_profile != STRATEGY_PROFILE:
+                try:
+                    if operator_control.get("strategy_profile_override"):
+                        selected_strategy_profile = (
+                            validate_strategy_profile_selection(
+                                selected_strategy_profile,
+                                STRATEGY_DIRECTORY,
+                            )
+                        )
+                    restart_for_strategy_profile(
+                        selected_strategy_profile,
+                        cycle_id,
+                    )
+                except (OSError, ValueError) as exc:
+                    strategy_selection_error = str(exc)
+                    operator_control = dict(operator_control)
+                    operator_control["buying_paused"] = True
+                    operator_control["load_error"] = (
+                        "strategy selection failed: "
+                        f"{strategy_selection_error}"
+                    )
             operator_control_snapshot = control_status(operator_control)
             operator_control_revision = operator_control_snapshot["revision"]
             operator_control_error = operator_control_snapshot.get("load_error")
@@ -11407,6 +11484,13 @@ def main():
                 "operating_mode": operating_mode,
                 "sentiment_control_mode": sentiment_control_mode,
                 "strategy_profile": STRATEGY_PROFILE,
+                "configured_strategy_profile": CONFIGURED_STRATEGY_PROFILE,
+                "strategy_profile_source": (
+                    "operator_control"
+                    if STRATEGY_PROFILE != CONFIGURED_STRATEGY_PROFILE
+                    else "environment"
+                ),
+                "strategy_selection_error": strategy_selection_error,
                 "paper_trading_enabled": paper_trading_enabled,
                 "base_strategy_fingerprint": base_strategy_fingerprint,
                 "effective_strategy": effective_strategy_status_snapshot(),
