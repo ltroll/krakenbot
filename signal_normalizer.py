@@ -1,6 +1,85 @@
 import os
 
 
+def _dict_value(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _first_present(*values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _numeric_or_none(value):
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _find_contributor(signal, *source_types):
+    wanted = {str(value).strip().lower() for value in source_types}
+    contributors = signal.get("contributors")
+    if not isinstance(contributors, list):
+        return {}
+    for contributor in contributors:
+        if not isinstance(contributor, dict):
+            continue
+        source_type = str(contributor.get("source_type") or "").lower()
+        source_id = str(contributor.get("source_id") or "").lower()
+        if source_type in wanted or source_id in wanted:
+            return contributor
+    return {}
+
+
+def _fear_greed_values(signal):
+    """Recover Fear & Greed values from both old and current signal schemas.
+
+    The sentiment engine encodes the 0-100 index in the fear_greed contributor
+    as ``btc_sentiment = (index - 50) / 100``. Older payloads also published
+    the original index at the asset root; prefer that explicit value whenever
+    it is available.
+    """
+    contributor = _find_contributor(signal, "fear_greed")
+    score = _dict_value(contributor.get("score"))
+    fear_greed = _dict_value(signal.get("fear_greed"))
+    sentiment = _first_present(
+        signal.get("fear_greed_sentiment"),
+        fear_greed.get("sentiment"),
+        score.get("fear_greed_sentiment"),
+        score.get("btc_sentiment"),
+    )
+    index = _first_present(
+        signal.get("fear_greed_index"),
+        fear_greed.get("index"),
+        fear_greed.get("value"),
+        score.get("fear_greed_index"),
+        score.get("index"),
+    )
+    inferred = False
+    if index is None:
+        numeric_sentiment = _numeric_or_none(sentiment)
+        if numeric_sentiment is not None and -0.5 <= numeric_sentiment <= 0.5:
+            index = round(50.0 + (numeric_sentiment * 100.0), 4)
+            inferred = True
+    return {
+        "index": index,
+        "index_inferred": inferred,
+        "sentiment": sentiment,
+        "confidence": _first_present(
+            fear_greed.get("confidence"),
+            score.get("confidence"),
+            contributor.get("confidence"),
+        ),
+        "observed_at": _first_present(
+            fear_greed.get("observed_at"),
+            contributor.get("observed_at"),
+        ),
+    }
+
+
 def infer_asset_id_from_pair(pair):
     pair = (pair or "").upper()
     if "ETH" in pair or "XETH" in pair:
@@ -125,6 +204,7 @@ def normalize_signal_payload(signal, asset_id=None, pair=None):
     risk_context = signal.get("risk_context")
     if not isinstance(risk_context, dict):
         risk_context = {}
+    risk_inputs = _dict_value(risk_context.get("inputs"))
 
     active_strategy = signal.get("active_strategy")
     if not isinstance(active_strategy, dict):
@@ -150,6 +230,30 @@ def normalize_signal_payload(signal, asset_id=None, pair=None):
 
     asset_price = signal.get("asset_price")
 
+    kraken_flow = _dict_value(signal.get("kraken_flow"))
+    flow_contributor = _find_contributor(signal, "kraken_flow")
+    flow_score = _dict_value(flow_contributor.get("score"))
+    direct_flow_pressure = signal.get("flow_pressure")
+    kraken_flow_pressure = _first_present(
+        kraken_flow.get("flow_pressure"),
+        kraken_flow.get("aggression_score"),
+    )
+    contributor_flow_pressure = _first_present(
+        flow_score.get("flow_pressure"),
+        flow_score.get("aggression_score"),
+    )
+    flow_pressure = _first_present(
+        direct_flow_pressure,
+        kraken_flow_pressure,
+        contributor_flow_pressure,
+    )
+    mean_reversion_opportunity = _first_present(
+        signal.get("mean_reversion_opportunity"),
+        risk_inputs.get("mean_reversion_opportunity"),
+        price_regime.get("mean_reversion_opportunity"),
+    )
+    fear_greed = _fear_greed_values(signal)
+
     return {
         "asset_id": signal.get("asset_id"),
         "asset_symbol": asset.get("symbol") or signal.get("asset_id"),
@@ -168,8 +272,26 @@ def normalize_signal_payload(signal, asset_id=None, pair=None):
         "liquidity_risk": signal.get("liquidity_risk"),
         "btc_relative_strength": signal.get("btc_relative_strength"),
         "eth_relative_strength": signal.get("eth_relative_strength"),
-        "mean_reversion_opportunity": signal.get("mean_reversion_opportunity"),
-        "flow_pressure": signal.get("flow_pressure"),
+        "mean_reversion_opportunity": mean_reversion_opportunity,
+        "mean_reversion_opportunity_source": (
+            "signal"
+            if signal.get("mean_reversion_opportunity") is not None
+            else "risk_context.inputs"
+            if risk_inputs.get("mean_reversion_opportunity") is not None
+            else "price_regime"
+            if price_regime.get("mean_reversion_opportunity") is not None
+            else None
+        ),
+        "flow_pressure": flow_pressure,
+        "flow_pressure_source": (
+            "signal"
+            if direct_flow_pressure is not None
+            else "kraken_flow"
+            if kraken_flow_pressure is not None
+            else "contributors.kraken_flow"
+            if contributor_flow_pressure is not None
+            else None
+        ),
         "market_interpretation": signal.get("market_interpretation"),
         "signal_utility": signal.get("signal_utility"),
         "asset_price_record": signal.get("asset_price_record"),
@@ -180,7 +302,11 @@ def normalize_signal_payload(signal, asset_id=None, pair=None):
         ),
         "raw_confidence": signal.get("raw_confidence"),
         "raw_direction_bias": signal.get("raw_direction_bias"),
-        "fear_greed_index": signal.get("fear_greed_index"),
+        "fear_greed_index": fear_greed["index"],
+        "fear_greed_index_inferred": fear_greed["index_inferred"],
+        "fear_greed_sentiment": fear_greed["sentiment"],
+        "fear_greed_confidence": fear_greed["confidence"],
+        "fear_greed_observed_at": fear_greed["observed_at"],
         "signal_status": signal.get("signal_status"),
         "bot_action_allowed": signal.get("bot_action_allowed"),
         "action_recommendation": signal.get("action_recommendation"),

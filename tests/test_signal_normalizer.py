@@ -41,7 +41,30 @@ def make_multi_asset_signal():
                     "buy_aggression_score": 0.4872,
                     "position_size_multiplier": 0.3525,
                     "hard_safety_flags": [],
+                    "inputs": {
+                        "mean_reversion_opportunity": 0.0961,
+                    },
                 },
+                "contributors": [
+                    {
+                        "source_type": "kraken_flow",
+                        "source_id": "btc_kraken_flow",
+                        "observed_at": "2026-06-12T14:35:00+00:00",
+                        "score": {
+                            "flow_pressure": -0.4087,
+                            "confidence": 0.9367,
+                        },
+                    },
+                    {
+                        "source_type": "fear_greed",
+                        "source_id": "fear_greed",
+                        "observed_at": "2026-06-12T14:35:01+00:00",
+                        "score": {
+                            "btc_sentiment": 0.21,
+                            "confidence": 0.77,
+                        },
+                    },
+                ],
                 "source_status": {
                     "asset_price": {"status": "fresh"},
                     "asset_price_regime": {"status": "fresh"},
@@ -132,7 +155,45 @@ class SignalNormalizerTests(unittest.TestCase):
             normalized["asset_pipeline"]["asset_price_source_status"],
             "fresh"
         )
+        self.assertEqual(normalized["flow_pressure"], -0.4087)
+        self.assertEqual(
+            normalized["flow_pressure_source"],
+            "contributors.kraken_flow",
+        )
+        self.assertEqual(normalized["mean_reversion_opportunity"], 0.0961)
+        self.assertEqual(
+            normalized["mean_reversion_opportunity_source"],
+            "risk_context.inputs",
+        )
+        self.assertEqual(normalized["fear_greed_index"], 71.0)
+        self.assertTrue(normalized["fear_greed_index_inferred"])
+        self.assertEqual(normalized["fear_greed_sentiment"], 0.21)
+        self.assertEqual(normalized["fear_greed_confidence"], 0.77)
+        self.assertEqual(
+            normalized["fear_greed_observed_at"],
+            "2026-06-12T14:35:01+00:00",
+        )
         self.assertEqual(normalized["target_prices"], [])
+
+    def test_direct_signal_values_override_nested_fallbacks(self):
+        payload = make_multi_asset_signal()
+        payload["assets"]["BTC"].update({
+            "fear_greed_index": 28,
+            "flow_pressure": 0.25,
+            "mean_reversion_opportunity": 0.4,
+        })
+
+        normalized = normalize_signal_payload(payload, asset_id="BTC")
+
+        self.assertEqual(normalized["fear_greed_index"], 28)
+        self.assertFalse(normalized["fear_greed_index_inferred"])
+        self.assertEqual(normalized["flow_pressure"], 0.25)
+        self.assertEqual(normalized["flow_pressure_source"], "signal")
+        self.assertEqual(normalized["mean_reversion_opportunity"], 0.4)
+        self.assertEqual(
+            normalized["mean_reversion_opportunity_source"],
+            "signal",
+        )
 
 
 if __name__ == "__main__":

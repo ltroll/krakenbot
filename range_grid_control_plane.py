@@ -351,9 +351,20 @@ def build_sentiment_snapshot(signal, *, captured_at, fetch_error=None):
             "confidence": signal.get("confidence"),
             "direction_bias": signal.get("direction_bias"),
             "fear_greed_index": signal.get("fear_greed_index"),
+            "fear_greed_index_inferred": signal.get(
+                "fear_greed_index_inferred",
+                False,
+            ),
+            "fear_greed_sentiment": signal.get("fear_greed_sentiment"),
+            "fear_greed_confidence": signal.get("fear_greed_confidence"),
+            "fear_greed_observed_at": signal.get("fear_greed_observed_at"),
             "flow_pressure": signal.get("flow_pressure"),
+            "flow_pressure_source": signal.get("flow_pressure_source"),
             "mean_reversion_opportunity": signal.get(
                 "mean_reversion_opportunity"
+            ),
+            "mean_reversion_opportunity_source": signal.get(
+                "mean_reversion_opportunity_source"
             ),
             "signal_status": signal.get("signal_status"),
             "bot_action_allowed": signal.get("bot_action_allowed"),

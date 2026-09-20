@@ -119,7 +119,6 @@ class RangeGridControlPlaneTests(unittest.TestCase):
                     "asset_sentiment": -0.12,
                     "execution_signal": 0.24,
                     "confidence": 0.72,
-                    "fear_greed_index": 28,
                     "signal_status": "fresh",
                     "bot_action_allowed": True,
                     "action_recommendation": "cautious_accumulation",
@@ -128,6 +127,9 @@ class RangeGridControlPlaneTests(unittest.TestCase):
                         "market_risk_score": 0.42,
                         "buy_aggression_score": 0.61,
                         "downside_risk_score": 0.38,
+                        "inputs": {
+                            "mean_reversion_opportunity": 0.0961,
+                        },
                         "weather_report": {
                             "condition": "leveling_after_drop",
                             "alert_level": "watch",
@@ -148,6 +150,24 @@ class RangeGridControlPlaneTests(unittest.TestCase):
                             },
                         },
                     },
+                    "contributors": [
+                        {
+                            "source_type": "fear_greed",
+                            "source_id": "fear_greed",
+                            "observed_at": (
+                                now - timedelta(minutes=5)
+                            ).isoformat(),
+                            "score": {
+                                "btc_sentiment": 0.21,
+                                "confidence": 0.77,
+                            },
+                        },
+                        {
+                            "source_type": "kraken_flow",
+                            "source_id": "btc_kraken_flow",
+                            "score": {"flow_pressure": -0.4087},
+                        },
+                    ],
                 },
                 "ETH": {"asset_id": "ETH", "execution_signal": -0.5},
             },
@@ -169,7 +189,14 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertEqual(snapshot["freshness_state"], "fresh")
         self.assertEqual(snapshot["age_minutes"], 5.0)
         self.assertEqual(snapshot["signal"]["asset_id"], "BTC")
-        self.assertEqual(snapshot["signal"]["fear_greed_index"], 28)
+        self.assertEqual(snapshot["signal"]["fear_greed_index"], 71.0)
+        self.assertTrue(snapshot["signal"]["fear_greed_index_inferred"])
+        self.assertEqual(snapshot["signal"]["fear_greed_sentiment"], 0.21)
+        self.assertEqual(snapshot["signal"]["flow_pressure"], -0.4087)
+        self.assertEqual(
+            snapshot["signal"]["mean_reversion_opportunity"],
+            0.0961,
+        )
         self.assertEqual(
             snapshot["risk"]["weather_condition"],
             "leveling_after_drop",

@@ -411,12 +411,16 @@
       const actionPolicy = signal.action_policy || {};
       const activeStrategy = signal.active_strategy || {};
       const strategyName = activeStrategy.active_strategy || activeStrategy.strategy_label || activeStrategy.name;
+      const fearGreedNumber = Number(signal.fear_greed_index);
+      const fearGreedText = signal.fear_greed_index == null || !Number.isFinite(fearGreedNumber)
+        ? 'Not published'
+        : `${fearGreedNumber.toFixed(0)}${signal.fear_greed_index_inferred ? ' · derived' : ''}`;
       document.querySelector('#sentimentFacts').innerHTML = factMarkup([
         ['Recommendation', humanize(signal.action_recommendation)],
         ['Signal status', humanize(signal.signal_status)],
         ['Execution signal', decimal(signal.execution_signal)],
         ['Confidence', scoreText(signal.confidence)],
-        ['Fear & Greed', signal.fear_greed_index ?? '—'],
+        ['Fear & Greed index', fearGreedText],
         ['Asset sentiment', decimal(signal.asset_sentiment)],
         ['Direction bias', decimal(signal.direction_bias)],
         ['Flow pressure', decimal(signal.flow_pressure)],
@@ -454,7 +458,9 @@
         ['4h return', signedPercent(risk.weather_market_price_return_4h_pct)],
         ['Range low', money2(risk.weather_market_range_low ?? regime.price_low_24h)],
         ['Range high', money2(risk.weather_market_range_high ?? regime.price_high_24h)],
-        ['Support / resistance', `${money(structure.support_price)} / ${money(structure.resistance_price)}`],
+        ['Support / resistance', structure.support_price == null && structure.resistance_price == null
+          ? 'Not published by signal'
+          : `${money(structure.support_price)} / ${money(structure.resistance_price)}`],
       ]);
 
       document.querySelector('#opportunityFacts').innerHTML = factMarkup([
