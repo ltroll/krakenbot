@@ -4,19 +4,14 @@
 
 import json
 import os
-import re
 from datetime import datetime, timezone
 
 from range_grid_order_safety import atomic_write_json, load_json_with_backup
 
 
-CONTROL_SCHEMA_VERSION = 1
-MAX_CONTROL_TARGETS = 8
+CONTROL_SCHEMA_VERSION = 2
 MIN_BUY_PRICE_USD = 1.0
 MAX_BUY_PRICE_USD = 10_000_000.0
-MIN_PROFIT_TARGET_PCT = 0.0
-MAX_PROFIT_TARGET_PCT = 0.25
-TARGET_ID_PATTERN = re.compile(r"[^a-zA-Z0-9_-]+")
 
 
 class ControlStateError(ValueError):
@@ -33,8 +28,10 @@ def default_control_state():
         "revision": 0,
         "buying_paused": False,
         "cancel_open_buys_on_hold": True,
-        "manual_targets_enabled": False,
-        "buy_targets": [],
+        "buy_price_floor_enabled": False,
+        "buy_price_floor_usd": None,
+        "buy_price_ceiling_enabled": False,
+        "buy_price_ceiling_usd": None,
         "updated_at": None,
         "updated_by": None,
     }
@@ -48,68 +45,21 @@ def _bool_value(value, default=False):
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _float_value(value, field):
+def _optional_price(value, field, enabled):
+    if value in (None, ""):
+        if enabled:
+            raise ControlStateError(f"{field} is required while enabled")
+        return None
     try:
-        return float(value)
+        price = float(value)
     except (TypeError, ValueError) as exc:
         raise ControlStateError(f"{field} must be numeric") from exc
-
-
-def _target_id(value, index):
-    normalized = TARGET_ID_PATTERN.sub("-", str(value or "").strip()).strip("-")
-    return normalized[:48] or f"target-{index + 1}"
-
-
-def normalize_buy_targets(raw_targets):
-    if raw_targets is None:
-        return []
-    if not isinstance(raw_targets, list):
-        raise ControlStateError("buy_targets must be a list")
-    if len(raw_targets) > MAX_CONTROL_TARGETS:
+    if not MIN_BUY_PRICE_USD <= price <= MAX_BUY_PRICE_USD:
         raise ControlStateError(
-            f"buy_targets cannot contain more than {MAX_CONTROL_TARGETS} targets"
+            f"{field} must be between "
+            f"{MIN_BUY_PRICE_USD} and {MAX_BUY_PRICE_USD}"
         )
-
-    normalized = []
-    seen_ids = set()
-    for index, raw_target in enumerate(raw_targets):
-        if not isinstance(raw_target, dict):
-            raise ControlStateError(f"buy_targets[{index}] must be an object")
-
-        target_id = _target_id(raw_target.get("id"), index)
-        if target_id in seen_ids:
-            raise ControlStateError(f"duplicate buy target id: {target_id}")
-        seen_ids.add(target_id)
-
-        buy_price = _float_value(
-            raw_target.get("buy_price"),
-            f"buy_targets[{index}].buy_price",
-        )
-        if not MIN_BUY_PRICE_USD <= buy_price <= MAX_BUY_PRICE_USD:
-            raise ControlStateError(
-                f"buy_targets[{index}].buy_price must be between "
-                f"{MIN_BUY_PRICE_USD} and {MAX_BUY_PRICE_USD}"
-            )
-
-        profit_target_pct = _float_value(
-            raw_target.get("profit_target_pct"),
-            f"buy_targets[{index}].profit_target_pct",
-        )
-        if not MIN_PROFIT_TARGET_PCT <= profit_target_pct <= MAX_PROFIT_TARGET_PCT:
-            raise ControlStateError(
-                f"buy_targets[{index}].profit_target_pct must be between "
-                f"{MIN_PROFIT_TARGET_PCT} and {MAX_PROFIT_TARGET_PCT}"
-            )
-
-        label = str(raw_target.get("label") or f"Target {index + 1}").strip()
-        normalized.append({
-            "id": target_id,
-            "label": label[:80],
-            "enabled": _bool_value(raw_target.get("enabled"), True),
-            "buy_price": round(buy_price, 2),
-            "profit_target_pct": round(profit_target_pct, 8),
-        })
-    return normalized
+    return round(price, 2)
 
 
 def normalize_control_state(payload):
@@ -118,16 +68,51 @@ def normalize_control_state(payload):
     if not isinstance(payload, dict):
         raise ControlStateError("control state must be a JSON object")
 
-    manual_targets_enabled = _bool_value(
-        payload.get("manual_targets_enabled"),
-        False,
+    legacy_prices = []
+    if _bool_value(payload.get("manual_targets_enabled"), False):
+        for target in payload.get("buy_targets", []):
+            if not isinstance(target, dict):
+                continue
+            if not _bool_value(target.get("enabled"), True):
+                continue
+            try:
+                legacy_price = float(target.get("buy_price"))
+            except (TypeError, ValueError):
+                continue
+            if MIN_BUY_PRICE_USD <= legacy_price <= MAX_BUY_PRICE_USD:
+                legacy_prices.append(legacy_price)
+
+    floor_enabled = _bool_value(
+        payload.get("buy_price_floor_enabled"),
+        bool(legacy_prices),
     )
-    buy_targets = normalize_buy_targets(payload.get("buy_targets", []))
-    if manual_targets_enabled and not any(
-        target["enabled"] for target in buy_targets
+    ceiling_enabled = _bool_value(
+        payload.get("buy_price_ceiling_enabled"),
+        bool(legacy_prices),
+    )
+    floor_price = _optional_price(
+        payload.get(
+            "buy_price_floor_usd",
+            min(legacy_prices) if legacy_prices else None,
+        ),
+        "buy_price_floor_usd",
+        floor_enabled,
+    )
+    ceiling_price = _optional_price(
+        payload.get(
+            "buy_price_ceiling_usd",
+            max(legacy_prices) if legacy_prices else None,
+        ),
+        "buy_price_ceiling_usd",
+        ceiling_enabled,
+    )
+    if (
+        floor_enabled
+        and ceiling_enabled
+        and floor_price > ceiling_price
     ):
         raise ControlStateError(
-            "manual target mode requires at least one enabled buy target"
+            "buy_price_floor_usd cannot be above buy_price_ceiling_usd"
         )
 
     normalized = default_control_state()
@@ -138,8 +123,10 @@ def normalize_control_state(payload):
             payload.get("cancel_open_buys_on_hold"),
             True,
         ),
-        "manual_targets_enabled": manual_targets_enabled,
-        "buy_targets": buy_targets,
+        "buy_price_floor_enabled": floor_enabled,
+        "buy_price_floor_usd": floor_price,
+        "buy_price_ceiling_enabled": ceiling_enabled,
+        "buy_price_ceiling_usd": ceiling_price,
         "updated_at": payload.get("updated_at"),
         "updated_by": payload.get("updated_by"),
     })
@@ -153,8 +140,10 @@ def merge_control_update(current, update, *, updated_by=None):
     allowed_fields = {
         "buying_paused",
         "cancel_open_buys_on_hold",
-        "manual_targets_enabled",
-        "buy_targets",
+        "buy_price_floor_enabled",
+        "buy_price_floor_usd",
+        "buy_price_ceiling_enabled",
+        "buy_price_ceiling_usd",
     }
     merged = dict(current)
     for key in allowed_fields:
@@ -193,17 +182,6 @@ def save_control_state(path, state):
     return normalized
 
 
-def active_buy_targets(state):
-    normalized = normalize_control_state(state)
-    if not normalized["manual_targets_enabled"]:
-        return []
-    return [target for target in normalized["buy_targets"] if target["enabled"]]
-
-
-def operator_grid_slot(target_id):
-    return f"operator:{_target_id(target_id, 0)}"
-
-
 def _positive_float(value):
     try:
         parsed = float(value)
@@ -212,62 +190,39 @@ def _positive_float(value):
     return parsed if parsed > 0 else None
 
 
-def _non_negative_float(value):
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
+def operator_buy_price_rule_reason(state, price):
+    normalized = normalize_control_state(state)
+    if not (
+        normalized["buy_price_floor_enabled"]
+        or normalized["buy_price_ceiling_enabled"]
+    ):
         return None
-    return parsed if parsed >= 0 else None
+    order_price = _positive_float(price)
+    if order_price is None:
+        return "operator_buy_price_missing"
+    if (
+        normalized["buy_price_floor_enabled"]
+        and order_price < normalized["buy_price_floor_usd"]
+    ):
+        return "operator_buy_price_below_floor"
+    if (
+        normalized["buy_price_ceiling_enabled"]
+        and order_price > normalized["buy_price_ceiling_usd"]
+    ):
+        return "operator_buy_price_above_ceiling"
+    return None
 
 
-def operator_buy_cancel_reason(state, order, *, price_decimals=2):
+def operator_buy_cancel_reason(state, order):
     """Return why a pending buy conflicts with the current operator state."""
     normalized = normalize_control_state(state)
     order = order if isinstance(order, dict) else {}
-    grid_slot = str(order.get("grid_slot") or "")
-    operator_order = bool(order.get("operator_controlled")) or (
-        grid_slot.startswith("operator:")
-    )
-
     if (
         normalized["buying_paused"]
         and normalized["cancel_open_buys_on_hold"]
     ):
         return "operator_buy_hold"
-    if normalized["manual_targets_enabled"] and not operator_order:
-        return "operator_manual_mode_replaces_automatic"
-    if not normalized["manual_targets_enabled"] and operator_order:
-        return "operator_manual_mode_disabled"
-    if not normalized["manual_targets_enabled"]:
-        return None
-
-    desired_targets = {
-        operator_grid_slot(target["id"]): target
-        for target in active_buy_targets(normalized)
-    }
-    desired = desired_targets.get(grid_slot)
-    if desired is None:
-        return "operator_target_disabled"
-
-    order_price = _positive_float(order.get("price"))
-    desired_price = _positive_float(desired.get("buy_price"))
-    if (
-        order_price is None
-        or desired_price is None
-        or round(order_price, price_decimals)
-        != round(desired_price, price_decimals)
-    ):
-        return "operator_target_price_changed"
-
-    order_profit = _non_negative_float(order.get("sell_pct_override"))
-    desired_profit = _non_negative_float(desired.get("profit_target_pct"))
-    if (
-        order_profit is None
-        or desired_profit is None
-        or round(order_profit, 8) != round(desired_profit, 8)
-    ):
-        return "operator_target_profit_changed"
-    return None
+    return operator_buy_price_rule_reason(normalized, order.get("price"))
 
 
 def control_status(state):
@@ -276,9 +231,10 @@ def control_status(state):
         "revision": normalized["revision"],
         "buying_paused": normalized["buying_paused"],
         "cancel_open_buys_on_hold": normalized["cancel_open_buys_on_hold"],
-        "manual_targets_enabled": normalized["manual_targets_enabled"],
-        "active_target_count": len(active_buy_targets(normalized)),
-        "buy_targets": normalized["buy_targets"],
+        "buy_price_floor_enabled": normalized["buy_price_floor_enabled"],
+        "buy_price_floor_usd": normalized["buy_price_floor_usd"],
+        "buy_price_ceiling_enabled": normalized["buy_price_ceiling_enabled"],
+        "buy_price_ceiling_usd": normalized["buy_price_ceiling_usd"],
         "updated_at": normalized["updated_at"],
         "updated_by": normalized["updated_by"],
         "load_error": state.get("load_error") if isinstance(state, dict) else None,

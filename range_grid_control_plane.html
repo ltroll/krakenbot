@@ -75,34 +75,20 @@
       color: #071018; background: var(--amber); font-weight: 850; letter-spacing: .05em; cursor: pointer;
     }
     .hold-button.paused { background: var(--green); }
-    .switch-row { display: flex; justify-content: space-between; gap: 18px; align-items: center; padding: 12px 0; border-top: 1px solid var(--line); }
-    .switch-row small { display: block; color: var(--muted); margin-top: 4px; line-height: 1.35; }
-    .switch { position: relative; width: 46px; height: 26px; flex: 0 0 auto; }
-    .switch input { opacity: 0; width: 0; height: 0; }
-    .switch span { position: absolute; inset: 0; border-radius: 99px; background: #314556; cursor: pointer; transition: .2s; }
-    .switch span::after { content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px; border-radius: 50%; background: white; transition: .2s; }
-    .switch input:checked + span { background: var(--cyan); }
-    .switch input:checked + span::after { transform: translateX(20px); }
     .bot-facts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 12px; }
     .fact { background: var(--panel-2); border-radius: 10px; padding: 10px; }
     .fact span { display: block; color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; }
     .fact strong { display: block; margin-top: 4px; font-size: .92rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .targets-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
-    .targets-toolbar .panel-title { margin: 0; }
-    .lock-control { display: flex; align-items: center; gap: 9px; color: var(--text); font-size: .8rem; font-weight: 750; cursor: pointer; }
-    .lock-control input { width: 17px; height: 17px; accent-color: var(--cyan); }
     .target-explainer { margin-bottom: 15px; padding: 13px 14px; border: 1px solid rgba(98,168,255,.20); border-radius: 12px; background: rgba(98,168,255,.07); }
     .target-explainer > strong { display: block; margin-bottom: 8px; color: var(--blue); font-size: .84rem; }
-    .explainer-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; color: var(--muted); font-size: .76rem; line-height: 1.45; }
+    .explainer-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; color: var(--muted); font-size: .76rem; line-height: 1.45; }
     .explainer-grid b { color: var(--text); }
-    .lock-note { margin-top: 10px; padding-top: 9px; border-top: 1px solid rgba(98,168,255,.16); color: var(--muted); font-size: .75rem; }
-    .lock-note b { color: var(--cyan); }
-    .target-head, .target-row { display: grid; grid-template-columns: 42px 120px minmax(260px, 1fr) minmax(220px, .75fr); gap: 14px; align-items: center; }
-    .target-head { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; padding: 0 10px 8px; }
-    .target-row { padding: 13px 10px; border-top: 1px solid var(--line); }
-    .target-row:first-of-type { border-top: 0; }
-    .target-label { width: 100%; background: transparent; border: 1px solid transparent; color: var(--text); padding: 8px; border-radius: 8px; font-weight: 700; }
-    .target-label:focus { border-color: var(--blue); outline: none; background: var(--panel-2); }
+    .permission-head, .permission-row { display: grid; grid-template-columns: 42px minmax(190px, .45fr) minmax(300px, 1fr); gap: 14px; align-items: center; }
+    .permission-head { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; padding: 0 10px 8px; }
+    .permission-row { padding: 15px 10px; border-top: 1px solid var(--line); }
+    .permission-row label { font-weight: 750; }
+    .permission-row label small { display: block; margin-top: 4px; color: var(--muted); font-weight: 400; line-height: 1.35; }
+    .permission-enabled { width: 18px; height: 18px; accent-color: var(--cyan); }
     .dual-input { display: grid; grid-template-columns: 1fr 116px; gap: 10px; align-items: center; }
     input[type="range"] { width: 100%; accent-color: var(--cyan); }
     input[type="number"] { width: 100%; background: #0a151f; color: var(--text); border: 1px solid var(--line); border-radius: 9px; padding: 9px; }
@@ -161,9 +147,9 @@
       .hero, .market, .chart-panel, .control-panel, .weather-hero, .weather-summary, .weather-half, .backtest-hero, .backtest-summary, .backtest-half { grid-column: 1 / -1; }
       .market-cards { grid-template-columns: repeat(2, 1fr); }
       .weather-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .target-head { display: none; }
-      .target-row { grid-template-columns: 38px 1fr; }
-      .target-row .dual-input { grid-column: 1 / -1; }
+      .permission-head { display: none; }
+      .permission-row { grid-template-columns: 38px 1fr; }
+      .permission-row .dual-input { grid-column: 1 / -1; }
       .explainer-grid { grid-template-columns: repeat(2, 1fr); }
     }
     @media (max-width: 520px) {
@@ -172,7 +158,6 @@
       .market-cards { grid-template-columns: 1fr; }
       .actions { align-items: stretch; flex-direction: column; }
       .save-button { width: 100%; }
-      .targets-toolbar { align-items: flex-start; flex-direction: column; }
       .explainer-grid { grid-template-columns: 1fr; }
       .tabs { width: 100%; }
       .tab-button { flex: 1; padding: 10px 8px; }
@@ -222,10 +207,6 @@
           <span id="revision" class="subline">Revision —</span>
         </div>
         <button id="holdButton" class="hold-button">HOLD BUYING</button>
-        <div class="switch-row">
-          <div><strong>Manual target mode</strong><small>Replaces automatic buy candidates while enabled.</small></div>
-          <label class="switch"><input id="manualEnabled" type="checkbox"><span></span></label>
-        </div>
         <div class="bot-facts">
           <div class="fact"><span>Strategy</span><strong id="strategy">—</strong></div>
           <div class="fact"><span>Active mode</span><strong id="mode">—</strong></div>
@@ -237,27 +218,31 @@
       </section>
 
       <section class="panel targets-panel">
-        <div class="targets-toolbar">
-          <h2 class="panel-title">Operator buy targets</h2>
-          <label class="lock-control" title="Move every buy price by the same dollar amount"><input id="priceLockToggle" type="checkbox"> Lock spacing when moving prices</label>
-        </div>
+        <h2 class="panel-title">Operator buy permissions</h2>
         <div class="target-explainer">
-          <strong>How operator targets work</strong>
+          <strong>Set the zone where automatic buys are allowed</strong>
           <div class="explainer-grid">
-            <div><b>1 · Choose levels.</b> Check each row you want active and set its exact limit-buy price.</div>
-            <div><b>2 · Take control.</b> Turn on Manual target mode and save. The targets replace automatic candidates and pending automatic buys are canceled.</div>
-            <div><b>3 · Wait for price.</b> The bot posts exact-price GTC buys without chasing. A target above market waits until it can be placed without crossing.</div>
-            <div><b>4 · Complete the cycle.</b> A fill gets that row’s net target plus fees. The level reopens after its sale; existing sells are untouched.</div>
+            <div><b>Floor · Don’t buy below.</b> Candidates and resting buys below the enabled floor are rejected.</div>
+            <div><b>Ceiling · Don’t buy above.</b> Candidates and resting buys above the enabled ceiling are rejected.</div>
+            <div><b>Inside the zone · Strategy decides.</b> The active strategy still chooses levels, sizing, timing, and profit targets normally.</div>
           </div>
-          <div class="lock-note"><b>Lock spacing</b> links only the buy prices: moving any one by $250 moves every level by the same $250. Names, enabled rows, and profit targets do not change.</div>
         </div>
-        <div class="target-head"><span>Use</span><span>Name</span><span>Buy price</span><span id="profitTargetHeader">Net profit target</span></div>
-        <div id="targetRows"></div>
+        <div class="permission-head"><span>Use</span><span>Rule</span><span>Boundary price</span></div>
+        <div class="permission-row">
+          <input id="floorEnabled" class="permission-enabled" type="checkbox" aria-label="Enable minimum buy price">
+          <label for="floorEnabled">Don’t buy below<small>The boundary itself is allowed.</small></label>
+          <div class="dual-input"><input id="floorRange" type="range" step="10"><input id="floorNumber" type="number" min="1" step="10"></div>
+        </div>
+        <div class="permission-row">
+          <input id="ceilingEnabled" class="permission-enabled" type="checkbox" aria-label="Enable maximum buy price">
+          <label for="ceilingEnabled">Don’t buy above<small>The boundary itself is allowed.</small></label>
+          <div class="dual-input"><input id="ceilingRange" type="range" step="10"><input id="ceilingNumber" type="number" min="1" step="10"></div>
+        </div>
         <div class="actions">
           <div class="notice">
-            Manual prices are GTC limit buys and must be at or below market when submitted. A 0% net target is fee-adjusted break-even; the bot currently adds <span id="feeAllowance">its configured round-trip fee allowance</span> to the sell price. Profit targets apply only to new fills. Manual targets bypass forecast opinions but retain hard safety, cash, and inventory limits. HOLD cancels open buys on the next bot cycle, but existing sell orders remain untouched.
+            Saving these rules does not create a ladder or force a trade. On the next bot cycle, open buys outside the allowed zone are canceled and new candidates outside it are skipped. Existing inventory and all sell orders remain untouched. Disable both rules to return to unrestricted strategy pricing.
           </div>
-          <button id="saveButton" class="save-button">SAVE CONTROLS</button>
+          <button id="saveButton" class="save-button">SAVE PERMISSIONS</button>
         </div>
       </section>
     </main>
@@ -349,7 +334,7 @@
   </div>
 
   <script>
-    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '', chartCandles: [], chartHoverIndex: null, chartGeometry: null, priceLock: localStorage.getItem('rangeGridPriceLock') === 'true', activeTab: 'trading', backtestLoadedAt: 0 };
+    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '', chartCandles: [], chartHoverIndex: null, chartGeometry: null, activeTab: 'trading', backtestLoadedAt: 0 };
     const money = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', maximumFractionDigits: 0}).format(value);
     const money2 = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', minimumFractionDigits: 2, maximumFractionDigits: 2}).format(value);
     const request = async (url, options = {}, retry = true) => {
@@ -677,66 +662,31 @@
       drawChart(state.chartCandles);
     }
 
-    function seedTargets(currentPrice) {
-      const discounts = [.01, .03, .05, .07];
-      return discounts.map((discount, index) => ({id:`target-${index+1}`, label:`Level ${index+1}`, enabled:false, buy_price:Math.round(currentPrice * (1-discount) / 10) * 10, profit_target_pct:.009}));
-    }
-
-    function setTargetRowPrice(row, rawValue) {
+    function setPermissionPrice(name, rawValue) {
       const value = Math.round(Number(rawValue) * 100) / 100;
       if (!Number.isFinite(value) || value < 1 || value > 10000000) return false;
-      const range = row.querySelector('.price-range');
-      const number = row.querySelector('.price-number');
+      const range = document.querySelector(`#${name}Range`);
+      const number = document.querySelector(`#${name}Number`);
       if (value < Number(range.min)) range.min = Math.max(1, Math.floor(value / 100) * 100);
       if (value > Number(range.max)) range.max = Math.ceil(value / 100) * 100;
       range.value = value;
       number.value = value.toFixed(2);
-      row.dataset.currentPrice = String(value);
       return true;
     }
 
-    function changeTargetPrice(sourceRow, requestedValue) {
-      const previousValue = Number(sourceRow.dataset.currentPrice);
-      const nextValue = Number(requestedValue);
-      if (!Number.isFinite(previousValue) || !Number.isFinite(nextValue)) {
-        setTargetRowPrice(sourceRow, previousValue);
-        return;
-      }
-      if (!state.priceLock) {
-        if (!setTargetRowPrice(sourceRow, nextValue)) setTargetRowPrice(sourceRow, previousValue);
-        return;
-      }
-
-      const rows = [...document.querySelectorAll('.target-row')];
-      const prices = rows.map(row => Number(row.dataset.currentPrice));
-      let delta = nextValue - previousValue;
-      delta = Math.max(delta, 1 - Math.min(...prices));
-      delta = Math.min(delta, 10000000 - Math.max(...prices));
-      rows.forEach((row, index) => setTargetRowPrice(row, prices[index] + delta));
-    }
-
-    function renderTargets(targets, currentPrice) {
-      const values = targets.length ? targets : seedTargets(currentPrice || 80000);
-      const min = Math.max(1000, Math.floor((currentPrice || 80000) * .70 / 100) * 100);
-      const max = Math.ceil((currentPrice || 80000) * 1.01 / 100) * 100;
-      document.querySelector('#targetRows').innerHTML = values.map((target, index) => `
-        <div class="target-row" data-id="${target.id}" data-current-price="${target.buy_price}">
-          <input class="target-enabled" type="checkbox" ${target.enabled ? 'checked' : ''} aria-label="Enable target ${index+1}">
-          <input class="target-label" value="${target.label.replaceAll('&','&amp;').replaceAll('"','&quot;')}" maxlength="80">
-          <div class="dual-input"><input class="price-range" type="range" min="${min}" max="${max}" step="10" value="${target.buy_price}"><input class="price-number" type="number" min="1" step=".1" value="${target.buy_price}"></div>
-          <div class="dual-input"><input class="profit-range" type="range" min="0" max="5" step=".05" value="${target.profit_target_pct*100}"><input class="profit-number" type="number" min="0" max="25" step=".01" value="${(target.profit_target_pct*100).toFixed(2)}"></div>
-        </div>`).join('');
-      document.querySelectorAll('.target-row').forEach(row => {
-        const priceRange = row.querySelector('.price-range'), priceNumber = row.querySelector('.price-number');
-        const profitRange = row.querySelector('.profit-range'), profitNumber = row.querySelector('.profit-number');
-        priceRange.addEventListener('input', () => changeTargetPrice(row, priceRange.value));
-        priceNumber.addEventListener('input', () => {
-          if (!state.priceLock && priceNumber.value.trim() !== '') changeTargetPrice(row, priceNumber.value);
-        });
-        priceNumber.addEventListener('change', () => changeTargetPrice(row, priceNumber.value));
-        profitRange.addEventListener('input', () => profitNumber.value = Number(profitRange.value).toFixed(2));
-        profitNumber.addEventListener('input', () => profitRange.value = profitNumber.value);
+    function renderPermissions(control, currentPrice) {
+      const marketPrice = Number(currentPrice) || 80000;
+      const rangeMin = Math.max(1, Math.floor(marketPrice * .5 / 100) * 100);
+      const rangeMax = Math.ceil(marketPrice * 1.2 / 100) * 100;
+      ['floor', 'ceiling'].forEach(name => {
+        const range = document.querySelector(`#${name}Range`);
+        range.min = rangeMin;
+        range.max = rangeMax;
       });
+      document.querySelector('#floorEnabled').checked = control.buy_price_floor_enabled === true;
+      document.querySelector('#ceilingEnabled').checked = control.buy_price_ceiling_enabled === true;
+      setPermissionPrice('floor', control.buy_price_floor_usd ?? Math.round(marketPrice * .9 / 10) * 10);
+      setPermissionPrice('ceiling', control.buy_price_ceiling_usd ?? Math.round(marketPrice / 10) * 10);
     }
 
     function render(payload) {
@@ -745,7 +695,6 @@
       renderSentiment(payload.sentiment || {});
       const control = payload.control, bot = payload.bot || {}, stats = bot.stats || {};
       document.querySelector('#revision').textContent = `Revision ${control.revision}`;
-      document.querySelector('#manualEnabled').checked = control.manual_targets_enabled;
       const hold = document.querySelector('#holdButton');
       hold.dataset.paused = control.buying_paused ? 'true' : 'false';
       hold.textContent = control.buying_paused ? 'RESUME BUYING' : 'HOLD BUYING';
@@ -756,23 +705,11 @@
       document.querySelector('#openSells').textContent = payload.orders.open_sell_count;
       document.querySelector('#inventory').textContent = money2(bot.deployed_inventory_usd);
       document.querySelector('#netPnl').textContent = money2(stats.realized_estimated_net_pnl);
-      const feeAllowancePct = Number(bot.round_trip_fee_pct || 0) * 100;
-      document.querySelector('#profitTargetHeader').textContent = 'Net profit target · min 0%';
-      document.querySelector('#feeAllowance').textContent = `${feeAllowancePct.toFixed(2)}% round-trip fees`;
-      renderTargets(control.buy_targets || [], payload.market.current_price);
+      renderPermissions(control, payload.market.current_price);
       document.querySelector('#statusDot').className = `dot ${payload.market.stale ? '' : 'ok'}`;
-      document.querySelector('#statusText').textContent = control.buying_paused ? 'Buying held by operator' : 'Control plane online';
+      const priceRulesActive = control.buy_price_floor_enabled || control.buy_price_ceiling_enabled;
+      document.querySelector('#statusText').textContent = control.buying_paused ? 'Buying held by operator' : priceRulesActive ? 'Online · operator price rules active' : 'Control plane online';
       if (control.load_error) showError(new Error(`Control state fail-safe hold: ${control.load_error}`)); else clearError();
-    }
-
-    function collectTargets() {
-      return [...document.querySelectorAll('.target-row')].map(row => ({
-        id: row.dataset.id,
-        label: row.querySelector('.target-label').value,
-        enabled: row.querySelector('.target-enabled').checked,
-        buy_price: Number(row.querySelector('.price-number').value),
-        profit_target_pct: Number(row.querySelector('.profit-number').value) / 100,
-      }));
     }
 
     async function refresh() {
@@ -813,20 +750,26 @@
     document.querySelector('#saveButton').addEventListener('click', async () => {
       const button = document.querySelector('#saveButton'); button.disabled = true;
       try {
-        const manualTargetsEnabled = document.querySelector('#manualEnabled').checked;
-        const buyTargets = collectTargets();
-        if (manualTargetsEnabled && !buyTargets.some(target => target.enabled)) throw new Error('Enable at least one buy target before turning on manual mode.');
-        await request('/api/control', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({expected_revision:state.revision, manual_targets_enabled:manualTargetsEnabled, buy_targets:buyTargets})});
+        const floorEnabled = document.querySelector('#floorEnabled').checked;
+        const ceilingEnabled = document.querySelector('#ceilingEnabled').checked;
+        const floorPrice = Number(document.querySelector('#floorNumber').value);
+        const ceilingPrice = Number(document.querySelector('#ceilingNumber').value);
+        if (floorEnabled && (!Number.isFinite(floorPrice) || floorPrice < 1)) throw new Error('Enter a valid minimum buy price.');
+        if (ceilingEnabled && (!Number.isFinite(ceilingPrice) || ceilingPrice < 1)) throw new Error('Enter a valid maximum buy price.');
+        if (floorEnabled && ceilingEnabled && floorPrice > ceilingPrice) throw new Error("'Don’t buy below' cannot be higher than 'Don’t buy above'.");
+        await request('/api/control', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({expected_revision:state.revision, buy_price_floor_enabled:floorEnabled, buy_price_floor_usd:Number.isFinite(floorPrice) && floorPrice >= 1 ? floorPrice : null, buy_price_ceiling_enabled:ceilingEnabled, buy_price_ceiling_usd:Number.isFinite(ceilingPrice) && ceilingPrice >= 1 ? ceilingPrice : null})});
         await refresh();
       } catch (error) { showError(error); } finally { button.disabled = false; }
     });
 
     const priceChart = document.querySelector('#priceChart');
-    const priceLockToggle = document.querySelector('#priceLockToggle');
-    priceLockToggle.checked = state.priceLock;
-    priceLockToggle.addEventListener('change', () => {
-      state.priceLock = priceLockToggle.checked;
-      localStorage.setItem('rangeGridPriceLock', String(state.priceLock));
+    ['floor', 'ceiling'].forEach(name => {
+      const range = document.querySelector(`#${name}Range`);
+      const number = document.querySelector(`#${name}Number`);
+      range.addEventListener('input', () => setPermissionPrice(name, range.value));
+      number.addEventListener('change', () => {
+        if (!setPermissionPrice(name, number.value) && state.payload) renderPermissions(state.payload.control, state.payload.market.current_price);
+      });
     });
     priceChart.addEventListener('pointermove', event => showChartPoint(event.clientX));
     priceChart.addEventListener('pointerdown', event => showChartPoint(event.clientX));

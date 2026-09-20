@@ -5,14 +5,13 @@ import unittest
 
 from range_grid_control import (
     ControlStateError,
-    active_buy_targets,
     default_control_state,
     load_control_state,
     load_control_state_fail_safe,
     merge_control_update,
     normalize_control_state,
     operator_buy_cancel_reason,
-    operator_grid_slot,
+    operator_buy_price_rule_reason,
     save_control_state,
 )
 
@@ -22,103 +21,106 @@ class RangeGridControlTests(unittest.TestCase):
         state = default_control_state()
 
         self.assertFalse(state["buying_paused"])
-        self.assertFalse(state["manual_targets_enabled"])
-        self.assertTrue(state["cancel_open_buys_on_hold"])
-        self.assertEqual(active_buy_targets(state), [])
+        self.assertFalse(state["buy_price_floor_enabled"])
+        self.assertFalse(state["buy_price_ceiling_enabled"])
+        self.assertIsNone(operator_buy_price_rule_reason(state, 75000))
 
-    def test_normalizes_enabled_targets_and_decimal_profit(self):
+    def test_normalizes_enabled_buy_price_zone(self):
         state = normalize_control_state({
-            "manual_targets_enabled": True,
-            "buy_targets": [
-                {
-                    "id": "dip one",
-                    "label": "First dip",
-                    "enabled": True,
-                    "buy_price": "76500.126",
-                    "profit_target_pct": "0.009",
-                },
-                {
-                    "id": "deep",
-                    "enabled": False,
-                    "buy_price": 74000,
-                    "profit_target_pct": 0.015,
-                },
-            ],
+            "buy_price_floor_enabled": True,
+            "buy_price_floor_usd": "75000.126",
+            "buy_price_ceiling_enabled": True,
+            "buy_price_ceiling_usd": "80500.444",
         })
 
-        self.assertEqual(state["buy_targets"][0]["id"], "dip-one")
-        self.assertEqual(state["buy_targets"][0]["buy_price"], 76500.13)
-        self.assertEqual(state["buy_targets"][0]["profit_target_pct"], 0.009)
-        self.assertEqual(len(active_buy_targets(state)), 1)
-        self.assertEqual(operator_grid_slot("dip one"), "operator:dip-one")
+        self.assertEqual(state["buy_price_floor_usd"], 75000.13)
+        self.assertEqual(state["buy_price_ceiling_usd"], 80500.44)
+        self.assertIsNone(operator_buy_price_rule_reason(state, 75000.13))
+        self.assertIsNone(operator_buy_price_rule_reason(state, 80500.44))
+        self.assertEqual(
+            operator_buy_price_rule_reason(state, 75000.12),
+            "operator_buy_price_below_floor",
+        )
+        self.assertEqual(
+            operator_buy_price_rule_reason(state, 80500.45),
+            "operator_buy_price_above_ceiling",
+        )
 
-    def test_rejects_unsafe_target_values(self):
+    def test_enabled_boundary_requires_valid_price(self):
         for payload in (
-            {"buy_targets": [{"buy_price": 0, "profit_target_pct": 0.01}]},
-            {"buy_targets": [{"buy_price": 75000, "profit_target_pct": -0.0001}]},
-            {"buy_targets": [{"buy_price": 75000, "profit_target_pct": 0.5}]},
+            {"buy_price_floor_enabled": True},
+            {
+                "buy_price_ceiling_enabled": True,
+                "buy_price_ceiling_usd": 0,
+            },
+            {
+                "buy_price_floor_enabled": True,
+                "buy_price_floor_usd": "invalid",
+            },
         ):
             with self.subTest(payload=payload):
                 with self.assertRaises(ControlStateError):
                     normalize_control_state(payload)
 
-    def test_zero_net_profit_target_is_fee_adjusted_break_even(self):
-        state = normalize_control_state({
-            "manual_targets_enabled": True,
-            "buy_targets": [{
-                "id": "break-even",
-                "buy_price": 75000,
-                "profit_target_pct": 0,
-            }],
-        })
-
-        self.assertEqual(state["buy_targets"][0]["profit_target_pct"], 0)
-        self.assertIsNone(operator_buy_cancel_reason(
-            state,
-            {
-                "operator_controlled": True,
-                "grid_slot": "operator:break-even",
-                "price": 75000,
-                "sell_pct_override": 0,
-            },
-        ))
-
-    def test_manual_mode_requires_an_enabled_target(self):
-        with self.assertRaisesRegex(
-            ControlStateError,
-            "at least one enabled buy target",
-        ):
+    def test_floor_cannot_be_above_ceiling(self):
+        with self.assertRaisesRegex(ControlStateError, "cannot be above"):
             normalize_control_state({
-                "manual_targets_enabled": True,
-                "buy_targets": [{
-                    "id": "disabled",
-                    "enabled": False,
-                    "buy_price": 75000,
-                    "profit_target_pct": 0.01,
-                }],
+                "buy_price_floor_enabled": True,
+                "buy_price_floor_usd": 81000,
+                "buy_price_ceiling_enabled": True,
+                "buy_price_ceiling_usd": 79000,
             })
 
-    def test_merge_increments_revision_and_preserves_other_fields(self):
-        current = normalize_control_state({
-            "revision": 4,
+    def test_disabled_boundary_value_is_preserved_for_ui(self):
+        state = normalize_control_state({
+            "buy_price_floor_enabled": False,
+            "buy_price_floor_usd": 74000,
+        })
+
+        self.assertFalse(state["buy_price_floor_enabled"])
+        self.assertEqual(state["buy_price_floor_usd"], 74000)
+        self.assertIsNone(operator_buy_price_rule_reason(state, 70000))
+
+    def test_old_manual_targets_migrate_to_operator_price_zone(self):
+        state = normalize_control_state({
+            "schema_version": 1,
             "manual_targets_enabled": True,
             "buy_targets": [{
-                "id": "one",
-                "buy_price": 76000,
+                "id": "old-target",
+                "buy_price": 75000,
                 "profit_target_pct": 0.01,
             }],
         })
 
+        self.assertEqual(state["schema_version"], 2)
+        self.assertNotIn("manual_targets_enabled", state)
+        self.assertNotIn("buy_targets", state)
+        self.assertTrue(state["buy_price_floor_enabled"])
+        self.assertEqual(state["buy_price_floor_usd"], 75000)
+        self.assertTrue(state["buy_price_ceiling_enabled"])
+        self.assertEqual(state["buy_price_ceiling_usd"], 75000)
+
+    def test_merge_increments_revision_and_preserves_other_fields(self):
+        current = normalize_control_state({
+            "revision": 4,
+            "buy_price_floor_enabled": True,
+            "buy_price_floor_usd": 75000,
+        })
+
         updated = merge_control_update(
             current,
-            {"buying_paused": True},
+            {
+                "buying_paused": True,
+                "buy_price_ceiling_enabled": True,
+                "buy_price_ceiling_usd": 80000,
+            },
             updated_by="test",
         )
 
         self.assertEqual(updated["revision"], 5)
         self.assertTrue(updated["buying_paused"])
-        self.assertTrue(updated["manual_targets_enabled"])
-        self.assertEqual(len(updated["buy_targets"]), 1)
+        self.assertEqual(updated["buy_price_floor_usd"], 75000)
+        self.assertEqual(updated["buy_price_ceiling_usd"], 80000)
         self.assertEqual(updated["updated_by"], "test")
 
     def test_round_trip_and_corruption_fail_safe(self):
@@ -141,47 +143,32 @@ class RangeGridControlTests(unittest.TestCase):
             self.assertTrue(fail_safe["buying_paused"])
             self.assertIsNotNone(fail_safe["load_error"])
 
-    def test_hold_and_manual_mode_cancel_only_conflicting_pending_buys(self):
-        matching_operator_order = {
-            "operator_controlled": True,
-            "grid_slot": "operator:dip",
-            "price": 75000,
-            "sell_pct_override": 0.01,
-        }
-        manual_state = normalize_control_state({
-            "manual_targets_enabled": True,
-            "buy_targets": [{
-                "id": "dip",
-                "enabled": True,
-                "buy_price": 75000,
-                "profit_target_pct": 0.01,
-            }],
+    def test_hold_and_price_zone_cancel_only_conflicting_pending_buys(self):
+        state = normalize_control_state({
+            "buy_price_floor_enabled": True,
+            "buy_price_floor_usd": 75000,
+            "buy_price_ceiling_enabled": True,
+            "buy_price_ceiling_usd": 80000,
         })
 
         self.assertIsNone(operator_buy_cancel_reason(
-            manual_state,
-            matching_operator_order,
+            state,
+            {"price": 77500},
         ))
         self.assertEqual(
-            operator_buy_cancel_reason(
-                manual_state,
-                {"grid_slot": "range_low:1", "price": 74000},
-            ),
-            "operator_manual_mode_replaces_automatic",
+            operator_buy_cancel_reason(state, {"price": 74000}),
+            "operator_buy_price_below_floor",
+        )
+        self.assertEqual(
+            operator_buy_cancel_reason(state, {"price": 81000}),
+            "operator_buy_price_above_ceiling",
         )
         self.assertEqual(
             operator_buy_cancel_reason(
-                {**manual_state, "buying_paused": True},
-                matching_operator_order,
+                {**state, "buying_paused": True},
+                {"price": 77500},
             ),
             "operator_buy_hold",
-        )
-        self.assertEqual(
-            operator_buy_cancel_reason(
-                manual_state,
-                {**matching_operator_order, "sell_pct_override": 0.02},
-            ),
-            "operator_target_profit_changed",
         )
 
 

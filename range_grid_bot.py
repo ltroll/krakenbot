@@ -36,11 +36,10 @@ from range_grid_guardrails import (
     validate_strategy_config,
 )
 from range_grid_control import (
-    active_buy_targets,
     control_status,
     load_control_state_fail_safe,
     operator_buy_cancel_reason,
-    operator_grid_slot,
+    operator_buy_price_rule_reason,
 )
 from range_grid_effective_strategy import resolve_effective_strategy
 from range_grid_entry_placement import (
@@ -4272,7 +4271,7 @@ def reconcile_operator_control_open_buys(
     cycle_id,
     actions,
 ):
-    """Cancel pending buys that conflict with an explicit operator mode.
+    """Cancel pending buys that conflict with operator price permissions.
 
     A partially-filled buy may have its unfilled remainder canceled; the normal
     fill path still preserves the executed volume and creates its sell order.
@@ -4293,7 +4292,6 @@ def reconcile_operator_control_open_buys(
         cancel_reason = operator_buy_cancel_reason(
             operator_control,
             order,
-            price_decimals=PRICE_DECIMALS,
         )
 
         if cancel_reason is None or order.get("control_cancel_requested_at"):
@@ -7042,32 +7040,14 @@ def main():
             range_signal_gates_allow = (
                 llm_signal_gates_allow or range_fallback_active
             )
-            operator_manual_targets = active_buy_targets(operator_control)
-            operator_manual_mode = bool(
-                operator_control.get("manual_targets_enabled")
-            )
-            operator_manual_buy_available = bool(
-                operator_manual_mode
-                and operator_manual_targets
-                and not runtime_block_reason
-            )
             any_buys_allowed = (
-                operator_manual_buy_available
-                if operator_manual_mode
-                else (
-                    (llm_buys_allowed and llm_signal_gates_allow)
-                    or (range_buys_allowed and range_signal_gates_allow)
-                    or (
-                        range_source_policy_bypass_available
-                        and range_signal_gates_allow
-                    )
+                (llm_buys_allowed and llm_signal_gates_allow)
+                or (range_buys_allowed and range_signal_gates_allow)
+                or (
+                    range_source_policy_bypass_available
+                    and range_signal_gates_allow
                 )
             )
-            if operator_manual_mode:
-                llm_buys_allowed = False
-                range_buys_allowed = False
-                base_any_buys_allowed = False
-                range_source_policy_bypass_available = False
             if runtime_block_reason:
                 llm_buys_allowed = False
                 range_buys_allowed = False
@@ -8681,8 +8661,7 @@ def main():
 
             # BUY CANDIDATES
             automatic_candidate_ready = (
-                not operator_manual_mode
-                and range_signal_gates_allow
+                range_signal_gates_allow
                 and (
                     effective_position_size_pct > 0
                     or resting_grid_source_configured
@@ -8694,33 +8673,9 @@ def main():
                     or range_source_policy_bypass_available
                 )
             )
-            if operator_manual_buy_available or automatic_candidate_ready:
+            if automatic_candidate_ready:
                 candidate_levels = []
-                if operator_manual_buy_available:
-                    for target in operator_manual_targets:
-                        candidate_levels.append({
-                            "level": target["buy_price"],
-                            "grid_slot": operator_grid_slot(target["id"]),
-                            "grid_slot_depth": 1,
-                            "sell_pct_override": target[
-                                "profit_target_pct"
-                            ],
-                            "buy_source": "range_low",
-                            "anchor_router_anchor": None,
-                            "anchor_router_route": None,
-                            "anchor_router_block_reason": None,
-                            "effective_strategy": (
-                                base_effective_strategy_for_source(
-                                    "range_low"
-                                )
-                            ),
-                            "route_strategy_config": strategy_config,
-                            "route_entry_step_pct": entry_step_pct,
-                            "operator_controlled": True,
-                            "control_target_id": target["id"],
-                            "control_target_label": target["label"],
-                        })
-                elif llm_buy_allowed:
+                if llm_buy_allowed:
                     candidate_levels = [
                         {
                             "level": llm_target["buy_price"],
@@ -9531,6 +9486,12 @@ def main():
                         skip_reason = "max_open_high_anchor_orders"
                     elif available_usd <= 0:
                         skip_reason = "insufficient_available_usd"
+
+                    if skip_reason is None:
+                        skip_reason = operator_buy_price_rule_reason(
+                            operator_control,
+                            level,
+                        )
 
                     volume = (
                         available_usd

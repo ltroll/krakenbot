@@ -298,8 +298,9 @@ journalctl -u kraken-range-grid-control.service -f
 The page asks for the token on its first API request and keeps it only in the
 browser tab's session storage. HOLD blocks new buys and requests cancellation
 of pending buys; it leaves existing sell orders and filled inventory alone.
-Manual target mode replaces the strategy's automatic buy candidates until it
-is disabled.
+Operator buy-price bounds veto automatic candidates outside the allowed zone;
+the strategy continues choosing its own ladder inside it. Saving a bound also
+requests cancellation of pending buys outside the zone on the next bot cycle.
 
 ## 4. Install The Sentiment Executor Service
 

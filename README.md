@@ -307,8 +307,9 @@ Important values in the selected strategy file, such as [`range_grid_strategy_de
 
 Run `range_grid_control_plane.py` beside the bot to get a single-page HTTP
 console with the current BTC price, rolling 24-hour, 7-day, 50-day, and 200-day
-average/low/high values, a 200-day chart, bot status, manual buy targets, and a
-buying hold control. A separate Weather & Sentiment tab reads `LLM_SIGNAL_URL`
+average/low/high values, a 200-day chart, bot status, operator buy-price
+permissions, and a buying hold control. A separate Weather & Sentiment tab reads
+`LLM_SIGNAL_URL`
 for `SIGNAL_ASSET_ID` and shows feed freshness, engine recommendations, market
 location, risk/opportunity scores, warnings, and suggested tuning. That tab is
 read-only; it does not apply the engine's suggested multipliers. The Backtest
@@ -317,14 +318,14 @@ versus live activity, top-ranked strategy, ranked comparison table, and
 watchlist.
 
 The control plane writes `RANGE_GRID_CONTROL_FILE`; the bot reads that file on
-every cycle. Manual target mode replaces automatic buy candidates while it is
-enabled. Each enabled target is a GTC limit buy at the exact selected price. A
-target above the current market waits rather than becoming a marketable order.
-Its selected profit percentage is locked to a new fill as the net target, with
-the strategy's configured round-trip fee allowance added to the sell price.
-Operator targets bypass forecast/sentiment opinions and automatic buy cooldowns,
-but still respect hard-safety flags, operating mode, available cash, exchange
-minimums, inventory limits, and other execution guardrails.
+every cycle. The optional price floor means "do not buy below this price," and
+the optional ceiling means "do not buy above this price." Prices exactly on a
+boundary are allowed. These are veto rules: the active strategy continues to
+choose its ladder levels, timing, sizing, and profit targets inside the allowed
+zone. Saving a boundary requests cancellation of pending buys outside the zone
+on the next cycle. It does not alter filled inventory or any sell order.
+An enabled version-1 manual ladder is migrated conservatively to a floor at its
+lowest enabled price and a ceiling at its highest enabled price.
 
 HOLD blocks new buys and, by default, requests cancellation of pending buy
 orders on the next bot cycle. It never cancels or reprices existing sell orders,

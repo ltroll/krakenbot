@@ -282,10 +282,9 @@ class RangeGridBotLoggingTests(unittest.TestCase):
 
         self.assertIn("load_control_state_fail_safe", called_functions)
         self.assertIn("reconcile_operator_control_open_buys", called_functions)
-        self.assertIn("active_buy_targets", called_functions)
-        self.assertIn("operator_grid_slot", called_functions)
+        self.assertIn("operator_buy_price_rule_reason", called_functions)
 
-    def test_operator_targets_lock_exact_profit_without_fear_greed_multiplier(self):
+    def test_operator_price_rules_do_not_replace_sell_management(self):
         tree = self._bot_tree()
         string_values = {
             node.value
@@ -293,10 +292,9 @@ class RangeGridBotLoggingTests(unittest.TestCase):
             if isinstance(node, ast.Constant) and isinstance(node.value, str)
         }
 
-        self.assertIn("operator_target_exact", string_values)
-        self.assertIn("operator_target_above_market", string_values)
         self.assertIn("operator_buy_hold", string_values)
         self.assertIn("operator_controlled", string_values)
+        self.assertIn("CONTROL_BUY_CANCEL_REQUESTED", string_values)
 
 
 if __name__ == "__main__":

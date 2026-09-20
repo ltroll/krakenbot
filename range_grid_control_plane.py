@@ -883,15 +883,18 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                     "cancel_open_buys_on_hold": updated[
                         "cancel_open_buys_on_hold"
                     ],
-                    "manual_targets_enabled": updated[
-                        "manual_targets_enabled"
+                    "buy_price_floor_enabled": updated[
+                        "buy_price_floor_enabled"
                     ],
-                    "buy_targets": updated["buy_targets"],
-                    "active_target_count": len([
-                        target
-                        for target in updated["buy_targets"]
-                        if target["enabled"]
-                    ]),
+                    "buy_price_floor_usd": updated[
+                        "buy_price_floor_usd"
+                    ],
+                    "buy_price_ceiling_enabled": updated[
+                        "buy_price_ceiling_enabled"
+                    ],
+                    "buy_price_ceiling_usd": updated[
+                        "buy_price_ceiling_usd"
+                    ],
                 })
             self._send_json(200, {"control": control_status(updated)})
         except (ControlStateError, TypeError, ValueError) as exc:
