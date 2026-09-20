@@ -81,6 +81,16 @@
     .fact { background: var(--panel-2); border-radius: 10px; padding: 10px; }
     .fact span { display: block; color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; }
     .fact strong { display: block; margin-top: 4px; font-size: .92rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .targets-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+    .targets-toolbar .panel-title { margin: 0; }
+    .lock-control { display: flex; align-items: center; gap: 9px; color: var(--text); font-size: .8rem; font-weight: 750; cursor: pointer; }
+    .lock-control input { width: 17px; height: 17px; accent-color: var(--cyan); }
+    .target-explainer { margin-bottom: 15px; padding: 13px 14px; border: 1px solid rgba(98,168,255,.20); border-radius: 12px; background: rgba(98,168,255,.07); }
+    .target-explainer > strong { display: block; margin-bottom: 8px; color: var(--blue); font-size: .84rem; }
+    .explainer-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; color: var(--muted); font-size: .76rem; line-height: 1.45; }
+    .explainer-grid b { color: var(--text); }
+    .lock-note { margin-top: 10px; padding-top: 9px; border-top: 1px solid rgba(98,168,255,.16); color: var(--muted); font-size: .75rem; }
+    .lock-note b { color: var(--cyan); }
     .target-head, .target-row { display: grid; grid-template-columns: 42px 120px minmax(260px, 1fr) minmax(220px, .75fr); gap: 14px; align-items: center; }
     .target-head { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; padding: 0 10px 8px; }
     .target-row { padding: 13px 10px; border-top: 1px solid var(--line); }
@@ -102,6 +112,7 @@
       .target-head { display: none; }
       .target-row { grid-template-columns: 38px 1fr; }
       .target-row .dual-input { grid-column: 1 / -1; }
+      .explainer-grid { grid-template-columns: repeat(2, 1fr); }
     }
     @media (max-width: 520px) {
       .shell { padding: 12px; }
@@ -109,6 +120,8 @@
       .market-cards { grid-template-columns: 1fr; }
       .actions { align-items: stretch; flex-direction: column; }
       .save-button { width: 100%; }
+      .targets-toolbar { align-items: flex-start; flex-direction: column; }
+      .explainer-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -164,7 +177,20 @@
       </section>
 
       <section class="panel targets-panel">
-        <h2 class="panel-title">Operator buy targets</h2>
+        <div class="targets-toolbar">
+          <h2 class="panel-title">Operator buy targets</h2>
+          <label class="lock-control" title="Move every buy price by the same dollar amount"><input id="priceLockToggle" type="checkbox"> Lock spacing when moving prices</label>
+        </div>
+        <div class="target-explainer">
+          <strong>How operator targets work</strong>
+          <div class="explainer-grid">
+            <div><b>1 · Choose levels.</b> Check each row you want active and set its exact limit-buy price.</div>
+            <div><b>2 · Take control.</b> Turn on Manual target mode and save. The targets replace automatic candidates and pending automatic buys are canceled.</div>
+            <div><b>3 · Wait for price.</b> The bot posts exact-price GTC buys without chasing. A target above market waits until it can be placed without crossing.</div>
+            <div><b>4 · Complete the cycle.</b> A fill gets that row’s net target plus fees. The level reopens after its sale; existing sells are untouched.</div>
+          </div>
+          <div class="lock-note"><b>Lock spacing</b> links only the buy prices: moving any one by $250 moves every level by the same $250. Names, enabled rows, and profit targets do not change.</div>
+        </div>
         <div class="target-head"><span>Use</span><span>Name</span><span>Buy price</span><span id="profitTargetHeader">Net profit target</span></div>
         <div id="targetRows"></div>
         <div class="actions">
@@ -178,7 +204,7 @@
   </div>
 
   <script>
-    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '', chartCandles: [], chartHoverIndex: null, chartGeometry: null };
+    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '', chartCandles: [], chartHoverIndex: null, chartGeometry: null, priceLock: localStorage.getItem('rangeGridPriceLock') === 'true' };
     const money = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', maximumFractionDigits: 0}).format(value);
     const money2 = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', minimumFractionDigits: 2, maximumFractionDigits: 2}).format(value);
     const request = async (url, options = {}, retry = true) => {
@@ -290,12 +316,45 @@
       return discounts.map((discount, index) => ({id:`target-${index+1}`, label:`Level ${index+1}`, enabled:false, buy_price:Math.round(currentPrice * (1-discount) / 10) * 10, profit_target_pct:.009}));
     }
 
+    function setTargetRowPrice(row, rawValue) {
+      const value = Math.round(Number(rawValue) * 100) / 100;
+      if (!Number.isFinite(value) || value < 1 || value > 10000000) return false;
+      const range = row.querySelector('.price-range');
+      const number = row.querySelector('.price-number');
+      if (value < Number(range.min)) range.min = Math.max(1, Math.floor(value / 100) * 100);
+      if (value > Number(range.max)) range.max = Math.ceil(value / 100) * 100;
+      range.value = value;
+      number.value = value.toFixed(2);
+      row.dataset.currentPrice = String(value);
+      return true;
+    }
+
+    function changeTargetPrice(sourceRow, requestedValue) {
+      const previousValue = Number(sourceRow.dataset.currentPrice);
+      const nextValue = Number(requestedValue);
+      if (!Number.isFinite(previousValue) || !Number.isFinite(nextValue)) {
+        setTargetRowPrice(sourceRow, previousValue);
+        return;
+      }
+      if (!state.priceLock) {
+        if (!setTargetRowPrice(sourceRow, nextValue)) setTargetRowPrice(sourceRow, previousValue);
+        return;
+      }
+
+      const rows = [...document.querySelectorAll('.target-row')];
+      const prices = rows.map(row => Number(row.dataset.currentPrice));
+      let delta = nextValue - previousValue;
+      delta = Math.max(delta, 1 - Math.min(...prices));
+      delta = Math.min(delta, 10000000 - Math.max(...prices));
+      rows.forEach((row, index) => setTargetRowPrice(row, prices[index] + delta));
+    }
+
     function renderTargets(targets, currentPrice) {
       const values = targets.length ? targets : seedTargets(currentPrice || 80000);
       const min = Math.max(1000, Math.floor((currentPrice || 80000) * .70 / 100) * 100);
       const max = Math.ceil((currentPrice || 80000) * 1.01 / 100) * 100;
       document.querySelector('#targetRows').innerHTML = values.map((target, index) => `
-        <div class="target-row" data-id="${target.id}">
+        <div class="target-row" data-id="${target.id}" data-current-price="${target.buy_price}">
           <input class="target-enabled" type="checkbox" ${target.enabled ? 'checked' : ''} aria-label="Enable target ${index+1}">
           <input class="target-label" value="${target.label.replaceAll('&','&amp;').replaceAll('"','&quot;')}" maxlength="80">
           <div class="dual-input"><input class="price-range" type="range" min="${min}" max="${max}" step="10" value="${target.buy_price}"><input class="price-number" type="number" min="1" step=".1" value="${target.buy_price}"></div>
@@ -304,8 +363,11 @@
       document.querySelectorAll('.target-row').forEach(row => {
         const priceRange = row.querySelector('.price-range'), priceNumber = row.querySelector('.price-number');
         const profitRange = row.querySelector('.profit-range'), profitNumber = row.querySelector('.profit-number');
-        priceRange.addEventListener('input', () => priceNumber.value = priceRange.value);
-        priceNumber.addEventListener('input', () => priceRange.value = priceNumber.value);
+        priceRange.addEventListener('input', () => changeTargetPrice(row, priceRange.value));
+        priceNumber.addEventListener('input', () => {
+          if (!state.priceLock && priceNumber.value.trim() !== '') changeTargetPrice(row, priceNumber.value);
+        });
+        priceNumber.addEventListener('change', () => changeTargetPrice(row, priceNumber.value));
         profitRange.addEventListener('input', () => profitNumber.value = Number(profitRange.value).toFixed(2));
         profitNumber.addEventListener('input', () => profitRange.value = profitNumber.value);
       });
@@ -370,6 +432,12 @@
     });
 
     const priceChart = document.querySelector('#priceChart');
+    const priceLockToggle = document.querySelector('#priceLockToggle');
+    priceLockToggle.checked = state.priceLock;
+    priceLockToggle.addEventListener('change', () => {
+      state.priceLock = priceLockToggle.checked;
+      localStorage.setItem('rangeGridPriceLock', String(state.priceLock));
+    });
     priceChart.addEventListener('pointermove', event => showChartPoint(event.clientX));
     priceChart.addEventListener('pointerdown', event => showChartPoint(event.clientX));
     priceChart.addEventListener('pointerleave', event => {

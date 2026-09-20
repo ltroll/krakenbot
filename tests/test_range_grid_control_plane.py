@@ -100,6 +100,10 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertIn("timeZone:'UTC'", html)
         self.assertIn('class="profit-range" type="range" min="0"', html)
         self.assertIn("A 0% net target is fee-adjusted break-even", html)
+        self.assertIn('id="priceLockToggle"', html)
+        self.assertIn("function changeTargetPrice", html)
+        self.assertIn("The bot posts exact-price GTC buys", html)
+        self.assertIn("moving any one by $250 moves every level", html)
 
 
 if __name__ == "__main__":
