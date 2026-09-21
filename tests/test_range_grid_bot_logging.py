@@ -89,6 +89,16 @@ class RangeGridBotLoggingTests(unittest.TestCase):
 
         self.assertEqual(collisions, [])
 
+    def test_removed_manual_grid_mode_has_no_runtime_references(self):
+        tree = self._bot_tree()
+        loaded_names = {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        }
+
+        self.assertNotIn("operator_manual_mode", loaded_names)
+
     def test_live_kraken_order_and_ticker_paths_use_configured_pair(self):
         tree = self._bot_tree()
         violations = []

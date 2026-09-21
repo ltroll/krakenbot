@@ -11401,13 +11401,9 @@ def main():
                 grid_anchor=grid_anchor,
                 configured_strategy_modes=configured_strategy_modes,
                 buy_source=(
-                    "operator_targets"
-                    if operator_manual_mode
-                    else (
-                        "llm_target"
-                        if llm_buy_allowed
-                        else ",".join(active_strategy_modes) or "disabled"
-                    )
+                    "llm_target"
+                    if llm_buy_allowed
+                    else ",".join(active_strategy_modes) or "disabled"
                 ),
                 strategy_modes=active_strategy_modes,
                 grid_levels=[
