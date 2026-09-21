@@ -156,15 +156,57 @@ def normalize_market_structure(market_structure):
         "resistance": "resistance_price",
         "upside_pct": "upside_to_resistance_pct",
         "resistance_distance_pct": "upside_to_resistance_pct",
+        "room_to_nearest_resistance_pct": "upside_to_resistance_pct",
         "downside_pct": "downside_to_support_pct",
         "support_distance_pct": "downside_to_support_pct",
+        "distance_to_nearest_support_pct": "downside_to_support_pct",
         "risk_reward": "risk_reward_to_structure",
         "range_position": "range_position_24h",
     }
     for source, target in aliases.items():
-        if target not in normalized and source in normalized:
-            normalized[target] = normalized[source]
+        if normalized.get(target) is not None or source not in normalized:
+            continue
+        value = normalized[source]
+        if target in {"support_price", "resistance_price"}:
+            value = _dict_value(value).get("price") if isinstance(value, dict) else value
+        if value is not None:
+            normalized[target] = value
     return normalized
+
+
+def weather_market_structure(risk_context):
+    """Translate weather market-location levels into canonical structure."""
+    weather = _dict_value(_dict_value(risk_context).get("weather_report"))
+    location = _dict_value(weather.get("market_location"))
+    if not location:
+        return {}
+
+    support_bands = location.get("support_bands")
+    support_bands = support_bands if isinstance(support_bands, list) else []
+    resistance_bands = location.get("resistance_bands")
+    resistance_bands = (
+        resistance_bands if isinstance(resistance_bands, list) else []
+    )
+    nearest_support = location.get("nearest_support")
+    if nearest_support is None and support_bands:
+        nearest_support = support_bands[0]
+    nearest_resistance = location.get("nearest_resistance")
+    if nearest_resistance is None and resistance_bands:
+        nearest_resistance = resistance_bands[0]
+
+    return normalize_market_structure({
+        "nearest_support": nearest_support,
+        "nearest_resistance": nearest_resistance,
+        "support_bands": support_bands,
+        "resistance_bands": resistance_bands,
+        "distance_to_nearest_support_pct": location.get(
+            "distance_to_nearest_support_pct"
+        ),
+        "room_to_nearest_resistance_pct": location.get(
+            "room_to_nearest_resistance_pct"
+        ),
+        "range_position": location.get("range_position"),
+    })
 
 
 def normalize_source_status(source_status):
@@ -219,6 +261,9 @@ def normalize_signal_payload(signal, asset_id=None, pair=None):
     if not isinstance(market_structure, dict):
         market_structure = signal.get("asset_market_structure")
     market_structure = normalize_market_structure(market_structure)
+    for key, value in weather_market_structure(risk_context).items():
+        if market_structure.get(key) is None:
+            market_structure[key] = value
 
     target_prices = signal.get("target_prices")
     if not isinstance(target_prices, list):

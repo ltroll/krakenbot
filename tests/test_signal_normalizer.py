@@ -195,6 +195,63 @@ class SignalNormalizerTests(unittest.TestCase):
             "signal",
         )
 
+    def test_weather_market_levels_fill_canonical_market_structure(self):
+        payload = make_multi_asset_signal()
+        asset = payload["assets"]["BTC"]
+        del asset["market_structure"]
+        asset["risk_context"]["weather_report"] = {
+            "market_location": {
+                "range_position": 0.2158,
+                "support_bands": [{
+                    "price": 80155.0,
+                    "type": "recent_low",
+                }],
+                "resistance_bands": [{
+                    "price": 80872.31034483,
+                    "type": "range_mean",
+                }],
+                "nearest_support": {
+                    "price": 80155.0,
+                    "type": "recent_low",
+                },
+                "nearest_resistance": {
+                    "price": 80872.31034483,
+                    "type": "range_mean",
+                },
+                "distance_to_nearest_support_pct": 0.4545,
+                "room_to_nearest_resistance_pct": 0.4363,
+            },
+        }
+
+        normalized = normalize_signal_payload(payload, asset_id="BTC")
+        structure = normalized["market_structure"]
+
+        self.assertEqual(structure["support_price"], 80155.0)
+        self.assertEqual(structure["resistance_price"], 80872.31034483)
+        self.assertEqual(structure["downside_to_support_pct"], 0.4545)
+        self.assertEqual(structure["upside_to_resistance_pct"], 0.4363)
+        self.assertEqual(structure["range_position_24h"], 0.2158)
+        self.assertEqual(structure["support_bands"][0]["type"], "recent_low")
+        self.assertEqual(
+            structure["resistance_bands"][0]["type"],
+            "range_mean",
+        )
+
+    def test_explicit_market_structure_wins_over_weather_fallback(self):
+        payload = make_multi_asset_signal()
+        asset = payload["assets"]["BTC"]
+        asset["risk_context"]["weather_report"] = {
+            "market_location": {
+                "nearest_support": {"price": 61000.0},
+                "nearest_resistance": {"price": 65000.0},
+            },
+        }
+
+        normalized = normalize_signal_payload(payload, asset_id="BTC")
+
+        self.assertEqual(normalized["market_structure"]["support_price"], 62312.0)
+        self.assertEqual(normalized["market_structure"]["resistance_price"], 63806.0)
+
 
 if __name__ == "__main__":
     unittest.main()

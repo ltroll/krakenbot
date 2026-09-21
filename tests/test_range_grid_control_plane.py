@@ -140,6 +140,24 @@ class RangeGridControlPlaneTests(unittest.TestCase):
                             "market_location": {
                                 "current_price": 80440,
                                 "range_position": 0.31,
+                                "support_bands": [{
+                                    "price": 80155.0,
+                                    "type": "recent_low",
+                                }],
+                                "resistance_bands": [{
+                                    "price": 80872.31034483,
+                                    "type": "range_mean",
+                                }],
+                                "nearest_support": {
+                                    "price": 80155.0,
+                                    "type": "recent_low",
+                                },
+                                "nearest_resistance": {
+                                    "price": 80872.31034483,
+                                    "type": "range_mean",
+                                },
+                                "distance_to_nearest_support_pct": 0.4545,
+                                "room_to_nearest_resistance_pct": 0.4363,
                             },
                             "market_opportunity": {
                                 "cycle_phase": "early_rebound",
@@ -210,6 +228,18 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertEqual(
             snapshot["risk"]["suggested_take_profit_multiplier"],
             1.2,
+        )
+        self.assertEqual(
+            snapshot["market_structure"]["support_price"],
+            80155.0,
+        )
+        self.assertEqual(
+            snapshot["market_structure"]["resistance_price"],
+            80872.31034483,
+        )
+        self.assertEqual(
+            snapshot["market_structure"]["support_bands"][0]["type"],
+            "recent_low",
         )
         self.assertEqual(cached_snapshot["signal"]["asset_price"], 80440)
         self.assertEqual(session.calls, 1)
