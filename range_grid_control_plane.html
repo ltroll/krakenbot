@@ -117,6 +117,22 @@
     .weather-fact { min-width: 0; padding: 12px; border: 1px solid rgba(98,168,255,.14); border-radius: 11px; background: var(--panel-2); }
     .weather-fact span { display: block; color: var(--muted); font-size: .68rem; text-transform: uppercase; letter-spacing: .075em; }
     .weather-fact strong { display: block; margin-top: 6px; font-size: .96rem; overflow-wrap: anywhere; }
+    .structure-levels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+    .structure-card { min-width: 0; padding: 13px; border: 1px solid var(--line); border-radius: 12px; background: rgba(7,16,24,.42); }
+    .structure-card.support { border-color: rgba(110,231,162,.30); }
+    .structure-card.resistance { border-color: rgba(255,200,87,.30); }
+    .structure-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
+    .structure-head strong { font-size: .76rem; text-transform: uppercase; letter-spacing: .09em; }
+    .structure-card.support .structure-head strong { color: var(--green); }
+    .structure-card.resistance .structure-head strong { color: var(--amber); }
+    .structure-head span { color: var(--muted); font-size: .69rem; }
+    .level-list { display: grid; gap: 7px; }
+    .level-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; padding: 9px 10px; border-radius: 9px; background: var(--panel-2); }
+    .level-row.nearest { box-shadow: inset 3px 0 0 var(--cyan); }
+    .level-price { font-size: 1rem; font-weight: 820; }
+    .level-distance { align-self: center; color: var(--cyan); font-size: .72rem; font-weight: 760; }
+    .level-description { grid-column: 1 / -1; color: var(--muted); font-size: .7rem; line-height: 1.35; }
+    .nearest-label { margin-left: 5px; color: var(--cyan); font-size: .61rem; text-transform: uppercase; letter-spacing: .07em; }
     .weather-copy { margin: 14px 0 0; color: var(--muted); font-size: .82rem; line-height: 1.55; }
     .score-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px 16px; }
     .score-head { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: .76rem; }
@@ -169,6 +185,7 @@
       .tabs { width: 100%; }
       .tab-button { flex: 1; padding: 10px 8px; }
       .weather-facts, .score-grid { grid-template-columns: 1fr; }
+      .structure-levels { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -297,6 +314,16 @@
       <section class="panel weather-half">
         <h2 class="panel-title">Market location</h2>
         <div id="marketLocationFacts" class="weather-facts"></div>
+        <div class="structure-levels">
+          <section class="structure-card support" aria-label="Published support levels">
+            <div class="structure-head"><strong>Support</strong><span id="supportLevelCount">—</span></div>
+            <div id="supportLevels" class="level-list"><span class="empty-weather">Waiting for support levels.</span></div>
+          </section>
+          <section class="structure-card resistance" aria-label="Published resistance levels">
+            <div class="structure-head"><strong>Resistance</strong><span id="resistanceLevelCount">—</span></div>
+            <div id="resistanceLevels" class="level-list"><span class="empty-weather">Waiting for resistance levels.</span></div>
+          </section>
+        </div>
       </section>
 
       <section class="panel weather-half">
@@ -402,6 +429,44 @@
       ? values.map(value => `<span class="tag ${warning ? 'warning' : ''}">${escapeHtml(humanize(value))}</span>`).join('')
       : '<span class="empty-weather">None reported</span>';
 
+    function structureLevelRows(nearest, bands, fallbackPrice, fallbackDistance) {
+      const nearestLevel = nearest && typeof nearest === 'object'
+        ? nearest
+        : fallbackPrice == null ? null : {price:fallbackPrice, distance_pct:fallbackDistance};
+      const rows = [];
+      if (nearestLevel && Number.isFinite(Number(nearestLevel.price))) {
+        rows.push({...nearestLevel, nearest:true});
+      }
+      (Array.isArray(bands) ? bands : []).forEach(level => {
+        if (!level || !Number.isFinite(Number(level.price))) return;
+        const duplicate = rows.some(row => Math.abs(Number(row.price) - Number(level.price)) < .00000001);
+        if (duplicate) {
+          const existing = rows.find(row => Math.abs(Number(row.price) - Number(level.price)) < .00000001);
+          Object.assign(existing, level, {nearest:existing.nearest === true});
+        } else {
+          rows.push({...level, nearest:false});
+        }
+      });
+      return rows;
+    }
+
+    function renderStructureCard(kind, nearest, bands, fallbackPrice, fallbackDistance) {
+      const rows = structureLevelRows(nearest, bands, fallbackPrice, fallbackDistance);
+      const count = document.querySelector(`#${kind}LevelCount`);
+      const container = document.querySelector(`#${kind}Levels`);
+      count.textContent = `${rows.length} level${rows.length === 1 ? '' : 's'}`;
+      if (!rows.length) {
+        container.innerHTML = `<span class="empty-weather">No ${escapeHtml(kind)} levels published.</span>`;
+        return;
+      }
+      container.innerHTML = rows.map(level => {
+        const distance = Number(level.distance_pct);
+        const distanceText = Number.isFinite(distance) ? `${Math.abs(distance).toFixed(2)}% away` : 'Distance —';
+        const description = [level.label, level.type && humanize(level.type), level.source && `Source: ${humanize(level.source)}`].filter(Boolean).join(' · ');
+        return `<div class="level-row ${level.nearest ? 'nearest' : ''}"><div class="level-price">${escapeHtml(money2(level.price))}${level.nearest ? '<span class="nearest-label">Nearest</span>' : ''}</div><div class="level-distance">${escapeHtml(distanceText)}</div><div class="level-description">${escapeHtml(description || 'Published market-structure level')}</div></div>`;
+      }).join('');
+    }
+
     function renderSentiment(sentiment) {
       const signal = sentiment.signal || {}, risk = sentiment.risk || {};
       const regime = sentiment.price_regime || {}, structure = sentiment.market_structure || {};
@@ -482,10 +547,21 @@
         ['4h return', signedPercent(risk.weather_market_price_return_4h_pct)],
         ['Range low', money2(risk.weather_market_range_low ?? regime.price_low_24h)],
         ['Range high', money2(risk.weather_market_range_high ?? regime.price_high_24h)],
-        ['Support / resistance', structure.support_price == null && structure.resistance_price == null
-          ? 'Not published by signal'
-          : `${money(structure.support_price)} / ${money(structure.resistance_price)}`],
       ]);
+      renderStructureCard(
+        'support',
+        structure.nearest_support,
+        structure.support_bands,
+        structure.support_price,
+        structure.downside_to_support_pct,
+      );
+      renderStructureCard(
+        'resistance',
+        structure.nearest_resistance,
+        structure.resistance_bands,
+        structure.resistance_price,
+        structure.upside_to_resistance_pct,
+      );
 
       document.querySelector('#opportunityFacts').innerHTML = factMarkup([
         ['Cycle phase', humanize(risk.weather_opportunity_phase)],
