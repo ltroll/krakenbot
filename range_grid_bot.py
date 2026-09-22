@@ -20,6 +20,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
+from wren_json_logging import emit_wjl, install_wjl_runtime
+
+install_wjl_runtime(
+    category="trading",
+    product="krakenbot",
+    service="range_grid_bot",
+)
+
 import krakenex
 import requests
 from dotenv import load_dotenv
@@ -1160,9 +1168,12 @@ def prune_rotated_logs(base_path, retention, error_event):
         try:
             os.remove(old_path)
         except OSError as e:
-            print(
-                f"[{datetime.now(timezone.utc).isoformat()}] "
-                f"{error_event}: {e}"
+            console(
+                error_event,
+                message=str(e),
+                severity="error",
+                log_path=old_path,
+                exception_type=type(e).__name__,
             )
 
 
@@ -1186,9 +1197,12 @@ def rotate_log_if_needed(base_path, max_bytes, retention, error_prefix):
         prune_rotated_logs(path, retention, f"{error_prefix}_PRUNE_ERROR")
         return rotated_path
     except OSError as e:
-        print(
-            f"[{datetime.now(timezone.utc).isoformat()}] "
-            f"{error_prefix}_ROTATE_ERROR: {e}"
+        console(
+            f"{error_prefix}_ROTATE_ERROR",
+            message=str(e),
+            severity="error",
+            log_path=path,
+            exception_type=type(e).__name__,
         )
         return None
 
@@ -1232,23 +1246,30 @@ def log_event(event, **kwargs):
             f.write(json.dumps(record) + "\n")
             f.flush()
     except Exception as e:
-        print(
-            f"[{datetime.now(timezone.utc).isoformat()}] "
-            f"LOG_WRITE_ERROR: {e}"
+        console(
+            "LOG_WRITE_ERROR",
+            message=str(e),
+            severity="error",
+            log_file=os.path.abspath(LOG_FILE),
+            exception_type=type(e).__name__,
         )
 
 
-def console(msg):
-    print(f"[{datetime.now(timezone.utc).isoformat()}] {msg}")
+def console(event, message="", severity=None, **fields):
+    emit_wjl(
+        event,
+        message=message or event,
+        severity=severity,
+        fields=fields,
+        category="trading",
+        product="krakenbot",
+        service="range_grid_bot",
+    )
 
 
-def log_and_console(event, message="", **kwargs):
+def log_and_console(event, message="", severity=None, **kwargs):
     log_event(event, message=message, **kwargs)
-
-    if message:
-        console(f"{event}: {message}")
-    else:
-        console(event)
+    console(event, message=message, severity=severity, **kwargs)
 
 
 def append_jsonl(path, record):
@@ -7279,7 +7300,15 @@ def main():
                 high_anchor_enabled=effective_high_anchor_enabled,
                 weather_high_anchor_allowed=weather_high_anchor_allowed
             )
-            console(f"Price: {price} | Signal: {execution_signal}")
+            console(
+                "BOT_CYCLE_STATUS",
+                message=f"Price: {price} | Signal: {execution_signal}",
+                cycle_id=cycle_id,
+                price=price,
+                execution_signal=execution_signal,
+                signal_status=signal_status,
+                operating_mode=operating_mode,
+            )
 
             if (
                 state["last_range_refresh"] is None
@@ -11671,7 +11700,12 @@ def main():
                 state.get("consecutive_loop_errors", 0) or 0
             ) + 1
             save_state(state)
-            log_event("LOOP_ERROR", message=str(e))
+            log_event(
+                "LOOP_ERROR",
+                message=str(e),
+                exception_type=type(e).__name__,
+                consecutive_loop_errors=state["consecutive_loop_errors"],
+            )
             if (
                 max_consecutive_loop_errors > 0
                 and state["consecutive_loop_errors"] >= max_consecutive_loop_errors
@@ -11683,7 +11717,13 @@ def main():
                     consecutive_loop_errors=state["consecutive_loop_errors"],
                     error=short_error_summary(e)
                 )
-            console(f"Loop error: {e}")
+            console(
+                "LOOP_ERROR",
+                message=str(e),
+                severity="error",
+                exception_type=type(e).__name__,
+                consecutive_loop_errors=state["consecutive_loop_errors"],
+            )
             send_checkin(
                 status="error",
                 loop_count=loop_count,

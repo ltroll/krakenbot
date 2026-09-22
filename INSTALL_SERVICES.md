@@ -312,6 +312,11 @@ Applying one restarts the bot process at its next cycle boundary and preserves
 existing inventory and open orders. “Use environment default” returns to the
 profile named by `RANGE_GRID_STRATEGY_PROFILE`.
 
+The range-grid bot emits operational stdout as one Wren JSON Logging v1 record
+per line (`wjl_1:{...}`). Existing journald/syslog forwarding can send that
+message body to a Wren JSON Logging parser; no additional bot listener or
+network output is required. Trade and activity JSONL files are unchanged.
+
 ## 4. Install The Sentiment Executor Service
 
 Create `/etc/systemd/system/kraken-sentiment.service`:

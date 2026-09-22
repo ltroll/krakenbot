@@ -51,6 +51,40 @@ class RangeGridBotLoggingTests(unittest.TestCase):
 
         self.assertEqual(collisions, [])
 
+    def test_operational_console_uses_wren_json_logging_only(self):
+        tree = self._bot_tree()
+        print_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "print"
+        ]
+        console_function = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "console"
+        )
+        console_calls = [
+            node
+            for node in ast.walk(console_function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "emit_wjl"
+        ]
+        runtime_installs = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "install_wjl_runtime"
+        ]
+
+        self.assertEqual(print_calls, [])
+        self.assertEqual(len(console_calls), 1)
+        self.assertEqual(len(runtime_installs), 1)
+
     def test_runtime_identity_fields_are_not_passed_twice(self):
         tree = self._bot_tree()
 

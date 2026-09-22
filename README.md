@@ -372,6 +372,25 @@ SIGNAL_ASSET_ID=BTC
 If `RANGE_GRID_CONTROL_BACKTEST_URL` is omitted, the control plane looks for
 `range_grid_backtest.json` beside an HTTP `RANGE_GRID_ANCHOR_ROUTER_FILE`.
 
+### Operational logging
+
+The range-grid bot writes every operational stdout record in Wren JSON Logging
+version 1 format. Each physical line begins with `wjl_1:` and contains one
+compact JSON object, so systemd/journald or an existing syslog forwarder can use
+the line directly as the body of an RFC 3164 or RFC 5424 record. Core fields
+include `name`, `message`, `timestamp`, `severity`, `category`, `product`,
+`service`, `host.name`, `process.pid`, `event.action`, tags, and event-specific
+fields. Python warnings and uncaught exceptions use the same format. The
+existing trade and activity JSONL files retain their current schemas.
+
+For a quick local wire-format check after restart:
+
+```bash
+journalctl -u range-grid-bot.service -n 1 --no-pager -o cat
+```
+
+The output should begin with `wjl_1:{` and remain on one line.
+
 ### State file
 
 The bot persists state in JSON so it can survive restarts without forgetting working orders.
