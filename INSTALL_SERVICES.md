@@ -303,6 +303,10 @@ of pending buys; it leaves existing sell orders and filled inventory alone.
 Operator buy-price bounds veto automatic candidates outside the allowed zone;
 the strategy continues choosing its own ladder inside it. Saving a bound also
 requests cancellation of pending buys outside the zone on the next bot cycle.
+Profit target control optionally sets the exact net-profit target for newly
+placed buys. Zero percent represents estimated break-even after the configured
+round-trip fee allowance; the page includes a sell-price calculator. Existing
+orders are not changed, and operator-targeted sells are not later repriced.
 The Strategy control section lists valid `range_grid_strategy_*.json` files.
 Applying one restarts the bot process at its next cycle boundary and preserves
 existing inventory and open orders. “Use environment default” returns to the

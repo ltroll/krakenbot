@@ -13,6 +13,7 @@ from range_grid_control import (
     normalize_control_state,
     operator_buy_cancel_reason,
     operator_buy_price_rule_reason,
+    operator_net_profit_target_pct,
     save_control_state,
 )
 
@@ -24,6 +25,8 @@ class RangeGridControlTests(unittest.TestCase):
         self.assertFalse(state["buying_paused"])
         self.assertFalse(state["buy_price_floor_enabled"])
         self.assertFalse(state["buy_price_ceiling_enabled"])
+        self.assertFalse(state["profit_target_override_enabled"])
+        self.assertIsNone(operator_net_profit_target_pct(state))
         self.assertIsNone(operator_buy_price_rule_reason(state, 75000))
 
     def test_normalizes_enabled_buy_price_zone(self):
@@ -93,7 +96,7 @@ class RangeGridControlTests(unittest.TestCase):
             }],
         })
 
-        self.assertEqual(state["schema_version"], 3)
+        self.assertEqual(state["schema_version"], 4)
         self.assertNotIn("manual_targets_enabled", state)
         self.assertNotIn("buy_targets", state)
         self.assertTrue(state["buy_price_floor_enabled"])
@@ -123,6 +126,41 @@ class RangeGridControlTests(unittest.TestCase):
         self.assertEqual(updated["buy_price_floor_usd"], 75000)
         self.assertEqual(updated["buy_price_ceiling_usd"], 80000)
         self.assertEqual(updated["updated_by"], "test")
+
+    def test_operator_net_profit_target_accepts_break_even_zero(self):
+        state = normalize_control_state({
+            "profit_target_override_enabled": True,
+            "net_profit_target_pct": 0,
+        })
+
+        self.assertTrue(state["profit_target_override_enabled"])
+        self.assertEqual(operator_net_profit_target_pct(state), 0.0)
+        self.assertEqual(control_status(state)["net_profit_target_pct"], 0.0)
+
+    def test_operator_net_profit_target_validates_enabled_value(self):
+        for payload in (
+            {"profit_target_override_enabled": True},
+            {
+                "profit_target_override_enabled": True,
+                "net_profit_target_pct": -0.001,
+            },
+            {
+                "profit_target_override_enabled": True,
+                "net_profit_target_pct": 0.251,
+            },
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ControlStateError):
+                    normalize_control_state(payload)
+
+    def test_disabled_operator_target_is_preserved_for_dashboard(self):
+        state = normalize_control_state({
+            "profit_target_override_enabled": False,
+            "net_profit_target_pct": 0.015,
+        })
+
+        self.assertIsNone(operator_net_profit_target_pct(state))
+        self.assertEqual(state["net_profit_target_pct"], 0.015)
 
     def test_strategy_profile_override_is_persisted_and_path_safe(self):
         profile = "range_grid_strategy_production_test.json"

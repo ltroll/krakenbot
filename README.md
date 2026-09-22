@@ -327,6 +327,16 @@ on the next cycle. It does not alter filled inventory or any sell order.
 An enabled version-1 manual ladder is migrated conservatively to a floor at its
 lowest enabled price and a ceiling at its highest enabled price.
 
+The Profit target control sets an optional net-profit percentage for future
+buys. Zero percent means estimated break-even: the bot adds the active
+strategy's configured `round_trip_fee_pct` allowance before calculating the
+sell price. A positive value is the requested profit above that allowance. The
+page calculator previews the same formula for any example buy price. When the
+override is enabled, its value is captured on each newly placed buy and bypasses
+Fear & Greed or weather profit multipliers for that trade. Existing open buys,
+open sells, and filled inventory are unchanged, and an operator-targeted sell
+is not subsequently repriced by the bot.
+
 HOLD blocks new buys and, by default, requests cancellation of pending buy
 orders on the next bot cycle. It never cancels or reprices existing sell orders,
 and filled inventory continues through the normal sell-management path. A

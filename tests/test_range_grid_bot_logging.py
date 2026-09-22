@@ -293,7 +293,39 @@ class RangeGridBotLoggingTests(unittest.TestCase):
         self.assertIn("load_control_state_fail_safe", called_functions)
         self.assertIn("reconcile_operator_control_open_buys", called_functions)
         self.assertIn("operator_buy_price_rule_reason", called_functions)
+        self.assertIn("operator_net_profit_target_pct", called_functions)
         self.assertIn("restart_for_strategy_profile", called_functions)
+
+    def test_operator_profit_target_is_snapshotted_and_not_repriced(self):
+        tree = self._bot_tree()
+        main = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "main"
+        )
+        marker = "operator_profit_target_override_applied"
+        marker_reads = [
+            node
+            for node in ast.walk(main)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == marker
+        ]
+        marker_writes = [
+            node
+            for node in ast.walk(main)
+            if isinstance(node, ast.Dict)
+            and any(
+                isinstance(key, ast.Constant) and key.value == marker
+                for key in node.keys
+            )
+        ]
+
+        self.assertGreaterEqual(len(marker_reads), 2)
+        self.assertGreaterEqual(len(marker_writes), 2)
 
     def test_operator_price_rules_do_not_replace_sell_management(self):
         tree = self._bot_tree()

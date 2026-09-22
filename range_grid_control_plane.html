@@ -52,6 +52,7 @@
     .chart-panel { grid-column: span 7; padding: 18px; }
     .control-panel { grid-column: span 5; padding: 18px; }
     .strategy-panel { grid-column: 1 / -1; padding: 18px; }
+    .profit-panel { grid-column: 1 / -1; padding: 18px; }
     .targets-panel { grid-column: 1 / -1; padding: 18px; }
     .panel-title { margin: 0 0 13px; font-size: .78rem; color: var(--muted); text-transform: uppercase; letter-spacing: .11em; }
     .price { font-size: clamp(2.2rem, 5vw, 4.4rem); font-weight: 760; letter-spacing: -.065em; line-height: .95; }
@@ -98,6 +99,23 @@
     .strategy-selector select:focus { outline: 2px solid rgba(77,214,199,.38); outline-offset: 1px; }
     .strategy-meta { margin: 11px 0 0; color: var(--muted); font-size: .79rem; line-height: 1.55; }
     .strategy-warning { color: var(--amber); }
+    .profit-layout { display: grid; grid-template-columns: minmax(320px, .8fr) minmax(380px, 1.2fr); gap: 14px; margin-top: 14px; }
+    .profit-box { padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: rgba(7,16,24,.42); }
+    .profit-box h3 { margin: 0 0 11px; font-size: .78rem; text-transform: uppercase; letter-spacing: .09em; color: var(--muted); }
+    .profit-toggle { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 14px; }
+    .profit-toggle input { width: 19px; height: 19px; margin-top: 1px; accent-color: var(--cyan); }
+    .profit-toggle label { font-weight: 780; }
+    .profit-toggle small { display: block; margin-top: 4px; color: var(--muted); font-weight: 400; line-height: 1.4; }
+    .profit-input-label { display: block; margin-bottom: 8px; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .075em; }
+    .profit-inputs { display: grid; grid-template-columns: 1fr 116px; gap: 10px; align-items: center; }
+    .calculator-price { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; margin-bottom: 12px; }
+    .calculator-price input { max-width: 240px; }
+    .calculator-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .calculator-result { padding: 10px; border-radius: 9px; background: var(--panel-2); }
+    .calculator-result span { display: block; color: var(--muted); font-size: .67rem; text-transform: uppercase; letter-spacing: .07em; }
+    .calculator-result strong { display: block; margin-top: 5px; font-size: 1rem; }
+    .calculator-result.primary strong { color: var(--cyan); font-size: 1.16rem; }
+    .formula { margin: 11px 0 0; color: var(--muted); font-size: .74rem; line-height: 1.5; }
     .actions { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--line); }
     .save-button { border: 0; background: var(--cyan); color: #061412; padding: 12px 22px; border-radius: 10px; font-weight: 850; cursor: pointer; }
     .save-button:disabled { opacity: .5; cursor: wait; }
@@ -166,13 +184,14 @@
     .watch-item strong { display: block; margin-bottom: 4px; font-size: .79rem; }
     .watch-item span { color: var(--muted); font-size: .77rem; line-height: 1.45; }
     @media (max-width: 980px) {
-      .hero, .market, .chart-panel, .control-panel, .strategy-panel, .weather-hero, .weather-summary, .weather-half, .backtest-hero, .backtest-summary, .backtest-half { grid-column: 1 / -1; }
+      .hero, .market, .chart-panel, .control-panel, .strategy-panel, .profit-panel, .weather-hero, .weather-summary, .weather-half, .backtest-hero, .backtest-summary, .backtest-half { grid-column: 1 / -1; }
       .market-cards { grid-template-columns: repeat(2, 1fr); }
       .weather-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .permission-head { display: none; }
       .permission-row { grid-template-columns: 38px 1fr; }
       .permission-row .dual-input { grid-column: 1 / -1; }
       .explainer-grid { grid-template-columns: repeat(2, 1fr); }
+      .profit-layout { grid-template-columns: 1fr; }
     }
     @media (max-width: 520px) {
       .shell { padding: 12px; }
@@ -186,6 +205,7 @@
       .tab-button { flex: 1; padding: 10px 8px; }
       .weather-facts, .score-grid { grid-template-columns: 1fr; }
       .structure-levels { grid-template-columns: 1fr; }
+      .profit-inputs, .calculator-results { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -256,6 +276,53 @@
         </div>
         <p id="strategyDetails" class="strategy-meta">Loading available strategies.</p>
         <p class="strategy-meta strategy-warning">Applying a strategy restarts the bot at the start of its next cycle so every setting is loaded together. Existing inventory and open orders are preserved. The selected file becomes the base profile; an enabled anchor router can still apply per-anchor overrides.</p>
+      </section>
+
+      <section class="panel profit-panel">
+        <div class="control-head">
+          <h2 class="panel-title">Profit target control</h2>
+          <span id="profitTargetStatus" class="badge fresh">Strategy controlled</span>
+        </div>
+        <div class="target-explainer">
+          <strong>Set the desired net profit after estimated round-trip fees</strong>
+          <div class="explainer-grid">
+            <div><b>0% means estimated break-even.</b> The configured round-trip fee allowance is added automatically.</div>
+            <div><b>Positive values are profit above fees.</b> A 1% setting asks for fees plus 1% net profit.</div>
+            <div><b>New buys only.</b> Existing buy and sell orders are never canceled or repriced by this setting.</div>
+          </div>
+        </div>
+        <div class="profit-layout">
+          <div class="profit-box">
+            <h3>Operator target</h3>
+            <div class="profit-toggle">
+              <input id="profitTargetEnabled" type="checkbox">
+              <label for="profitTargetEnabled">Use operator net-profit target<small>When disabled, the selected strategy and its Fear &amp; Greed/weather rules choose the target.</small></label>
+            </div>
+            <label class="profit-input-label" for="profitTargetNumber">Desired net profit percentage</label>
+            <div class="profit-inputs">
+              <input id="profitTargetRange" type="range" min="0" max="10" step="0.05">
+              <input id="profitTargetNumber" type="number" min="0" max="25" step="0.05" inputmode="decimal" aria-label="Desired net profit percentage">
+            </div>
+          </div>
+          <div class="profit-box">
+            <h3>Sell-target calculator</h3>
+            <div class="calculator-price">
+              <label class="profit-input-label" for="profitCalculatorBuyPrice">Example buy price</label>
+              <input id="profitCalculatorBuyPrice" type="number" min="1" step="10" inputmode="decimal">
+            </div>
+            <div class="calculator-results">
+              <div class="calculator-result primary"><span>Estimated sell target</span><strong id="profitCalculatorSellPrice">—</strong></div>
+              <div class="calculator-result"><span>Round-trip fee allowance</span><strong id="profitCalculatorFee">—</strong></div>
+              <div class="calculator-result"><span>Desired net profit</span><strong id="profitCalculatorNet">—</strong></div>
+              <div class="calculator-result"><span>Total price increase</span><strong id="profitCalculatorGross">—</strong></div>
+            </div>
+            <p class="formula">Estimated sell = buy price × (1 + round-trip fee rate + desired net-profit rate). Actual exchange fees can vary with execution and fee tier.</p>
+          </div>
+        </div>
+        <div class="actions">
+          <div class="notice">Saving an enabled target makes it the exact net-profit target for newly placed buys and bypasses strategy profit multipliers for those trades. Disable it to return future buys to normal strategy-controlled targets.</div>
+          <button id="saveProfitTargetButton" class="save-button" type="button">SAVE PROFIT TARGET</button>
+        </div>
       </section>
 
       <section class="panel targets-panel">
@@ -385,7 +452,7 @@
   </div>
 
   <script>
-    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '', chartCandles: [], chartHoverIndex: null, chartGeometry: null, activeTab: 'trading', backtestLoadedAt: 0, strategySelectionDirty: false };
+    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '', chartCandles: [], chartHoverIndex: null, chartGeometry: null, activeTab: 'trading', backtestLoadedAt: 0, strategySelectionDirty: false, profitTargetDirty: false, calculatorPriceDirty: false };
     const money = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', maximumFractionDigits: 0}).format(value);
     const money2 = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', minimumFractionDigits: 2, maximumFractionDigits: 2}).format(value);
     const request = async (url, options = {}, retry = true) => {
@@ -795,6 +862,56 @@
       setPermissionPrice('ceiling', control.buy_price_ceiling_usd ?? Math.round(marketPrice / 10) * 10);
     }
 
+    function setProfitTargetPercent(rawValue) {
+      const value = Math.round(Number(rawValue) * 100) / 100;
+      if (!Number.isFinite(value) || value < 0 || value > 25) return false;
+      const range = document.querySelector('#profitTargetRange');
+      const number = document.querySelector('#profitTargetNumber');
+      if (value > Number(range.max)) range.max = Math.ceil(value);
+      range.value = value;
+      number.value = value.toFixed(2);
+      return true;
+    }
+
+    function updateProfitTargetCalculator() {
+      const payload = state.payload || {};
+      const bot = payload.bot || {};
+      const buyPrice = Number(document.querySelector('#profitCalculatorBuyPrice').value);
+      const targetPercent = Number(document.querySelector('#profitTargetNumber').value);
+      const feePercent = Number(bot.round_trip_fee_pct) * 100;
+      const valuesValid = Number.isFinite(buyPrice) && buyPrice >= 1
+        && Number.isFinite(targetPercent) && targetPercent >= 0
+        && Number.isFinite(feePercent) && feePercent >= 0;
+      const grossPercent = valuesValid ? feePercent + targetPercent : null;
+      const sellPrice = valuesValid ? buyPrice * (1 + grossPercent / 100) : null;
+      document.querySelector('#profitCalculatorSellPrice').textContent = money2(sellPrice);
+      document.querySelector('#profitCalculatorFee').textContent = Number.isFinite(feePercent) ? `${feePercent.toFixed(2)}%` : '—';
+      document.querySelector('#profitCalculatorNet').textContent = Number.isFinite(targetPercent) ? `${targetPercent.toFixed(2)}%` : '—';
+      document.querySelector('#profitCalculatorGross').textContent = grossPercent == null ? '—' : `${grossPercent.toFixed(2)}%`;
+
+      const status = document.querySelector('#profitTargetStatus');
+      const enabled = document.querySelector('#profitTargetEnabled').checked;
+      status.className = `badge ${state.profitTargetDirty ? 'watch' : enabled ? 'fresh' : ''}`;
+      status.textContent = state.profitTargetDirty
+        ? 'Unsaved changes'
+        : enabled ? 'Override active' : 'Strategy controlled';
+    }
+
+    function renderProfitTarget(control, bot, currentPrice) {
+      if (!state.profitTargetDirty) {
+        document.querySelector('#profitTargetEnabled').checked = control.profit_target_override_enabled === true;
+        const configuredTarget = control.net_profit_target_pct == null
+          ? Number(bot.profit_target_pct) || 0
+          : Number(control.net_profit_target_pct);
+        setProfitTargetPercent(configuredTarget * 100);
+      }
+      if (!state.calculatorPriceDirty) {
+        const price = Number(currentPrice);
+        document.querySelector('#profitCalculatorBuyPrice').value = Number.isFinite(price) && price >= 1 ? price.toFixed(2) : '';
+      }
+      updateProfitTargetCalculator();
+    }
+
     const strategyEntryForValue = value => {
       const strategyControl = (state.payload || {}).strategy_control || {};
       const filename = value || String(strategyControl.configured_profile || '').split('/').pop();
@@ -876,9 +993,11 @@
       document.querySelector('#inventory').textContent = money2(bot.deployed_inventory_usd);
       document.querySelector('#netPnl').textContent = money2(stats.realized_estimated_net_pnl);
       renderPermissions(control, payload.market.current_price);
+      renderProfitTarget(control, bot, payload.market.current_price);
       document.querySelector('#statusDot').className = `dot ${payload.market.stale ? '' : 'ok'}`;
       const priceRulesActive = control.buy_price_floor_enabled || control.buy_price_ceiling_enabled;
-      document.querySelector('#statusText').textContent = control.buying_paused ? 'Buying held by operator' : priceRulesActive ? 'Online · operator price rules active' : 'Control plane online';
+      const profitRuleActive = control.profit_target_override_enabled === true;
+      document.querySelector('#statusText').textContent = control.buying_paused ? 'Buying held by operator' : priceRulesActive && profitRuleActive ? 'Online · operator price and profit rules active' : priceRulesActive ? 'Online · operator price rules active' : profitRuleActive ? 'Online · operator profit target active' : 'Control plane online';
       if (control.load_error) showError(new Error(`Control state fail-safe hold: ${control.load_error}`)); else clearError();
     }
 
@@ -932,6 +1051,24 @@
       } catch (error) { showError(error); } finally { button.disabled = false; }
     });
 
+    document.querySelector('#saveProfitTargetButton').addEventListener('click', async () => {
+      const button = document.querySelector('#saveProfitTargetButton');
+      button.disabled = true;
+      try {
+        const enabled = document.querySelector('#profitTargetEnabled').checked;
+        const targetPercent = Number(document.querySelector('#profitTargetNumber').value);
+        if (!Number.isFinite(targetPercent) || targetPercent < 0 || targetPercent > 25) {
+          throw new Error('Enter a net profit target from 0% through 25%.');
+        }
+        await request('/api/control', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({expected_revision:state.revision, profit_target_override_enabled:enabled, net_profit_target_pct:targetPercent / 100})});
+        state.profitTargetDirty = false;
+        await refresh();
+      } catch (error) { showError(error); } finally {
+        button.disabled = false;
+        updateProfitTargetCalculator();
+      }
+    });
+
     document.querySelector('#strategySelect').addEventListener('change', () => {
       state.strategySelectionDirty = true;
       renderStrategyDetails();
@@ -968,6 +1105,29 @@
       number.addEventListener('change', () => {
         if (!setPermissionPrice(name, number.value) && state.payload) renderPermissions(state.payload.control, state.payload.market.current_price);
       });
+    });
+    document.querySelector('#profitTargetEnabled').addEventListener('change', () => {
+      state.profitTargetDirty = true;
+      updateProfitTargetCalculator();
+    });
+    document.querySelector('#profitTargetRange').addEventListener('input', event => {
+      state.profitTargetDirty = true;
+      setProfitTargetPercent(event.target.value);
+      updateProfitTargetCalculator();
+    });
+    document.querySelector('#profitTargetNumber').addEventListener('input', event => {
+      state.profitTargetDirty = true;
+      if (setProfitTargetPercent(event.target.value)) updateProfitTargetCalculator();
+    });
+    document.querySelector('#profitTargetNumber').addEventListener('change', () => {
+      if (!setProfitTargetPercent(document.querySelector('#profitTargetNumber').value) && state.payload) {
+        state.profitTargetDirty = false;
+        renderProfitTarget(state.payload.control, state.payload.bot || {}, state.payload.market.current_price);
+      }
+    });
+    document.querySelector('#profitCalculatorBuyPrice').addEventListener('input', () => {
+      state.calculatorPriceDirty = true;
+      updateProfitTargetCalculator();
     });
     priceChart.addEventListener('pointermove', event => showChartPoint(event.clientX));
     priceChart.addEventListener('pointerdown', event => showChartPoint(event.clientX));

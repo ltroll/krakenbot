@@ -41,6 +41,7 @@ from range_grid_control import (
     load_control_state_fail_safe,
     operator_buy_cancel_reason,
     operator_buy_price_rule_reason,
+    operator_net_profit_target_pct,
 )
 from range_grid_effective_strategy import resolve_effective_strategy
 from range_grid_entry_placement import (
@@ -6832,6 +6833,9 @@ def main():
                         f"{strategy_selection_error}"
                     )
             operator_control_snapshot = control_status(operator_control)
+            operator_profit_target_pct = operator_net_profit_target_pct(
+                operator_control
+            )
             operator_control_revision = operator_control_snapshot["revision"]
             operator_control_error = operator_control_snapshot.get("load_error")
             if (
@@ -7530,6 +7534,12 @@ def main():
                         age_minutes = (
                             now - placed_at
                         ).total_seconds() / 60
+
+                    # Operator profit targets are exact, per-trade commitments.
+                    # Do not let either shadow extensions or live repricing
+                    # reinterpret them after the matching sell is placed.
+                    if order.get("operator_profit_target_override_applied"):
+                        continue
 
                     shadow_extension_map = state.setdefault(
                         "last_sell_extension_shadow_at_by_txid",
@@ -8231,7 +8241,10 @@ def main():
                     order.get("locked_sell_profit_target_pct")
                 )
                 if target_profit_pct is None:
-                    if order.get("operator_controlled"):
+                    if (
+                        order.get("operator_controlled")
+                        or order.get("operator_profit_target_override_applied")
+                    ):
                         base_target_profit_pct = optional_float(
                             sell_pct_override
                         )
@@ -8490,6 +8503,11 @@ def main():
                     "operator_controlled": bool(
                         order.get("operator_controlled")
                     ),
+                    "operator_profit_target_override_applied": bool(
+                        order.get(
+                            "operator_profit_target_override_applied"
+                        )
+                    ),
                     "control_target_id": order.get("control_target_id"),
                     "control_target_label": order.get(
                         "control_target_label"
@@ -8682,6 +8700,11 @@ def main():
                     fear_greed_profit_target_reason=(
                         fear_greed_target["reason"]
                     ),
+                    operator_profit_target_override_applied=bool(
+                        order.get(
+                            "operator_profit_target_override_applied"
+                        )
+                    ),
                     buy_source=buy_source
                 )
                 log_trade_activity(
@@ -8714,6 +8737,11 @@ def main():
                     ),
                     fear_greed_profit_target_reason=(
                         fear_greed_target["reason"]
+                    ),
+                    operator_profit_target_override_applied=bool(
+                        order.get(
+                            "operator_profit_target_override_applied"
+                        )
                     ),
                     buy_source=buy_source
                 )
@@ -8987,6 +9015,11 @@ def main():
                     level = candidate["level"]
                     grid_slot = candidate.get("grid_slot")
                     active_sell_pct_override = candidate["sell_pct_override"]
+                    operator_profit_target_override_applied = (
+                        operator_profit_target_pct is not None
+                    )
+                    if operator_profit_target_override_applied:
+                        active_sell_pct_override = operator_profit_target_pct
                     buy_source = candidate["buy_source"]
                     operator_controlled = bool(
                         candidate.get("operator_controlled")
@@ -10658,9 +10691,17 @@ def main():
                         ),
                         "placed_at": cycle_id,
                         "sell_pct_override": active_sell_pct_override,
+                        "operator_profit_target_override_applied": (
+                            operator_profit_target_override_applied
+                        ),
                         "fear_greed_profit_target_policy": (
                             fear_greed_profit_target_policy(
-                                {} if operator_controlled else route_config
+                                {}
+                                if (
+                                    operator_controlled
+                                    or operator_profit_target_override_applied
+                                )
+                                else route_config
                             )
                         ),
                         "buy_source": buy_source,

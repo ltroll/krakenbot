@@ -973,6 +973,12 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                     "buy_price_ceiling_usd": updated[
                         "buy_price_ceiling_usd"
                     ],
+                    "profit_target_override_enabled": updated[
+                        "profit_target_override_enabled"
+                    ],
+                    "net_profit_target_pct": updated[
+                        "net_profit_target_pct"
+                    ],
                     "strategy_profile_override": updated[
                         "strategy_profile_override"
                     ],

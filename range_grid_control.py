@@ -10,9 +10,10 @@ from range_grid_order_safety import atomic_write_json, load_json_with_backup
 from range_grid_strategy_catalog import normalize_strategy_filename
 
 
-CONTROL_SCHEMA_VERSION = 3
+CONTROL_SCHEMA_VERSION = 4
 MIN_BUY_PRICE_USD = 1.0
 MAX_BUY_PRICE_USD = 10_000_000.0
+MAX_NET_PROFIT_TARGET_PCT = 0.25
 
 
 class ControlStateError(ValueError):
@@ -33,6 +34,8 @@ def default_control_state():
         "buy_price_floor_usd": None,
         "buy_price_ceiling_enabled": False,
         "buy_price_ceiling_usd": None,
+        "profit_target_override_enabled": False,
+        "net_profit_target_pct": None,
         "strategy_profile_override": None,
         "updated_at": None,
         "updated_by": None,
@@ -62,6 +65,27 @@ def _optional_price(value, field, enabled):
             f"{MIN_BUY_PRICE_USD} and {MAX_BUY_PRICE_USD}"
         )
     return round(price, 2)
+
+
+def _optional_net_profit_target(value, enabled):
+    if value in (None, ""):
+        if enabled:
+            raise ControlStateError(
+                "net_profit_target_pct is required while enabled"
+            )
+        return None
+    try:
+        target = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ControlStateError(
+            "net_profit_target_pct must be numeric"
+        ) from exc
+    if not 0.0 <= target <= MAX_NET_PROFIT_TARGET_PCT:
+        raise ControlStateError(
+            "net_profit_target_pct must be between 0 and "
+            f"{MAX_NET_PROFIT_TARGET_PCT}"
+        )
+    return round(target, 8)
 
 
 def normalize_control_state(payload):
@@ -117,6 +141,15 @@ def normalize_control_state(payload):
             "buy_price_floor_usd cannot be above buy_price_ceiling_usd"
         )
 
+    profit_target_override_enabled = _bool_value(
+        payload.get("profit_target_override_enabled"),
+        False,
+    )
+    net_profit_target_pct = _optional_net_profit_target(
+        payload.get("net_profit_target_pct"),
+        profit_target_override_enabled,
+    )
+
     try:
         strategy_profile_override = normalize_strategy_filename(
             payload.get("strategy_profile_override")
@@ -136,6 +169,10 @@ def normalize_control_state(payload):
         "buy_price_floor_usd": floor_price,
         "buy_price_ceiling_enabled": ceiling_enabled,
         "buy_price_ceiling_usd": ceiling_price,
+        "profit_target_override_enabled": (
+            profit_target_override_enabled
+        ),
+        "net_profit_target_pct": net_profit_target_pct,
         "strategy_profile_override": strategy_profile_override,
         "updated_at": payload.get("updated_at"),
         "updated_by": payload.get("updated_by"),
@@ -154,6 +191,8 @@ def merge_control_update(current, update, *, updated_by=None):
         "buy_price_floor_usd",
         "buy_price_ceiling_enabled",
         "buy_price_ceiling_usd",
+        "profit_target_override_enabled",
+        "net_profit_target_pct",
         "strategy_profile_override",
     }
     merged = dict(current)
@@ -236,6 +275,14 @@ def operator_buy_cancel_reason(state, order):
     return operator_buy_price_rule_reason(normalized, order.get("price"))
 
 
+def operator_net_profit_target_pct(state):
+    """Return the exact operator net target, or None when strategy-controlled."""
+    normalized = normalize_control_state(state)
+    if not normalized["profit_target_override_enabled"]:
+        return None
+    return normalized["net_profit_target_pct"]
+
+
 def control_status(state):
     normalized = normalize_control_state(state)
     return {
@@ -246,6 +293,10 @@ def control_status(state):
         "buy_price_floor_usd": normalized["buy_price_floor_usd"],
         "buy_price_ceiling_enabled": normalized["buy_price_ceiling_enabled"],
         "buy_price_ceiling_usd": normalized["buy_price_ceiling_usd"],
+        "profit_target_override_enabled": normalized[
+            "profit_target_override_enabled"
+        ],
+        "net_profit_target_pct": normalized["net_profit_target_pct"],
         "strategy_profile_override": normalized[
             "strategy_profile_override"
         ],
