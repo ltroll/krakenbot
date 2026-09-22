@@ -330,6 +330,31 @@ class RangeGridBotLoggingTests(unittest.TestCase):
         self.assertIn("operator_net_profit_target_pct", called_functions)
         self.assertIn("restart_for_strategy_profile", called_functions)
 
+    def test_asset_reconciliation_partitions_pending_exchange_buys(self):
+        tree = self._bot_tree()
+        function = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "reconcile_asset_inventory"
+        )
+        called_functions = {
+            node.func.id
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        loaded_names = {
+            node.id
+            for node in ast.walk(function)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        }
+
+        self.assertIn(
+            "partition_asset_reconciliation_buys",
+            called_functions,
+        )
+        self.assertIn("reconciliation_candidates", loaded_names)
+
     def test_operator_profit_target_is_snapshotted_and_not_repriced(self):
         tree = self._bot_tree()
         main = next(

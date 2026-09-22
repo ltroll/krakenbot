@@ -764,6 +764,29 @@ If the bot appears inactive:
 - confirm the state file path is writable
 - confirm Kraken credentials are loaded from `.env`
 
+If a confirmed Kraken buy fill is missing from bot state and has no matching
+sell, use `recover_range_grid_filled_buys.py`. It queries Kraken to verify each
+transaction, refuses already-tracked fills, and performs a dry run unless
+`--apply` is supplied. Stop the bot before applying so its state file cannot be
+changed concurrently:
+
+```bash
+sudo systemctl stop range-grid-bot.service
+venv/bin/python recover_range_grid_filled_buys.py \
+  --txid <BUY_TXID> \
+  --net-profit-target-pct 0.01
+venv/bin/python recover_range_grid_filled_buys.py \
+  --txid <BUY_TXID> \
+  --net-profit-target-pct 0.01 \
+  --apply
+sudo systemctl start range-grid-bot.service
+```
+
+The recovery target is an exact net-profit target; the active strategy's
+round-trip fee allowance is still added when the sell price is calculated.
+The utility never places an order itself. After restart, the normal bot path
+processes the restored fill and places its sell.
+
 If logging stops:
 
 - verify `TRADE_LOG_FILE` points to the expected file

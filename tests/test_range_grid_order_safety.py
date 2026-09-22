@@ -10,6 +10,7 @@ from range_grid_order_safety import (
     load_json_with_backup,
     order_execution,
     order_limit_price,
+    partition_asset_reconciliation_buys,
 )
 
 
@@ -104,6 +105,31 @@ class RangeGridOrderSafetyTests(unittest.TestCase):
         self.assertEqual(allocation["execution_ratio"], 1.0)
         self.assertEqual(allocation["remaining_cost"], 0.0)
         self.assertEqual(allocation["remaining_fee"], 0.0)
+
+    def test_asset_reconciliation_excludes_pending_exchange_buys(self):
+        tracked = {
+            "85000.0": {"txid": "OPEN-BUY", "volume": 0.002},
+            "84900.0": {"txid": "FILLED-BUY", "volume": 0.003},
+            "84800.0": {"txid": None, "volume": 0.004},
+        }
+
+        partitions = partition_asset_reconciliation_buys(
+            tracked,
+            {"OPEN-BUY": {"status": "open"}},
+        )
+
+        self.assertEqual(set(partitions["pending"]), {"85000.0"})
+        self.assertEqual(set(partitions["candidates"]), {"84900.0"})
+        self.assertEqual(set(partitions["unresolved"]), {"84800.0"})
+
+    def test_asset_reconciliation_candidates_require_absence_from_open_orders(self):
+        tracked = {
+            "85000.0": {"txid": "BUY-1", "volume": 0.002},
+        }
+
+        partitions = partition_asset_reconciliation_buys(tracked, {})
+
+        self.assertEqual(set(partitions["candidates"]), {"85000.0"})
 
 
 if __name__ == "__main__":

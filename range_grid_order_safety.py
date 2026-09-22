@@ -149,6 +149,52 @@ def order_limit_price(order, fallback=None):
     return numeric_value(order.get("limitprice"), numeric_value(fallback, None))
 
 
+def partition_asset_reconciliation_buys(
+    tracked_buy_orders,
+    kraken_open_orders,
+):
+    """Separate pending exchange buys from inventory reconciliation candidates.
+
+    A tracked limit buy that still appears in Kraken OpenOrders has not yet
+    become inventory available for a sell. Asset-balance reconciliation must
+    never use it as evidence of missing inventory or remove it from bot state.
+    Orders without a transaction id are also left unresolved rather than
+    destructively reconciled.
+    """
+    tracked = (
+        tracked_buy_orders
+        if isinstance(tracked_buy_orders, dict)
+        else {}
+    )
+    exchange_open = (
+        kraken_open_orders
+        if isinstance(kraken_open_orders, dict)
+        else {}
+    )
+    open_txids = set(exchange_open)
+    pending = {}
+    candidates = {}
+    unresolved = {}
+
+    for state_key, order in tracked.items():
+        if not isinstance(order, dict):
+            unresolved[state_key] = order
+            continue
+        txid = str(order.get("txid") or "").strip()
+        if not txid:
+            unresolved[state_key] = order
+        elif txid in open_txids:
+            pending[state_key] = order
+        else:
+            candidates[state_key] = order
+
+    return {
+        "pending": pending,
+        "candidates": candidates,
+        "unresolved": unresolved,
+    }
+
+
 def allocate_position_costs(
     original_volume,
     executed_volume,

@@ -65,6 +65,7 @@ from range_grid_order_safety import (
     load_json_with_backup,
     order_execution,
     order_limit_price,
+    partition_asset_reconciliation_buys,
 )
 from range_grid_order_sizing import (
     minimum_order_floor_decision,
@@ -6327,18 +6328,31 @@ def reconcile_asset_inventory(cycle_id):
         )
         return []
 
+    buy_partitions = partition_asset_reconciliation_buys(
+        state["open_buy_orders"],
+        open_orders_resp["result"].get("open", {}) or {},
+    )
+    pending_buy_orders = buy_partitions["pending"]
+    reconciliation_candidates = buy_partitions["candidates"]
+    unresolved_buy_orders = buy_partitions["unresolved"]
+
     open_sell_volume = sum(
         positive_float(order.get("volume")) or 0.0
         for order in state["open_sell_orders"].values()
     )
-    open_buy_volume = sum(
+    pending_buy_volume = sum(
         positive_float(order.get("volume")) or 0.0
-        for order in state["open_buy_orders"].values()
+        for order in pending_buy_orders.values()
     )
-    tracked_total_volume = open_sell_volume + open_buy_volume
+    reconcilable_buy_volume = sum(
+        positive_float(order.get("volume")) or 0.0
+        for order in reconciliation_candidates.values()
+    )
+    tracked_open_buy_volume = pending_buy_volume + reconcilable_buy_volume
+    tracked_total_volume = open_sell_volume + tracked_open_buy_volume
     available_asset_for_new_sells = max(0.0, actual_asset_volume - kraken_reserved_sell)
     tolerance = max(10 ** (-VOLUME_DECIMALS), 0.00000002)
-    excess_volume = open_buy_volume - available_asset_for_new_sells
+    excess_volume = reconcilable_buy_volume - available_asset_for_new_sells
 
     log_event(
         "ASSET_RECONCILE_CHECK",
@@ -6347,7 +6361,12 @@ def reconcile_asset_inventory(cycle_id):
         actual_asset_volume=round(actual_asset_volume, 8),
         kraken_reserved_sell_volume=round(kraken_reserved_sell, 8),
         available_asset_for_new_sells=round(available_asset_for_new_sells, 8),
-        tracked_open_buy_volume=round(open_buy_volume, 8),
+        tracked_open_buy_volume=round(tracked_open_buy_volume, 8),
+        pending_exchange_buy_count=len(pending_buy_orders),
+        pending_exchange_buy_volume=round(pending_buy_volume, 8),
+        reconcilable_buy_count=len(reconciliation_candidates),
+        reconcilable_buy_volume=round(reconcilable_buy_volume, 8),
+        unresolved_buy_count=len(unresolved_buy_orders),
         tracked_open_sell_volume=round(open_sell_volume, 8),
         tracked_total_volume=round(tracked_total_volume, 8),
         excess_volume=round(excess_volume, 8)
@@ -6357,7 +6376,7 @@ def reconcile_asset_inventory(cycle_id):
         return []
 
     removable_orders = []
-    for level, order in state["open_buy_orders"].items():
+    for level, order in reconciliation_candidates.items():
         order_volume = positive_float(order.get("volume")) or 0.0
         placed_at = parse_iso8601(order.get("placed_at")) or datetime.min.replace(
             tzinfo=timezone.utc
