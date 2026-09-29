@@ -48,8 +48,10 @@ from range_grid_control import (
     control_status,
     load_control_state_fail_safe,
     operator_buy_cancel_reason,
+    operator_buy_order_size_usd,
     operator_buy_price_rule_reason,
     operator_net_profit_target_pct,
+    operator_round_trip_limit_status,
 )
 from range_grid_effective_strategy import resolve_effective_strategy
 from range_grid_entry_placement import (
@@ -6876,6 +6878,9 @@ def main():
             operator_profit_target_pct = operator_net_profit_target_pct(
                 operator_control
             )
+            operator_order_size_override_usd = operator_buy_order_size_usd(
+                operator_control
+            )
             operator_control_revision = operator_control_snapshot["revision"]
             operator_control_error = operator_control_snapshot.get("load_error")
             if (
@@ -8556,6 +8561,15 @@ def main():
                             "operator_profit_target_override_applied"
                         )
                     ),
+                    "operator_order_size_override_usd": order.get(
+                        "operator_order_size_override_usd"
+                    ),
+                    "operator_round_trip_day": order.get(
+                        "operator_round_trip_day"
+                    ),
+                    "operator_daily_round_trip_limit_at_start": order.get(
+                        "operator_daily_round_trip_limit_at_start"
+                    ),
                     "control_target_id": order.get("control_target_id"),
                     "control_target_label": order.get(
                         "control_target_label"
@@ -9058,8 +9072,22 @@ def main():
                 high_anchor_cooldown_remaining = (
                     high_anchor_cooldown_remaining_minutes(now)
                 )
+                operator_round_trip_status = operator_round_trip_limit_status(
+                    operator_control,
+                    state["open_buy_orders"],
+                    state["open_sell_orders"],
+                    moment=now,
+                )
 
                 for candidate in deduped_candidates:
+                    operator_round_trip_status = (
+                        operator_round_trip_limit_status(
+                            operator_control,
+                            state["open_buy_orders"],
+                            state["open_sell_orders"],
+                            moment=now,
+                        )
+                    )
                     level = candidate["level"]
                     grid_slot = candidate.get("grid_slot")
                     active_sell_pct_override = candidate["sell_pct_override"]
@@ -9461,6 +9489,8 @@ def main():
                         skip_reason = "resting_grid_slot_active"
                     elif route_block_reason:
                         skip_reason = route_block_reason
+                    elif operator_round_trip_status["blocked"]:
+                        skip_reason = "operator_daily_round_trip_limit"
                     elif key in reserved_sell_levels and not resting_grid_entry:
                         skip_reason = "open_sell_order"
                     elif (
@@ -9661,14 +9691,35 @@ def main():
                         )
                     ) / level
                     trade_notional_usd = level * volume
+                    if operator_order_size_override_usd is not None:
+                        trade_notional_usd = operator_order_size_override_usd
+                        volume = trade_notional_usd / level
+                        minimum_floor["calculated_notional_usd"] = (
+                            trade_notional_usd
+                        )
+                        minimum_floor["reason"] = (
+                            "operator_order_size_override"
+                        )
                     projected_inventory_usd = deployed_inventory_usd + (
-                        level * volume
+                        trade_notional_usd
                     )
                     projected_bucket_inventory_usd = (
-                        bucket_inventory_usd + (level * volume)
+                        bucket_inventory_usd + trade_notional_usd
                     )
 
-                    if skip_reason is None:
+                    if (
+                        skip_reason is None
+                        and operator_order_size_override_usd is not None
+                        and trade_notional_usd > available_usd
+                    ):
+                        skip_reason = (
+                            "operator_order_size_insufficient_available_usd"
+                        )
+
+                    if (
+                        skip_reason is None
+                        and operator_order_size_override_usd is None
+                    ):
                         minimum_floor = minimum_order_floor_decision(
                             minimum_floor_config,
                             buy_source=buy_source,
@@ -9791,6 +9842,30 @@ def main():
                         ),
                     }
 
+                    operator_execution_log_fields = {
+                        "operator_order_size_override_enabled": (
+                            operator_order_size_override_usd is not None
+                        ),
+                        "operator_order_size_usd": (
+                            operator_order_size_override_usd
+                        ),
+                        "operator_daily_round_trip_limit_enabled": (
+                            operator_round_trip_status["enabled"]
+                        ),
+                        "operator_daily_round_trip_day": (
+                            operator_round_trip_status["day"]
+                        ),
+                        "operator_daily_round_trip_limit": (
+                            operator_round_trip_status["limit"]
+                        ),
+                        "operator_daily_round_trip_active_count": (
+                            operator_round_trip_status["active_count"]
+                        ),
+                        "operator_daily_round_trip_remaining": (
+                            operator_round_trip_status["remaining"]
+                        ),
+                    }
+
                     candidate_sell_backlog_log_fields = {
                         "sell_backlog_count": candidate_sell_backlog["count"],
                         "sell_backlog_effective_count": round(
@@ -9880,6 +9955,7 @@ def main():
                             **source_policy_log_fields,
                             **effective_strategy_log_fields,
                             **minimum_order_floor_log_fields,
+                            **operator_execution_log_fields,
                             signal_status=signal_status,
                             freshness_allows_trading=freshness_allows_trading,
                             freshness_block_reason=freshness_block_reason,
@@ -10400,6 +10476,7 @@ def main():
                         buy_source=buy_source,
                         bucket_name=bucket_name,
                         **minimum_order_floor_log_fields,
+                        **operator_execution_log_fields,
                         bucket_inventory_usd=round(bucket_inventory_usd, 8),
                         bucket_inventory_cap_usd=round(bucket_cap_usd, 8),
                         high_anchor_order_count=high_anchor_order_count,
@@ -10582,6 +10659,7 @@ def main():
                             **source_policy_log_fields,
                             **effective_strategy_log_fields,
                             **minimum_order_floor_log_fields,
+                            **operator_execution_log_fields,
                             sell_pct_override=active_sell_pct_override,
                             above_last_sell_breakout_bypass=(
                                 above_last_sell_breakout_bypass
@@ -10652,6 +10730,7 @@ def main():
                             **source_policy_log_fields,
                             **effective_strategy_log_fields,
                             **minimum_order_floor_log_fields,
+                            **operator_execution_log_fields,
                             sell_pct_override=active_sell_pct_override,
                             above_last_sell_breakout_bypass=(
                                 above_last_sell_breakout_bypass
@@ -10741,6 +10820,17 @@ def main():
                         "sell_pct_override": active_sell_pct_override,
                         "operator_profit_target_override_applied": (
                             operator_profit_target_override_applied
+                        ),
+                        "operator_order_size_override_usd": (
+                            operator_order_size_override_usd
+                        ),
+                        "operator_round_trip_day": (
+                            operator_round_trip_status["day"]
+                            if operator_round_trip_status["enabled"]
+                            else None
+                        ),
+                        "operator_daily_round_trip_limit_at_start": (
+                            operator_round_trip_status["limit"]
                         ),
                         "fear_greed_profit_target_policy": (
                             fear_greed_profit_target_policy(
@@ -10973,6 +11063,7 @@ def main():
                         **source_policy_log_fields,
                         **effective_strategy_log_fields,
                         **minimum_order_floor_log_fields,
+                        **operator_execution_log_fields,
                         sell_pct_override=active_sell_pct_override,
                         buy_cooldown_minutes=(
                             buy_cooldown["global_cooldown_minutes"]
@@ -11051,6 +11142,7 @@ def main():
                         **source_policy_log_fields,
                         **effective_strategy_log_fields,
                         **minimum_order_floor_log_fields,
+                        **operator_execution_log_fields,
                         sell_pct_override=active_sell_pct_override,
                         buy_cooldown_minutes=(
                             buy_cooldown["global_cooldown_minutes"]
@@ -11221,6 +11313,14 @@ def main():
                 actions.append("hold")
 
             cycle_high_anchor_exposure = high_anchor_backlog_exposure(now)
+            cycle_operator_round_trip_status = (
+                operator_round_trip_limit_status(
+                    operator_control,
+                    state["open_buy_orders"],
+                    state["open_sell_orders"],
+                    moment=now,
+                )
+            )
             activity_summary_written = False
             if activity_summary_interval_minutes > 0:
                 last_activity_summary_at = parse_iso8601(
@@ -11273,6 +11373,9 @@ def main():
                         weather_high_anchor_allowed=weather_high_anchor_allowed,
                         runtime_block_reason=runtime_block_reason,
                         operator_control=operator_control_snapshot,
+                        operator_round_trip_status=(
+                            cycle_operator_round_trip_status
+                        ),
                         realized_pnl_today=round(realized_pnl_today, 8),
                         sell_backlog_count=sell_backlog["count"],
                         sell_backlog_effective_count=round(
@@ -11411,6 +11514,7 @@ def main():
                 source_guard_allows_trading=source_guard_allows_trading,
                 runtime_block_reason=runtime_block_reason,
                 operator_control=operator_control_snapshot,
+                operator_round_trip_status=cycle_operator_round_trip_status,
                 activity_summary_written=activity_summary_written,
                 realized_pnl_today=round(realized_pnl_today, 8),
                 sell_backlog_count=sell_backlog["count"],
@@ -11609,6 +11713,9 @@ def main():
                 "action_recommendation": action_recommendation,
                 "runtime_block_reason": runtime_block_reason,
                 "operator_control": operator_control_snapshot,
+                "operator_round_trip_status": (
+                    cycle_operator_round_trip_status
+                ),
                 "effective_position_size_pct": effective_position_size_pct,
                 "effective_max_inventory_usd": effective_max_inventory_usd,
                 "effective_max_open_sell_orders": (

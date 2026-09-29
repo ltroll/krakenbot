@@ -10,10 +10,14 @@ from range_grid_order_safety import atomic_write_json, load_json_with_backup
 from range_grid_strategy_catalog import normalize_strategy_filename
 
 
-CONTROL_SCHEMA_VERSION = 4
+CONTROL_SCHEMA_VERSION = 5
 MIN_BUY_PRICE_USD = 1.0
 MAX_BUY_PRICE_USD = 10_000_000.0
 MAX_NET_PROFIT_TARGET_PCT = 0.25
+MIN_ORDER_SIZE_USD = 1.0
+MAX_ORDER_SIZE_USD = 1_000_000.0
+MIN_DAILY_ROUND_TRIP_LIMIT = 1
+MAX_DAILY_ROUND_TRIP_LIMIT = 1_000
 
 
 class ControlStateError(ValueError):
@@ -36,6 +40,10 @@ def default_control_state():
         "buy_price_ceiling_usd": None,
         "profit_target_override_enabled": False,
         "net_profit_target_pct": None,
+        "order_size_override_enabled": False,
+        "order_size_usd": None,
+        "daily_round_trip_limit_enabled": False,
+        "daily_round_trip_limit": None,
         "strategy_profile_override": None,
         "updated_at": None,
         "updated_by": None,
@@ -86,6 +94,53 @@ def _optional_net_profit_target(value, enabled):
             f"{MAX_NET_PROFIT_TARGET_PCT}"
         )
     return round(target, 8)
+
+
+def _optional_order_size(value, enabled):
+    if value in (None, ""):
+        if enabled:
+            raise ControlStateError(
+                "order_size_usd is required while enabled"
+            )
+        return None
+    try:
+        order_size = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ControlStateError("order_size_usd must be numeric") from exc
+    if not MIN_ORDER_SIZE_USD <= order_size <= MAX_ORDER_SIZE_USD:
+        raise ControlStateError(
+            "order_size_usd must be between "
+            f"{MIN_ORDER_SIZE_USD} and {MAX_ORDER_SIZE_USD}"
+        )
+    return round(order_size, 2)
+
+
+def _optional_daily_round_trip_limit(value, enabled):
+    if value in (None, ""):
+        if enabled:
+            raise ControlStateError(
+                "daily_round_trip_limit is required while enabled"
+            )
+        return None
+    if isinstance(value, bool):
+        raise ControlStateError("daily_round_trip_limit must be an integer")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ControlStateError(
+            "daily_round_trip_limit must be an integer"
+        ) from exc
+    if not numeric.is_integer():
+        raise ControlStateError(
+            "daily_round_trip_limit must be an integer"
+        )
+    limit = int(numeric)
+    if not MIN_DAILY_ROUND_TRIP_LIMIT <= limit <= MAX_DAILY_ROUND_TRIP_LIMIT:
+        raise ControlStateError(
+            "daily_round_trip_limit must be between "
+            f"{MIN_DAILY_ROUND_TRIP_LIMIT} and {MAX_DAILY_ROUND_TRIP_LIMIT}"
+        )
+    return limit
 
 
 def normalize_control_state(payload):
@@ -149,6 +204,22 @@ def normalize_control_state(payload):
         payload.get("net_profit_target_pct"),
         profit_target_override_enabled,
     )
+    order_size_override_enabled = _bool_value(
+        payload.get("order_size_override_enabled"),
+        False,
+    )
+    order_size_usd = _optional_order_size(
+        payload.get("order_size_usd"),
+        order_size_override_enabled,
+    )
+    daily_round_trip_limit_enabled = _bool_value(
+        payload.get("daily_round_trip_limit_enabled"),
+        False,
+    )
+    daily_round_trip_limit = _optional_daily_round_trip_limit(
+        payload.get("daily_round_trip_limit"),
+        daily_round_trip_limit_enabled,
+    )
 
     try:
         strategy_profile_override = normalize_strategy_filename(
@@ -173,6 +244,12 @@ def normalize_control_state(payload):
             profit_target_override_enabled
         ),
         "net_profit_target_pct": net_profit_target_pct,
+        "order_size_override_enabled": order_size_override_enabled,
+        "order_size_usd": order_size_usd,
+        "daily_round_trip_limit_enabled": (
+            daily_round_trip_limit_enabled
+        ),
+        "daily_round_trip_limit": daily_round_trip_limit,
         "strategy_profile_override": strategy_profile_override,
         "updated_at": payload.get("updated_at"),
         "updated_by": payload.get("updated_by"),
@@ -193,6 +270,10 @@ def merge_control_update(current, update, *, updated_by=None):
         "buy_price_ceiling_usd",
         "profit_target_override_enabled",
         "net_profit_target_pct",
+        "order_size_override_enabled",
+        "order_size_usd",
+        "daily_round_trip_limit_enabled",
+        "daily_round_trip_limit",
         "strategy_profile_override",
     }
     merged = dict(current)
@@ -283,6 +364,73 @@ def operator_net_profit_target_pct(state):
     return normalized["net_profit_target_pct"]
 
 
+def operator_buy_order_size_usd(state):
+    """Return the exact USD notional for new buys, or None."""
+    normalized = normalize_control_state(state)
+    if not normalized["order_size_override_enabled"]:
+        return None
+    return normalized["order_size_usd"]
+
+
+def operator_daily_round_trip_limit(state):
+    """Return the active-cycle allowance for a UTC day, or None."""
+    normalized = normalize_control_state(state)
+    if not normalized["daily_round_trip_limit_enabled"]:
+        return None
+    return normalized["daily_round_trip_limit"]
+
+
+def operator_round_trip_day(moment=None):
+    """Return the UTC calendar day used for operator cycle allowances."""
+    moment = moment or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).date().isoformat()
+
+
+def operator_round_trip_limit_status(
+    state,
+    open_buy_orders,
+    open_sell_orders,
+    *,
+    moment=None,
+):
+    """Summarize active round trips that were started on the current UTC day.
+
+    A tagged pending buy or matching open sell occupies one slot. Removing the
+    order after cancellation or a sell fill releases it. Orders tagged on an
+    earlier day deliberately do not consume today's allowance.
+    """
+    normalized = normalize_control_state(state)
+    day = operator_round_trip_day(moment)
+    limit = operator_daily_round_trip_limit(normalized)
+
+    def current_day_orders(orders):
+        values = orders.values() if isinstance(orders, dict) else orders or []
+        return [
+            order
+            for order in values
+            if isinstance(order, dict)
+            and order.get("operator_round_trip_day") == day
+        ]
+
+    active_buys = current_day_orders(open_buy_orders)
+    active_sells = current_day_orders(open_sell_orders)
+    active_count = len(active_buys) + len(active_sells)
+    remaining = None if limit is None else max(0, limit - active_count)
+    return {
+        "enabled": limit is not None,
+        "day": day,
+        "timezone": "UTC",
+        "limit": limit,
+        "active_count": active_count,
+        "active_buy_count": len(active_buys),
+        "active_sell_count": len(active_sells),
+        "remaining": remaining,
+        "blocked": limit is not None and active_count >= limit,
+    }
+
+
 def control_status(state):
     normalized = normalize_control_state(state)
     return {
@@ -297,6 +445,14 @@ def control_status(state):
             "profit_target_override_enabled"
         ],
         "net_profit_target_pct": normalized["net_profit_target_pct"],
+        "order_size_override_enabled": normalized[
+            "order_size_override_enabled"
+        ],
+        "order_size_usd": normalized["order_size_usd"],
+        "daily_round_trip_limit_enabled": normalized[
+            "daily_round_trip_limit_enabled"
+        ],
+        "daily_round_trip_limit": normalized["daily_round_trip_limit"],
         "strategy_profile_override": normalized[
             "strategy_profile_override"
         ],

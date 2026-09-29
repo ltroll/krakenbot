@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 
 from range_grid_control import (
     ControlStateError,
@@ -12,8 +13,11 @@ from range_grid_control import (
     merge_control_update,
     normalize_control_state,
     operator_buy_cancel_reason,
+    operator_buy_order_size_usd,
     operator_buy_price_rule_reason,
+    operator_daily_round_trip_limit,
     operator_net_profit_target_pct,
+    operator_round_trip_limit_status,
     save_control_state,
 )
 
@@ -96,7 +100,7 @@ class RangeGridControlTests(unittest.TestCase):
             }],
         })
 
-        self.assertEqual(state["schema_version"], 4)
+        self.assertEqual(state["schema_version"], 5)
         self.assertNotIn("manual_targets_enabled", state)
         self.assertNotIn("buy_targets", state)
         self.assertTrue(state["buy_price_floor_enabled"])
@@ -161,6 +165,101 @@ class RangeGridControlTests(unittest.TestCase):
 
         self.assertIsNone(operator_net_profit_target_pct(state))
         self.assertEqual(state["net_profit_target_pct"], 0.015)
+
+    def test_operator_order_size_override_is_exact_and_optional(self):
+        enabled = normalize_control_state({
+            "order_size_override_enabled": True,
+            "order_size_usd": "125.678",
+        })
+        disabled = normalize_control_state({
+            "order_size_override_enabled": False,
+            "order_size_usd": 150,
+        })
+
+        self.assertEqual(operator_buy_order_size_usd(enabled), 125.68)
+        self.assertIsNone(operator_buy_order_size_usd(disabled))
+        self.assertEqual(control_status(disabled)["order_size_usd"], 150.0)
+
+    def test_operator_order_size_requires_valid_enabled_value(self):
+        for payload in (
+            {"order_size_override_enabled": True},
+            {
+                "order_size_override_enabled": True,
+                "order_size_usd": 0,
+            },
+            {
+                "order_size_override_enabled": True,
+                "order_size_usd": 1_000_001,
+            },
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ControlStateError):
+                    normalize_control_state(payload)
+
+    def test_daily_round_trip_limit_counts_only_active_cycles_started_today(self):
+        state = normalize_control_state({
+            "daily_round_trip_limit_enabled": True,
+            "daily_round_trip_limit": 3,
+        })
+        moment = datetime(2026, 9, 29, 18, tzinfo=timezone.utc)
+        open_buys = {
+            "one": {"operator_round_trip_day": "2026-09-29"},
+            "old": {"operator_round_trip_day": "2026-09-28"},
+        }
+        open_sells = {
+            "two": {"operator_round_trip_day": "2026-09-29"},
+            "three": {"operator_round_trip_day": "2026-09-29"},
+            "legacy": {},
+        }
+
+        status = operator_round_trip_limit_status(
+            state,
+            open_buys,
+            open_sells,
+            moment=moment,
+        )
+
+        self.assertEqual(operator_daily_round_trip_limit(state), 3)
+        self.assertEqual(status["day"], "2026-09-29")
+        self.assertEqual(status["active_count"], 3)
+        self.assertEqual(status["active_buy_count"], 1)
+        self.assertEqual(status["active_sell_count"], 2)
+        self.assertEqual(status["remaining"], 0)
+        self.assertTrue(status["blocked"])
+
+        del open_sells["two"]
+        released = operator_round_trip_limit_status(
+            state,
+            open_buys,
+            open_sells,
+            moment=moment,
+        )
+        self.assertEqual(released["remaining"], 1)
+        self.assertFalse(released["blocked"])
+
+    def test_daily_round_trip_limit_validation_and_disabled_status(self):
+        for value in (0, 1.5, 1001, True):
+            with self.subTest(value=value):
+                with self.assertRaises(ControlStateError):
+                    normalize_control_state({
+                        "daily_round_trip_limit_enabled": True,
+                        "daily_round_trip_limit": value,
+                    })
+
+        disabled = normalize_control_state({
+            "daily_round_trip_limit_enabled": False,
+            "daily_round_trip_limit": 3,
+        })
+        status = operator_round_trip_limit_status(
+            disabled,
+            [{"operator_round_trip_day": "2026-09-29"}],
+            [],
+            moment=datetime(2026, 9, 29, tzinfo=timezone.utc),
+        )
+        self.assertIsNone(operator_daily_round_trip_limit(disabled))
+        self.assertFalse(status["enabled"])
+        self.assertIsNone(status["remaining"])
+        self.assertFalse(status["blocked"])
 
     def test_strategy_profile_override_is_persisted_and_path_safe(self):
         profile = "range_grid_strategy_production_test.json"

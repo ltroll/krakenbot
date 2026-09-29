@@ -25,6 +25,7 @@ from range_grid_control import (
     control_status,
     load_control_state_fail_safe,
     merge_control_update,
+    operator_round_trip_limit_status,
     save_control_state,
 )
 from range_grid_strategy_catalog import (
@@ -734,6 +735,11 @@ def build_status_payload(
     bot_state = read_json_object(STATE_FILE)
     open_buy_orders = list((bot_state.get("open_buy_orders") or {}).values())
     open_sell_orders = list((bot_state.get("open_sell_orders") or {}).values())
+    round_trip_status = operator_round_trip_limit_status(
+        control,
+        open_buy_orders,
+        open_sell_orders,
+    )
     return {
         "generated_at": utc_now_iso(),
         "control": control_status(control),
@@ -748,6 +754,13 @@ def build_status_payload(
             else unavailable_sentiment_snapshot()
         ),
         "bot": bot_status,
+        "operator_limits": {
+            "order_size_override_enabled": bool(
+                control.get("order_size_override_enabled")
+            ),
+            "order_size_usd": control.get("order_size_usd"),
+            "round_trips": round_trip_status,
+        },
         "orders": {
             "open_buy_count": len(open_buy_orders),
             "open_sell_count": len(open_sell_orders),
@@ -978,6 +991,16 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                     ],
                     "net_profit_target_pct": updated[
                         "net_profit_target_pct"
+                    ],
+                    "order_size_override_enabled": updated[
+                        "order_size_override_enabled"
+                    ],
+                    "order_size_usd": updated["order_size_usd"],
+                    "daily_round_trip_limit_enabled": updated[
+                        "daily_round_trip_limit_enabled"
+                    ],
+                    "daily_round_trip_limit": updated[
+                        "daily_round_trip_limit"
                     ],
                     "strategy_profile_override": updated[
                         "strategy_profile_override"

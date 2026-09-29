@@ -392,6 +392,48 @@ class RangeGridControlPlaneTests(unittest.TestCase):
 
         self.assertFalse(snapshot["restart_pending"])
 
+    def test_status_payload_reports_operator_cycle_usage(self):
+        class MarketData:
+            def snapshot(self):
+                return {"current_price": 80000, "stale": False}
+
+        with tempfile.TemporaryDirectory() as directory:
+            control_path = os.path.join(directory, "control.json")
+            state_path = os.path.join(directory, "state.json")
+            status_path = os.path.join(directory, "status.json")
+            today = datetime.now(timezone.utc).date().isoformat()
+            control_plane.save_control_state(control_path, {
+                "daily_round_trip_limit_enabled": True,
+                "daily_round_trip_limit": 3,
+                "order_size_override_enabled": True,
+                "order_size_usd": 125,
+            })
+            with open(state_path, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "open_buy_orders": {
+                        "one": {"operator_round_trip_day": today},
+                    },
+                    "open_sell_orders": {
+                        "two": {"operator_round_trip_day": today},
+                    },
+                }, handle)
+            with open(status_path, "w", encoding="utf-8") as handle:
+                json.dump({}, handle)
+
+            with (
+                patch.object(control_plane, "CONTROL_FILE", control_path),
+                patch.object(control_plane, "STATE_FILE", state_path),
+                patch.object(control_plane, "STATUS_FILE", status_path),
+                patch.object(control_plane, "STRATEGY_DIRECTORY", directory),
+            ):
+                payload = control_plane.build_status_payload(MarketData())
+
+        limits = payload["operator_limits"]
+        self.assertTrue(limits["order_size_override_enabled"])
+        self.assertEqual(limits["order_size_usd"], 125.0)
+        self.assertEqual(limits["round_trips"]["active_count"], 2)
+        self.assertEqual(limits["round_trips"]["remaining"], 1)
+
     def test_control_page_has_interactive_dated_chart_tooltip(self):
         html = control_plane.HTML_FILE.read_text(encoding="utf-8")
 
@@ -409,10 +451,23 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertIn('id="profitCalculatorBuyPrice"', html)
         self.assertIn('id="profitCalculatorSellPrice"', html)
         self.assertIn('id="saveProfitTargetButton"', html)
+        self.assertIn('id="orderSizeEnabled"', html)
+        self.assertIn('id="orderSizeRange"', html)
+        self.assertIn('id="orderSizeNumber"', html)
+        self.assertIn('id="dailyRoundTripLimitEnabled"', html)
+        self.assertIn('id="dailyRoundTripLimitRange"', html)
+        self.assertIn('id="dailyRoundTripLimitNumber"', html)
+        self.assertIn('id="dailyRoundTripActive"', html)
+        self.assertIn('id="dailyRoundTripRemaining"', html)
+        self.assertIn('id="saveExecutionControlsButton"', html)
         self.assertIn("function updateProfitTargetCalculator", html)
+        self.assertIn("function renderExecutionControls", html)
         self.assertIn("profit_target_override_enabled", html)
         self.assertIn("net_profit_target_pct", html)
+        self.assertIn("order_size_override_enabled", html)
+        self.assertIn("daily_round_trip_limit_enabled", html)
         self.assertIn("0% means estimated break-even", html)
+        self.assertIn("Old inventory does not block today", html)
         self.assertIn("function renderPermissions", html)
         self.assertIn("Don’t buy below", html)
         self.assertIn("Don’t buy above", html)

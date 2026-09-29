@@ -337,6 +337,16 @@ Fear & Greed or weather profit multipliers for that trade. Existing open buys,
 open sells, and filled inventory are unchanged, and an operator-targeted sell
 is not subsequently repriced by the bot.
 
+Order controls provide two additional optional overrides for future live buys.
+The fixed order-size control replaces percentage-based sizing with an exact USD
+notional; available cash, exchange minimums, and enabled strategy inventory caps
+still apply. The daily active-cycle allowance counts pending buys and their
+matching open sells that were started during the current UTC day. A completed
+sell or canceled buy releases its slot immediately. At the next UTC day, older
+unfinished cycles remain open but do not consume the new day's allowance. This
+limits how quickly new inventory can accumulate without turning the existing
+inventory backlog into a hard blocker. Existing orders are never resized.
+
 HOLD blocks new buys and, by default, requests cancellation of pending buy
 orders on the next bot cycle. It never cancels or reprices existing sell orders,
 and filled inventory continues through the normal sell-management path. A

@@ -52,6 +52,7 @@
     .chart-panel { grid-column: span 7; padding: 18px; }
     .control-panel { grid-column: span 5; padding: 18px; }
     .strategy-panel { grid-column: 1 / -1; padding: 18px; }
+    .execution-panel { grid-column: 1 / -1; padding: 18px; }
     .profit-panel { grid-column: 1 / -1; padding: 18px; }
     .targets-panel { grid-column: 1 / -1; padding: 18px; }
     .panel-title { margin: 0 0 13px; font-size: .78rem; color: var(--muted); text-transform: uppercase; letter-spacing: .11em; }
@@ -184,7 +185,7 @@
     .watch-item strong { display: block; margin-bottom: 4px; font-size: .79rem; }
     .watch-item span { color: var(--muted); font-size: .77rem; line-height: 1.45; }
     @media (max-width: 980px) {
-      .hero, .market, .chart-panel, .control-panel, .strategy-panel, .profit-panel, .weather-hero, .weather-summary, .weather-half, .backtest-hero, .backtest-summary, .backtest-half { grid-column: 1 / -1; }
+      .hero, .market, .chart-panel, .control-panel, .strategy-panel, .execution-panel, .profit-panel, .weather-hero, .weather-summary, .weather-half, .backtest-hero, .backtest-summary, .backtest-half { grid-column: 1 / -1; }
       .market-cards { grid-template-columns: repeat(2, 1fr); }
       .weather-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .permission-head { display: none; }
@@ -276,6 +277,56 @@
         </div>
         <p id="strategyDetails" class="strategy-meta">Loading available strategies.</p>
         <p class="strategy-meta strategy-warning">Applying a strategy restarts the bot at the start of its next cycle so every setting is loaded together. Existing inventory and open orders are preserved. The selected file becomes the base profile; an enabled anchor router can still apply per-anchor overrides.</p>
+      </section>
+
+      <section class="panel execution-panel">
+        <div class="control-head">
+          <h2 class="panel-title">Order size &amp; daily cycle control</h2>
+          <span id="executionControlStatus" class="badge fresh">Strategy controlled</span>
+        </div>
+        <div class="target-explainer">
+          <strong>Control how much each new buy uses and how quickly today’s inventory can grow</strong>
+          <div class="explainer-grid">
+            <div><b>Fixed order size.</b> When enabled, every newly placed buy targets this USD notional instead of strategy percentage sizing.</div>
+            <div><b>Daily active cycles.</b> A pending buy or its matching open sell occupies one of today’s slots. A completed or canceled cycle frees its slot immediately.</div>
+            <div><b>Old inventory does not block today.</b> Unfinished cycles started on a prior UTC day remain untouched and do not consume today’s allowance.</div>
+          </div>
+        </div>
+        <div class="profit-layout">
+          <div class="profit-box">
+            <h3>New buy size</h3>
+            <div class="profit-toggle">
+              <input id="orderSizeEnabled" type="checkbox">
+              <label for="orderSizeEnabled">Use fixed USD order size<small>Existing orders are unchanged. Exchange minimums, available cash, and enabled strategy risk caps still apply.</small></label>
+            </div>
+            <label class="profit-input-label" for="orderSizeNumber">Target notional per buy</label>
+            <div class="profit-inputs">
+              <input id="orderSizeRange" type="range" min="5" max="1000" step="5">
+              <input id="orderSizeNumber" type="number" min="1" max="1000000" step="5" inputmode="decimal" aria-label="Fixed USD order size">
+            </div>
+          </div>
+          <div class="profit-box">
+            <h3>Active cycles started today</h3>
+            <div class="profit-toggle">
+              <input id="dailyRoundTripLimitEnabled" type="checkbox">
+              <label for="dailyRoundTripLimitEnabled">Limit today’s active round trips<small>This is a renewable slot allowance, not a permanent inventory cap and not a lifetime trade counter.</small></label>
+            </div>
+            <label class="profit-input-label" for="dailyRoundTripLimitNumber">Maximum active cycles from this UTC day</label>
+            <div class="profit-inputs">
+              <input id="dailyRoundTripLimitRange" type="range" min="1" max="20" step="1">
+              <input id="dailyRoundTripLimitNumber" type="number" min="1" max="1000" step="1" inputmode="numeric" aria-label="Daily active round-trip limit">
+            </div>
+            <div class="calculator-results">
+              <div class="calculator-result primary"><span>Active today</span><strong id="dailyRoundTripActive">—</strong></div>
+              <div class="calculator-result"><span>Slots remaining</span><strong id="dailyRoundTripRemaining">—</strong></div>
+            </div>
+            <p id="dailyRoundTripDay" class="formula">UTC day —</p>
+          </div>
+        </div>
+        <div class="actions">
+          <div class="notice">Example: with a limit of 3, three unfinished Monday cycles block a fourth Monday cycle. On Tuesday, those older cycles remain open but three new Tuesday slots are available. If a Monday sell fills on Monday, that slot can be reused immediately.</div>
+          <button id="saveExecutionControlsButton" class="save-button" type="button">SAVE ORDER CONTROLS</button>
+        </div>
       </section>
 
       <section class="panel profit-panel">
@@ -452,7 +503,7 @@
   </div>
 
   <script>
-    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '', chartCandles: [], chartHoverIndex: null, chartGeometry: null, activeTab: 'trading', backtestLoadedAt: 0, strategySelectionDirty: false, profitTargetDirty: false, calculatorPriceDirty: false };
+    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '', chartCandles: [], chartHoverIndex: null, chartGeometry: null, activeTab: 'trading', backtestLoadedAt: 0, strategySelectionDirty: false, profitTargetDirty: false, executionControlsDirty: false, calculatorPriceDirty: false };
     const money = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', maximumFractionDigits: 0}).format(value);
     const money2 = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', minimumFractionDigits: 2, maximumFractionDigits: 2}).format(value);
     const request = async (url, options = {}, retry = true) => {
@@ -912,6 +963,48 @@
       updateProfitTargetCalculator();
     }
 
+    function setOrderSizeUsd(rawValue) {
+      const value = Math.round(Number(rawValue) * 100) / 100;
+      if (!Number.isFinite(value) || value < 1 || value > 1000000) return false;
+      const range = document.querySelector('#orderSizeRange');
+      const number = document.querySelector('#orderSizeNumber');
+      if (value > Number(range.max)) range.max = Math.ceil(value / 100) * 100;
+      range.value = value;
+      number.value = value.toFixed(2);
+      return true;
+    }
+
+    function setDailyRoundTripLimit(rawValue) {
+      const value = Number(rawValue);
+      if (!Number.isInteger(value) || value < 1 || value > 1000) return false;
+      const range = document.querySelector('#dailyRoundTripLimitRange');
+      const number = document.querySelector('#dailyRoundTripLimitNumber');
+      if (value > Number(range.max)) range.max = Math.ceil(value / 10) * 10;
+      range.value = value;
+      number.value = value;
+      return true;
+    }
+
+    function renderExecutionControls(control, operatorLimits) {
+      const limits = operatorLimits || {};
+      const roundTrips = limits.round_trips || {};
+      if (!state.executionControlsDirty) {
+        document.querySelector('#orderSizeEnabled').checked = control.order_size_override_enabled === true;
+        setOrderSizeUsd(control.order_size_usd == null ? 100 : Number(control.order_size_usd));
+        document.querySelector('#dailyRoundTripLimitEnabled').checked = control.daily_round_trip_limit_enabled === true;
+        setDailyRoundTripLimit(control.daily_round_trip_limit == null ? 3 : Number(control.daily_round_trip_limit));
+      }
+      document.querySelector('#dailyRoundTripActive').textContent = roundTrips.active_count == null
+        ? '—'
+        : `${roundTrips.active_count}${roundTrips.limit == null ? '' : ` / ${roundTrips.limit}`}`;
+      document.querySelector('#dailyRoundTripRemaining').textContent = roundTrips.remaining == null ? 'Unlimited' : roundTrips.remaining;
+      document.querySelector('#dailyRoundTripDay').textContent = `UTC day ${roundTrips.day || '—'} · pending buys ${roundTrips.active_buy_count ?? '—'} · open sells ${roundTrips.active_sell_count ?? '—'}`;
+      const enabled = document.querySelector('#orderSizeEnabled').checked || document.querySelector('#dailyRoundTripLimitEnabled').checked;
+      const status = document.querySelector('#executionControlStatus');
+      status.className = `badge ${state.executionControlsDirty ? 'watch' : enabled ? 'fresh' : ''}`;
+      status.textContent = state.executionControlsDirty ? 'Unsaved changes' : enabled ? 'Operator controls active' : 'Strategy controlled';
+    }
+
     const strategyEntryForValue = value => {
       const strategyControl = (state.payload || {}).strategy_control || {};
       const filename = value || String(strategyControl.configured_profile || '').split('/').pop();
@@ -994,10 +1087,13 @@
       document.querySelector('#netPnl').textContent = money2(stats.realized_estimated_net_pnl);
       renderPermissions(control, payload.market.current_price);
       renderProfitTarget(control, bot, payload.market.current_price);
+      renderExecutionControls(control, payload.operator_limits || {});
       document.querySelector('#statusDot').className = `dot ${payload.market.stale ? '' : 'ok'}`;
       const priceRulesActive = control.buy_price_floor_enabled || control.buy_price_ceiling_enabled;
       const profitRuleActive = control.profit_target_override_enabled === true;
-      document.querySelector('#statusText').textContent = control.buying_paused ? 'Buying held by operator' : priceRulesActive && profitRuleActive ? 'Online · operator price and profit rules active' : priceRulesActive ? 'Online · operator price rules active' : profitRuleActive ? 'Online · operator profit target active' : 'Control plane online';
+      const executionRulesActive = control.order_size_override_enabled === true || control.daily_round_trip_limit_enabled === true;
+      const activeRuleCount = [priceRulesActive, profitRuleActive, executionRulesActive].filter(Boolean).length;
+      document.querySelector('#statusText').textContent = control.buying_paused ? 'Buying held by operator' : activeRuleCount ? `Online · ${activeRuleCount} operator control group${activeRuleCount === 1 ? '' : 's'} active` : 'Control plane online';
       if (control.load_error) showError(new Error(`Control state fail-safe hold: ${control.load_error}`)); else clearError();
     }
 
@@ -1069,6 +1165,29 @@
       }
     });
 
+    document.querySelector('#saveExecutionControlsButton').addEventListener('click', async () => {
+      const button = document.querySelector('#saveExecutionControlsButton');
+      button.disabled = true;
+      try {
+        const orderSizeEnabled = document.querySelector('#orderSizeEnabled').checked;
+        const orderSizeUsd = Number(document.querySelector('#orderSizeNumber').value);
+        const dailyLimitEnabled = document.querySelector('#dailyRoundTripLimitEnabled').checked;
+        const dailyLimit = Number(document.querySelector('#dailyRoundTripLimitNumber').value);
+        if (!Number.isFinite(orderSizeUsd) || orderSizeUsd < 1 || orderSizeUsd > 1000000) {
+          throw new Error('Enter an order size from $1 through $1,000,000.');
+        }
+        if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 1000) {
+          throw new Error('Enter a whole-number daily cycle limit from 1 through 1,000.');
+        }
+        await request('/api/control', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({expected_revision:state.revision, order_size_override_enabled:orderSizeEnabled, order_size_usd:orderSizeUsd, daily_round_trip_limit_enabled:dailyLimitEnabled, daily_round_trip_limit:dailyLimit})});
+        state.executionControlsDirty = false;
+        await refresh();
+      } catch (error) { showError(error); } finally {
+        button.disabled = false;
+        if (state.payload) renderExecutionControls(state.payload.control, state.payload.operator_limits || {});
+      }
+    });
+
     document.querySelector('#strategySelect').addEventListener('change', () => {
       state.strategySelectionDirty = true;
       renderStrategyDetails();
@@ -1128,6 +1247,42 @@
     document.querySelector('#profitCalculatorBuyPrice').addEventListener('input', () => {
       state.calculatorPriceDirty = true;
       updateProfitTargetCalculator();
+    });
+    ['orderSizeEnabled', 'dailyRoundTripLimitEnabled'].forEach(id => {
+      document.querySelector(`#${id}`).addEventListener('change', () => {
+        state.executionControlsDirty = true;
+        if (state.payload) renderExecutionControls(state.payload.control, state.payload.operator_limits || {});
+      });
+    });
+    document.querySelector('#orderSizeRange').addEventListener('input', event => {
+      state.executionControlsDirty = true;
+      setOrderSizeUsd(event.target.value);
+      if (state.payload) renderExecutionControls(state.payload.control, state.payload.operator_limits || {});
+    });
+    document.querySelector('#orderSizeNumber').addEventListener('input', event => {
+      state.executionControlsDirty = true;
+      if (setOrderSizeUsd(event.target.value) && state.payload) renderExecutionControls(state.payload.control, state.payload.operator_limits || {});
+    });
+    document.querySelector('#orderSizeNumber').addEventListener('change', () => {
+      if (!setOrderSizeUsd(document.querySelector('#orderSizeNumber').value) && state.payload) {
+        state.executionControlsDirty = false;
+        renderExecutionControls(state.payload.control, state.payload.operator_limits || {});
+      }
+    });
+    document.querySelector('#dailyRoundTripLimitRange').addEventListener('input', event => {
+      state.executionControlsDirty = true;
+      setDailyRoundTripLimit(Number(event.target.value));
+      if (state.payload) renderExecutionControls(state.payload.control, state.payload.operator_limits || {});
+    });
+    document.querySelector('#dailyRoundTripLimitNumber').addEventListener('input', event => {
+      state.executionControlsDirty = true;
+      if (setDailyRoundTripLimit(Number(event.target.value)) && state.payload) renderExecutionControls(state.payload.control, state.payload.operator_limits || {});
+    });
+    document.querySelector('#dailyRoundTripLimitNumber').addEventListener('change', () => {
+      if (!setDailyRoundTripLimit(Number(document.querySelector('#dailyRoundTripLimitNumber').value)) && state.payload) {
+        state.executionControlsDirty = false;
+        renderExecutionControls(state.payload.control, state.payload.operator_limits || {});
+      }
     });
     priceChart.addEventListener('pointermove', event => showChartPoint(event.clientX));
     priceChart.addEventListener('pointerdown', event => showChartPoint(event.clientX));
