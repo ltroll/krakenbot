@@ -6,6 +6,7 @@ import copy
 import csv
 import glob
 import json
+import math
 import os
 import statistics
 import urllib.error
@@ -2874,6 +2875,178 @@ def simulate_missed_opportunity(snapshot, event, snapshots, snapshot_price_index
     }
 
 
+def nice_entry_price_bucket_size(entry_prices, target_pct=0.005):
+    """Return a human-readable price band close to target_pct of the median."""
+    prices = []
+    for raw_price in entry_prices or []:
+        price = safe_float(raw_price)
+        if price is not None and price > 0:
+            prices.append(price)
+    if not prices:
+        return None
+    raw_size = statistics.median(prices) * max(0.000001, target_pct)
+    magnitude = 10 ** math.floor(math.log10(raw_size))
+    normalized = raw_size / magnitude
+    for candidate in (1.0, 2.0, 5.0, 10.0):
+        if normalized <= candidate:
+            return round(candidate * magnitude, 8)
+    return round(10.0 * magnitude, 8)
+
+
+def summarize_entry_price_performance(
+    closed_positions,
+    open_positions,
+    last_price,
+    *,
+    target_bucket_pct=0.005,
+):
+    """Group simulated fills into price bands and rank their net outcomes.
+
+    Completed positions contribute realized net P&L. Open positions are marked
+    to the final captured price after the modeled round-trip fee, matching the
+    lifecycle simulation's overall return calculation.
+    """
+    positions = [
+        (position, "closed") for position in (closed_positions or [])
+    ] + [
+        (position, "open") for position in (open_positions or [])
+    ]
+    entry_prices = [
+        safe_float(position.get("entry_price"))
+        for position, _status in positions
+    ]
+    entry_prices = [price for price in entry_prices if price and price > 0]
+    bucket_size = nice_entry_price_bucket_size(
+        entry_prices,
+        target_pct=target_bucket_pct,
+    )
+    if bucket_size is None:
+        return {
+            "basis": "simulated_fills_including_open_mark_to_market",
+            "ranking_metric": "net_return_on_entry_notional_pct",
+            "target_bucket_pct": target_bucket_pct,
+            "bucket_size": None,
+            "last_price": last_price,
+            "filled_entries": 0,
+            "closed_positions": 0,
+            "open_positions": 0,
+            "best_band": None,
+            "bands": [],
+        }
+
+    buckets = defaultdict(lambda: {
+        "entry_prices": [],
+        "entry_notional_usd": 0.0,
+        "realized_net_pnl_usd": 0.0,
+        "unrealized_net_pnl_usd": 0.0,
+        "closed_positions": 0,
+        "open_positions": 0,
+        "closed_hold_minutes": [],
+        "sources": Counter(),
+    })
+    marked_last_price = safe_float(last_price)
+    for position, status in positions:
+        entry_price = safe_float(position.get("entry_price"))
+        if entry_price is None or entry_price <= 0:
+            continue
+        bucket_index = math.floor((entry_price / bucket_size) + 1e-12)
+        bucket = buckets[bucket_index]
+        entry_notional = max(
+            0.0,
+            safe_float(position.get("entry_notional_usd")) or 0.0,
+        )
+        bucket["entry_prices"].append(entry_price)
+        bucket["entry_notional_usd"] += entry_notional
+        source = str(position.get("buy_source") or "unknown")
+        bucket["sources"][source] += 1
+        if status == "closed":
+            bucket["closed_positions"] += 1
+            bucket["realized_net_pnl_usd"] += (
+                safe_float(position.get("net_pnl_usd")) or 0.0
+            )
+            filled_at = parse_iso8601(position.get("filled_at"))
+            sold_at = parse_iso8601(position.get("sold_at"))
+            if filled_at is not None and sold_at is not None:
+                bucket["closed_hold_minutes"].append(
+                    max(0.0, (sold_at - filled_at).total_seconds() / 60.0)
+                )
+        else:
+            bucket["open_positions"] += 1
+            if marked_last_price is not None and entry_notional > 0:
+                fee_pct = max(
+                    0.0,
+                    safe_float(position.get("round_trip_fee_pct")) or 0.0,
+                )
+                bucket["unrealized_net_pnl_usd"] += entry_notional * (
+                    (marked_last_price / entry_price) - 1.0 - fee_pct
+                )
+
+    bands = []
+    for bucket_index, bucket in buckets.items():
+        entry_notional = bucket["entry_notional_usd"]
+        realized = bucket["realized_net_pnl_usd"]
+        unrealized = bucket["unrealized_net_pnl_usd"]
+        total_pnl = realized + unrealized
+        prices = bucket["entry_prices"]
+        band_low = bucket_index * bucket_size
+        band_high = band_low + bucket_size
+        closed_count = bucket["closed_positions"]
+        open_count = bucket["open_positions"]
+        bands.append({
+            "price_band_low": round(band_low, 8),
+            "price_band_high": round(band_high, 8),
+            "average_entry_price": round(statistics.mean(prices), 8),
+            "minimum_entry_price": round(min(prices), 8),
+            "maximum_entry_price": round(max(prices), 8),
+            "filled_entries": closed_count + open_count,
+            "closed_positions": closed_count,
+            "open_positions": open_count,
+            "close_rate": round(
+                closed_count / (closed_count + open_count),
+                6,
+            ),
+            "entry_notional_usd": round(entry_notional, 8),
+            "realized_net_pnl_usd": round(realized, 8),
+            "unrealized_net_pnl_usd": round(unrealized, 8),
+            "total_net_pnl_usd": round(total_pnl, 8),
+            "net_return_on_entry_notional_pct": (
+                round(total_pnl / entry_notional * 100.0, 6)
+                if entry_notional > 0
+                else None
+            ),
+            "average_closed_hold_minutes": (
+                round(statistics.mean(bucket["closed_hold_minutes"]), 2)
+                if bucket["closed_hold_minutes"]
+                else None
+            ),
+            "sources": dict(bucket["sources"].most_common()),
+        })
+
+    bands.sort(key=lambda band: (
+        -(
+            band["net_return_on_entry_notional_pct"]
+            if band["net_return_on_entry_notional_pct"] is not None
+            else float("-inf")
+        ),
+        -band["filled_entries"],
+        band["price_band_low"],
+    ))
+    for rank, band in enumerate(bands, start=1):
+        band["rank"] = rank
+    return {
+        "basis": "simulated_fills_including_open_mark_to_market",
+        "ranking_metric": "net_return_on_entry_notional_pct",
+        "target_bucket_pct": target_bucket_pct,
+        "bucket_size": bucket_size,
+        "last_price": marked_last_price,
+        "filled_entries": sum(band["filled_entries"] for band in bands),
+        "closed_positions": sum(band["closed_positions"] for band in bands),
+        "open_positions": sum(band["open_positions"] for band in bands),
+        "best_band": dict(bands[0]) if bands else None,
+        "bands": bands,
+    }
+
+
 def simulate_approved_order_lifecycle(replay, snapshots):
     """Model approved grid entries as capital-constrained limit orders.
 
@@ -3418,6 +3591,11 @@ def simulate_approved_order_lifecycle(replay, snapshots):
             ] += position_unrealized_pnl
     total_net_pnl_usd = realized_net_pnl_usd + unrealized_net_pnl_usd
     ending_equity_usd = starting_cash_usd + total_net_pnl_usd
+    entry_price_performance = summarize_entry_price_performance(
+        closed_positions,
+        open_positions,
+        last_price,
+    )
     fill_rate = (
         counts["filled_entries"] / counts["orders_placed"]
         if counts["orders_placed"]
@@ -3539,6 +3717,7 @@ def simulate_approved_order_lifecycle(replay, snapshots):
         "ending_available_cash_usd": round(available_cash_usd, 8),
         "ending_committed_inventory_usd": round(committed_inventory_usd(), 8),
         "by_source": by_source,
+        "entry_price_performance": entry_price_performance,
         "assumptions": [
             "Approved candidates become GTC limit buys; no fill is assumed until a captured price touches the limit.",
             "Sell targets include the configured profit margin plus round_trip_fee_pct, matching live target construction.",
@@ -4173,6 +4352,7 @@ def build_strategy_comparison_rows(
     ]
     rows = []
     detailed = []
+    entry_price_performance = []
 
     for entry in entries:
         strategy_path, strategy_payload = load_strategy_profile_from_file(entry["path"])
@@ -4198,6 +4378,11 @@ def build_strategy_comparison_rows(
         replay = replay_from_snapshots(variant_snapshots)
         potential = summarize_potential_from_approved_events(replay, variant_snapshots)
         simulation = simulate_approved_order_lifecycle(replay, variant_snapshots)
+        entry_price_performance.append({
+            "strategy_label": entry["label"],
+            "strategy_file": strategy_path,
+            "performance": simulation.get("entry_price_performance") or {},
+        })
         simulation_sources = simulation.get("by_source") or {}
         summary = replay["summary"]
         risk_summary = summary.get("approved_sentiment_risk") or {}
@@ -4713,8 +4898,10 @@ def build_strategy_comparison_rows(
         "strategy_set_file": resolve_repo_path(strategy_set_file),
         "count": len(rows),
         "rows": rows,
+        "ranked_rows": build_ranked_strategy_rows({"rows": rows}),
         "details": detailed,
         "details_included": bool(include_details),
+        "entry_price_performance": entry_price_performance,
     }
 
 

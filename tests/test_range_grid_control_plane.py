@@ -313,6 +313,41 @@ class RangeGridControlPlaneTests(unittest.TestCase):
                         "simulation_net_return_pct": 0.8,
                     },
                 ],
+                "entry_price_performance": [{
+                    "strategy_label": "winner",
+                    "strategy_file": "/tmp/winner.json",
+                    "performance": {
+                        "basis": "simulated_fills_including_open_mark_to_market",
+                        "ranking_metric": "net_return_on_entry_notional_pct",
+                        "target_bucket_pct": 0.005,
+                        "bucket_size": 500.0,
+                        "last_price": 81_000.0,
+                        "filled_entries": 3,
+                        "closed_positions": 2,
+                        "open_positions": 1,
+                        "best_band": {
+                            "rank": 1,
+                            "price_band_low": 80_000.0,
+                            "price_band_high": 80_500.0,
+                            "filled_entries": 2,
+                            "net_return_on_entry_notional_pct": 2.0,
+                        },
+                        "bands": [{
+                            "rank": 1,
+                            "price_band_low": 80_000.0,
+                            "price_band_high": 80_500.0,
+                            "average_entry_price": 80_250.0,
+                            "filled_entries": 2,
+                            "closed_positions": 2,
+                            "open_positions": 0,
+                            "close_rate": 1.0,
+                            "entry_notional_usd": 200.0,
+                            "total_net_pnl_usd": 4.0,
+                            "net_return_on_entry_notional_pct": 2.0,
+                            "sources": {"range_low": 2},
+                        }],
+                    },
+                }],
             },
         }
         session = FakeSignalSession(report)
@@ -333,6 +368,16 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertEqual(snapshot["missed"]["placement_rate_vs_approved"], 0.625)
         self.assertEqual(snapshot["strategies"][0]["strategy_label"], "winner")
         self.assertEqual(snapshot["strategies"][1]["strategy_label"], "runner_up")
+        self.assertEqual(
+            snapshot["entry_price_performance"]["strategy_label"],
+            "winner",
+        )
+        self.assertEqual(
+            snapshot["entry_price_performance"]["best_band"][
+                "price_band_low"
+            ],
+            80_000.0,
+        )
         self.assertEqual(snapshot["watchlist"]["items"][0]["code"], "placement_gap")
         self.assertEqual(cached_snapshot["strategy_count"], 2)
         self.assertEqual(session.calls, 1)
@@ -485,6 +530,10 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertIn("function renderStructureCard", html)
         self.assertNotIn("['Support / resistance'", html)
         self.assertIn("function renderBacktest", html)
+        self.assertIn('id="backtestEntryPriceTable"', html)
+        self.assertIn("Best simulated entry ranges", html)
+        self.assertIn("entry_price_performance", html)
+        self.assertIn("marked to", html)
         self.assertIn("request('/api/backtest')", html)
         self.assertIn("request('/api/strategy',", html)
         self.assertIn("Ranked strategies", html)

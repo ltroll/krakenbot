@@ -1172,6 +1172,67 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertEqual(result["closed_positions"], 1)
         self.assertEqual(result["realized_net_pnl_usd"], 2.0)
         self.assertEqual(result["net_return_on_starting_capital_pct"], 2.0)
+        self.assertEqual(
+            result["entry_price_performance"]["filled_entries"],
+            1,
+        )
+        self.assertEqual(
+            result["entry_price_performance"]["best_band"][
+                "net_return_on_entry_notional_pct"
+            ],
+            2.0,
+        )
+
+    def test_entry_price_performance_ranks_bands_with_open_mark_to_market(self):
+        closed_positions = [
+            {
+                "entry_price": 80_100.0,
+                "entry_notional_usd": 100.0,
+                "net_pnl_usd": 2.0,
+                "buy_source": "range_low",
+                "filled_at": "2026-06-13T12:00:00+00:00",
+                "sold_at": "2026-06-13T13:00:00+00:00",
+            },
+            {
+                "entry_price": 80_400.0,
+                "entry_notional_usd": 100.0,
+                "net_pnl_usd": 2.0,
+                "buy_source": "range_median",
+                "filled_at": "2026-06-13T12:00:00+00:00",
+                "sold_at": "2026-06-13T14:00:00+00:00",
+            },
+        ]
+        open_positions = [{
+            "entry_price": 82_000.0,
+            "entry_notional_usd": 100.0,
+            "round_trip_fee_pct": 0.012,
+            "buy_source": "range_median",
+        }]
+
+        result = backtest.summarize_entry_price_performance(
+            closed_positions,
+            open_positions,
+            81_000.0,
+        )
+
+        self.assertEqual(result["bucket_size"], 500.0)
+        self.assertEqual(result["filled_entries"], 3)
+        self.assertEqual(result["closed_positions"], 2)
+        self.assertEqual(result["open_positions"], 1)
+        self.assertEqual(result["best_band"]["price_band_low"], 80_000.0)
+        self.assertEqual(result["best_band"]["filled_entries"], 2)
+        self.assertEqual(
+            result["best_band"]["net_return_on_entry_notional_pct"],
+            2.0,
+        )
+        self.assertEqual(
+            result["best_band"]["average_closed_hold_minutes"],
+            90.0,
+        )
+        self.assertLess(
+            result["bands"][1]["net_return_on_entry_notional_pct"],
+            0,
+        )
 
     def test_order_lifecycle_locks_greed_target_when_pending_buy_fills(self):
         strategy = {
@@ -4588,6 +4649,8 @@ class RangeGridBacktestTests(unittest.TestCase):
             )
 
             self.assertEqual(comparison["count"], 2)
+            self.assertEqual(len(comparison["ranked_rows"]), 2)
+            self.assertIn("practical_score", comparison["ranked_rows"][0])
             labels = [row["strategy_label"] for row in comparison["rows"]]
             self.assertIn("base", labels)
             self.assertIn("tighter", labels)
@@ -4600,6 +4663,14 @@ class RangeGridBacktestTests(unittest.TestCase):
                 self.assertIn("simulation_median_entry_fill_minutes", row)
                 self.assertIn("simulation_max_entry_fill_minutes", row)
                 self.assertIn("simulation_net_return_pct", row)
+            self.assertEqual(len(comparison["entry_price_performance"]), 2)
+            self.assertEqual(
+                {
+                    item["strategy_label"]
+                    for item in comparison["entry_price_performance"]
+                },
+                {"base", "tighter"},
+            )
 
     def test_write_strategy_comparison_csv_outputs_digestible_table(self):
         comparison = {

@@ -489,6 +489,15 @@
 
       <section class="panel backtest-full">
         <div class="control-head">
+          <h2 class="panel-title">Best simulated entry ranges</h2>
+          <span id="backtestEntryPriceMeta" class="subline">—</span>
+        </div>
+        <p id="backtestEntryPriceNote" class="weather-copy">Waiting for simulated entry results.</p>
+        <div id="backtestEntryPriceTable" class="backtest-table-wrap" style="margin-top:14px"><div class="empty-weather" style="padding:20px">Waiting for entry-price results.</div></div>
+      </section>
+
+      <section class="panel backtest-full">
+        <div class="control-head">
           <h2 class="panel-title">Ranked strategies</h2>
           <span id="backtestStrategyCount" class="subline">—</span>
         </div>
@@ -712,6 +721,8 @@
     const percentValue = value => value == null || !Number.isFinite(Number(value)) ? '—' : `${Number(value).toFixed(3)}%`;
     const rateValue = value => value == null || !Number.isFinite(Number(value)) ? '—' : `${(Math.abs(Number(value)) <= 1 ? Number(value) * 100 : Number(value)).toFixed(1)}%`;
     const integerValue = value => value == null || !Number.isFinite(Number(value)) ? '—' : String(Math.round(Number(value)));
+    const priceValue = value => value == null || !Number.isFinite(Number(value)) ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', minimumFractionDigits: Number(value) < 1000 ? 2 : 0, maximumFractionDigits: Number(value) < 1000 ? 2 : 0}).format(value);
+    const durationValue = value => value == null || !Number.isFinite(Number(value)) ? '—' : Number(value) >= 1440 ? `${(Number(value) / 1440).toFixed(1)}d` : Number(value) >= 120 ? `${(Number(value) / 60).toFixed(1)}h` : `${Number(value).toFixed(0)}m`;
     const backtestNumberClass = value => Number(value) > 0 ? 'number-positive' : Number(value) < 0 ? 'number-negative' : '';
 
     function renderBacktest(backtest) {
@@ -772,6 +783,42 @@
         ['Rejected orders', integerValue(actual.order_rejected)],
         ['Estimated net P&L', money2(actual.realized_estimated_net_pnl)],
       ]);
+
+      const entryPerformance = backtest.entry_price_performance || {};
+      const entryBands = Array.isArray(entryPerformance.bands) ? entryPerformance.bands : [];
+      const entryMeta = document.querySelector('#backtestEntryPriceMeta');
+      entryMeta.textContent = entryBands.length
+        ? `${entryPerformance.strategy_label || top.strategy_label || 'Top strategy'} · ${priceValue(entryPerformance.bucket_size)} bands · ${integerValue(entryPerformance.filled_entries)} fills`
+        : 'No simulated fills';
+      document.querySelector('#backtestEntryPriceNote').textContent = entryBands.length
+        ? `Ranked by total net return on filled entry notional. Closed trades use realized profit; ${integerValue(entryPerformance.open_positions)} open position${Number(entryPerformance.open_positions) === 1 ? '' : 's'} ${Number(entryPerformance.open_positions) ? `are marked to ${priceValue(entryPerformance.last_price)}` : 'remain'}. The first row is the best band, but fills show the sample size. Band upper bounds are exclusive.`
+        : 'The top-ranked strategy did not produce simulated fills in this report, or this report predates entry-price tracking.';
+      const entryTable = document.querySelector('#backtestEntryPriceTable');
+      if (!entryBands.length) {
+        entryTable.innerHTML = '<div class="empty-weather" style="padding:20px">No entry-price performance rows in the latest report.</div>';
+      } else {
+        const headers = ['Rank', 'Entry range', 'Avg fill', 'Fills', 'Exited', 'Open', 'Close rate', 'Net return', 'Net P&L', 'Avg exit', 'Sources'];
+        const rows = entryBands.map(band => {
+          const sources = band.sources && typeof band.sources === 'object'
+            ? Object.entries(band.sources).map(([source, count]) => `${humanize(source)} ${count}`).join(' · ')
+            : '—';
+          const cells = [
+            escapeHtml(integerValue(band.rank)),
+            escapeHtml(`${priceValue(band.price_band_low)} – ${priceValue(band.price_band_high)}`),
+            escapeHtml(priceValue(band.average_entry_price)),
+            escapeHtml(integerValue(band.filled_entries)),
+            escapeHtml(integerValue(band.closed_positions)),
+            escapeHtml(integerValue(band.open_positions)),
+            escapeHtml(rateValue(band.close_rate)),
+            `<span class="${backtestNumberClass(band.net_return_on_entry_notional_pct)}">${escapeHtml(percentValue(band.net_return_on_entry_notional_pct))}</span>`,
+            `<span class="${backtestNumberClass(band.total_net_pnl_usd)}">${escapeHtml(money2(band.total_net_pnl_usd))}</span>`,
+            escapeHtml(durationValue(band.average_closed_hold_minutes)),
+            escapeHtml(sources),
+          ];
+          return `<tr>${cells.map(cell => `<td>${cell}</td>`).join('')}</tr>`;
+        }).join('');
+        entryTable.innerHTML = `<table class="backtest-table"><thead><tr>${headers.map(header => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>`;
+      }
 
       document.querySelector('#backtestStrategyCount').textContent = `${strategies.length} ranked row${strategies.length === 1 ? '' : 's'}`;
       const table = document.querySelector('#backtestTable');

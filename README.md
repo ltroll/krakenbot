@@ -691,6 +691,14 @@ backtest outputs, such as `/var/www/html/bot`, the **Range Ranked** and
 **LLM Ranked** buttons load `range_grid_backtest_strategy_ranked.csv` and
 `llm_target_strategy_ranked.csv` from that folder.
 
+The HTTP control plane's **Backtest** tab also shows **Best simulated entry
+ranges** for the top-ranked strategy. Filled entries are grouped into adaptive,
+human-readable price bands (approximately 0.5% of the median entry price) and
+ranked by total net return on entry notional. Completed trades use realized net
+profit; positions still open at the end of the window are marked to the final
+captured price after estimated round-trip fees. Fill counts remain visible so a
+single successful entry is not mistaken for a well-tested price range.
+
 Range-grid strategy comparisons also write `range_grid_anchor_winners.json`.
 That file selects the top eligible low, median, and high anchor strategy from
 the ranked backtest. Eligibility is controlled with:

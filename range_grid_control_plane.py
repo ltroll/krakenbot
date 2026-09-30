@@ -486,6 +486,37 @@ BACKTEST_STRATEGY_FIELDS = (
     "simulation_max_equity_drawdown_pct",
 )
 
+BACKTEST_ENTRY_PRICE_PERFORMANCE_FIELDS = (
+    "basis",
+    "ranking_metric",
+    "target_bucket_pct",
+    "bucket_size",
+    "last_price",
+    "filled_entries",
+    "closed_positions",
+    "open_positions",
+)
+
+BACKTEST_ENTRY_PRICE_BAND_FIELDS = (
+    "rank",
+    "price_band_low",
+    "price_band_high",
+    "average_entry_price",
+    "minimum_entry_price",
+    "maximum_entry_price",
+    "filled_entries",
+    "closed_positions",
+    "open_positions",
+    "close_rate",
+    "entry_notional_usd",
+    "realized_net_pnl_usd",
+    "unrealized_net_pnl_usd",
+    "total_net_pnl_usd",
+    "net_return_on_entry_notional_pct",
+    "average_closed_hold_minutes",
+    "sources",
+)
+
 
 def _selected_fields(payload, fields):
     if not isinstance(payload, dict):
@@ -510,6 +541,7 @@ def unavailable_backtest_snapshot(source, error=None):
         "replay": {},
         "actual": {},
         "missed": {},
+        "entry_price_performance": {},
         "watchlist": {"status": "unavailable", "items": []},
         "strategies": [],
     }
@@ -518,7 +550,7 @@ def unavailable_backtest_snapshot(source, error=None):
 def build_backtest_snapshot(report, *, source, captured_at, fetch_error=None):
     comparison = report.get("strategy_comparison")
     comparison = comparison if isinstance(comparison, dict) else {}
-    raw_rows = comparison.get("rows")
+    raw_rows = comparison.get("ranked_rows") or comparison.get("rows")
     raw_rows = raw_rows if isinstance(raw_rows, list) else []
     strategies = [
         _selected_fields(row, BACKTEST_STRATEGY_FIELDS)
@@ -556,6 +588,60 @@ def build_backtest_snapshot(report, *, source, captured_at, fetch_error=None):
     watchlist = watchlist if isinstance(watchlist, dict) else {}
     watch_items = watchlist.get("items")
     watch_items = watch_items if isinstance(watch_items, list) else []
+    performance_rows = comparison.get("entry_price_performance")
+    performance_rows = (
+        performance_rows if isinstance(performance_rows, list) else []
+    )
+    top_strategy = strategies[0] if strategies else {}
+    top_label = top_strategy.get("strategy_label")
+    top_file = top_strategy.get("strategy_file")
+    matching_performance = next(
+        (
+            item for item in performance_rows
+            if isinstance(item, dict)
+            and item.get("strategy_label") == top_label
+            and (
+                not top_file
+                or not item.get("strategy_file")
+                or os.path.basename(str(item.get("strategy_file")))
+                == os.path.basename(str(top_file))
+            )
+        ),
+        None,
+    )
+    if matching_performance is None:
+        matching_performance = next(
+            (
+                item for item in performance_rows
+                if isinstance(item, dict)
+                and item.get("strategy_label") == top_label
+            ),
+            {},
+        )
+    raw_performance = matching_performance.get("performance")
+    raw_performance = (
+        raw_performance if isinstance(raw_performance, dict) else {}
+    )
+    raw_bands = raw_performance.get("bands")
+    raw_bands = raw_bands if isinstance(raw_bands, list) else []
+    raw_best_band = raw_performance.get("best_band")
+    entry_price_performance = {
+        "strategy_label": matching_performance.get("strategy_label"),
+        "strategy_file": matching_performance.get("strategy_file"),
+        **_selected_fields(
+            raw_performance,
+            BACKTEST_ENTRY_PRICE_PERFORMANCE_FIELDS,
+        ),
+        "best_band": _selected_fields(
+            raw_best_band,
+            BACKTEST_ENTRY_PRICE_BAND_FIELDS,
+        ),
+        "bands": [
+            _selected_fields(band, BACKTEST_ENTRY_PRICE_BAND_FIELDS)
+            for band in raw_bands[:50]
+            if isinstance(band, dict)
+        ],
+    }
 
     return {
         "available": True,
@@ -606,6 +692,7 @@ def build_backtest_snapshot(report, *, source, captured_at, fetch_error=None):
             "missed_by_source",
             "missed_reason_counts",
         )),
+        "entry_price_performance": entry_price_performance,
         "watchlist": {
             "status": watchlist.get("status") or "unknown",
             "items": [
