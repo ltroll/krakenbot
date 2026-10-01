@@ -567,11 +567,18 @@ RANGE_GRID_ACTIVITY_LOG_FILE=http://pibot.local/bot/range_grid_activity.jsonl
 RANGE_GRID_ACTIVITY_LOG_ROTATE_DAILY=false
 ```
 
-## ETH/SOL Range-Grid Data Collection
+## Isolated BTC, ETH, and SOL Range-Grid Instances
 
-The range-grid snapshot collector can be pointed at a non-BTC asset before the
-live trading bot is generalized. This is intended for isolated backtest
-directories, with separate state/log/output files per asset.
+The range-grid bot, snapshot collector, backtest, dashboard, and HTTP control
+plane can run as separate asset instances from the same checkout. Each
+instance uses its own env file, strategy identity, state, logs, web output,
+control file, port, and order-owner tag. Never share a state or control file
+between assets.
+
+`RANGE_GRID_INSTANCE_ID` enables automatic namespacing. For example, `sol`
+defaults to `instances/sol/` for runtime files and `/var/www/html/bot/sol/`
+for web artifacts. Existing BTC installations with no instance ID retain their
+legacy paths.
 
 Example ETH collection:
 
@@ -587,6 +594,7 @@ RANGE_GRID_ENV_FILE=env.range-grid-sol-backtest python capture_range_grid_snapsh
 
 The asset-specific env files set:
 
+- `RANGE_GRID_INSTANCE_ID`
 - `SIGNAL_ASSET_ID`
 - `KRAKEN_PAIR`
 - `RANGE_GRID_ASSET_BALANCE_KEYS`
@@ -614,6 +622,39 @@ file:
 RANGE_GRID_ENV_FILE=env.range-grid-eth-backtest python range_grid_backtest.py
 RANGE_GRID_ENV_FILE=env.range-grid-sol-backtest python range_grid_backtest.py
 ```
+
+To create a second SOL bot, copy `env.range-grid-sol.example` to the ignored
+local file `env.range-grid-sol`, add a dedicated Kraken API key, a unique
+control token, and the desired capital allocation. The supplied SOL strategy
+is paper-only. Validate the complete instance before starting anything:
+
+```bash
+venv/bin/python range_grid_instance_check.py --env-file env.range-grid-sol
+```
+
+For live promotion, create and backtest a SOL-specific strategy declaring
+`"asset_id": "SOL"` and `"kraken_pair": "SOLUSD"`, change that strategy's
+`paper_trading_enabled` to `false`, then explicitly set both:
+
+```env
+RANGE_GRID_LIVE_ENABLED=true
+RANGE_GRID_LIVE_CONFIRMATION=SOLUSD
+```
+
+The bot refuses to start live if the instance, asset, pair, strategy, tracker
+symbol, or confirmation disagree. The control-plane strategy menu also hides
+profiles for other assets and disables live profiles until the gate is ready.
+Backtests may still compare legacy profiles as parameter experiments, but an
+anchor-router winner is ignored by a non-BTC bot until its strategy payload
+declares the matching asset and pair.
+
+Use a separate Kraken API key for every trading process. Kraken private API
+nonces are tied to a key, so two processes sharing one key can interfere with
+each other even when they trade different pairs. Because USD is still one
+account balance, every instance must also have an explicit
+`RANGE_GRID_CAPITAL_ALLOCATION_USD`; `RANGE_GRID_QUOTE_CASH_RESERVE_USD`
+protects shared unallocated cash. These are hard runtime limits, not merely
+dashboard labels.
 
 ## Viewing logs
 

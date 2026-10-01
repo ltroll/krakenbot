@@ -389,6 +389,23 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertTrue(snapshot["stale"])
         self.assertIn("not configured", snapshot["error"])
 
+    def test_backtest_snapshot_rejects_report_for_another_asset(self):
+        report = {
+            "asset_id": "BTC",
+            "timestamp": "2026-09-19T18:00:00+00:00",
+            "since": "2026-09-18T18:00:00+00:00",
+        }
+
+        with patch.object(control_plane, "SIGNAL_ASSET_ID", "SOL"):
+            snapshot = control_plane.build_backtest_snapshot(
+                report,
+                source="test.json",
+                captured_at="2026-09-19T18:01:00+00:00",
+            )
+
+        self.assertFalse(snapshot["available"])
+        self.assertIn("does not match", snapshot["error"])
+
     def test_strategy_control_lists_profiles_and_reports_pending_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             filename = "range_grid_strategy_selected.json"
@@ -523,6 +540,9 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertIn('data-tab="backtest"', html)
         self.assertIn('id="weatherView"', html)
         self.assertIn('id="backtestView"', html)
+        self.assertIn('id="assetPairLabel"', html)
+        self.assertIn('id="chartAssetLabel"', html)
+        self.assertNotIn("Engine BTC price", html)
         self.assertIn('id="weatherCondition"', html)
         self.assertIn('id="supportLevels"', html)
         self.assertIn('id="resistanceLevels"', html)

@@ -1,0 +1,15 @@
+[Unit]
+Description=Capture Range Grid Snapshot (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ben
+Group=ben
+WorkingDirectory=/home/ben/krakenbot
+Environment=RANGE_GRID_INSTANCE_ID=%i
+Environment=RANGE_GRID_ENV_FILE=/home/ben/krakenbot/env.range-grid-%i
+EnvironmentFile=/home/ben/krakenbot/env.range-grid-%i
+ExecStart=/home/ben/krakenbot/venv/bin/python /home/ben/krakenbot/capture_range_grid_snapshot.py
+

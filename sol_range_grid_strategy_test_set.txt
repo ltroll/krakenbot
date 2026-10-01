@@ -1,3 +1,4 @@
+range_grid_strategy_sol_paper_baseline.json
 range_grid_strategy_production_high_reversion_hybrid.json
 range_grid_strategy_production_high_reversion.json
 range_grid_strategy_recovery_low_median_accumulator.json

@@ -33,6 +33,49 @@ class RangeGridStrategyCatalogTests(unittest.TestCase):
         self.assertFalse(entries[0]["paper_trading_enabled"])
         self.assertEqual(entries[0]["operating_mode"], "range_only")
 
+    def test_catalog_and_selection_filter_non_btc_profiles_by_asset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            btc_path = os.path.join(
+                directory,
+                "range_grid_strategy_btc_legacy.json",
+            )
+            sol_path = os.path.join(
+                directory,
+                "range_grid_strategy_sol_paper.json",
+            )
+            with open(btc_path, "w", encoding="utf-8") as handle:
+                json.dump({"grid_anchor": "low"}, handle)
+            with open(sol_path, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "asset_id": "SOL",
+                    "kraken_pair": "SOLUSD",
+                    "grid_anchor": "low",
+                    "paper_trading_enabled": True,
+                }, handle)
+
+            entries = strategy_catalog(directory, asset_id="SOL")
+
+            self.assertEqual(
+                [entry["filename"] for entry in entries],
+                ["range_grid_strategy_sol_paper.json"],
+            )
+            self.assertEqual(
+                validate_strategy_profile_selection(
+                    "range_grid_strategy_sol_paper.json",
+                    directory,
+                    asset_id="SOL",
+                    kraken_pair="SOLUSD",
+                ),
+                "range_grid_strategy_sol_paper.json",
+            )
+            with self.assertRaisesRegex(ValueError, "not declared for SOL"):
+                validate_strategy_profile_selection(
+                    "range_grid_strategy_btc_legacy.json",
+                    directory,
+                    asset_id="SOL",
+                    kraken_pair="SOLUSD",
+                )
+
     def test_selection_rejects_paths_missing_files_and_invalid_profiles(self):
         with tempfile.TemporaryDirectory() as directory:
             invalid = os.path.join(

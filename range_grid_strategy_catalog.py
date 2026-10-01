@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 
 from range_grid_guardrails import validate_strategy_config
+from range_grid_assets import normalize_kraken_pair
 
 
 STRATEGY_FILENAME_PATTERN = re.compile(
@@ -70,6 +71,8 @@ def strategy_catalog_entry(path):
             payload.get("paper_trading_enabled"),
             False,
         ),
+        "asset_id": str(payload.get("asset_id") or "").strip().upper() or None,
+        "kraken_pair": str(payload.get("kraken_pair") or "").strip() or None,
         "operating_mode": str(
             payload.get("operating_mode", "range_plus_llm")
         ),
@@ -81,18 +84,32 @@ def strategy_catalog_entry(path):
     }
 
 
-def strategy_catalog(path=None):
+def strategy_catalog(path=None, asset_id=None):
     directory = strategy_directory(path)
     if not directory.is_dir():
         return []
-    return [
+    entries = [
         strategy_catalog_entry(profile_path)
         for profile_path in sorted(directory.glob("range_grid_strategy_*.json"))
         if STRATEGY_FILENAME_PATTERN.fullmatch(profile_path.name)
     ]
+    normalized_asset = str(asset_id or "").strip().upper()
+    if not normalized_asset:
+        return entries
+    return [
+        entry for entry in entries
+        if entry.get("asset_id") == normalized_asset
+        or (normalized_asset == "BTC" and not entry.get("asset_id"))
+    ]
 
 
-def validate_strategy_profile_selection(filename, path=None):
+def validate_strategy_profile_selection(
+    filename,
+    path=None,
+    *,
+    asset_id=None,
+    kraken_pair=None,
+):
     normalized = normalize_strategy_filename(filename)
     if normalized is None:
         return None
@@ -107,5 +124,29 @@ def validate_strategy_profile_selection(filename, path=None):
         raise ValueError(
             f"strategy profile is invalid: {normalized}: "
             + "; ".join(entry["errors"])
+        )
+    normalized_asset = str(asset_id or "").strip().upper()
+    declared_asset = entry.get("asset_id")
+    if normalized_asset:
+        if normalized_asset != "BTC" and not declared_asset:
+            raise ValueError(
+                f"strategy profile is not declared for {normalized_asset}: "
+                f"{normalized}"
+            )
+        if declared_asset and declared_asset != normalized_asset:
+            raise ValueError(
+                f"strategy profile asset {declared_asset} does not match "
+                f"{normalized_asset}: {normalized}"
+            )
+    declared_pair = entry.get("kraken_pair")
+    if (
+        kraken_pair
+        and declared_pair
+        and normalize_kraken_pair(declared_pair)
+        != normalize_kraken_pair(kraken_pair)
+    ):
+        raise ValueError(
+            f"strategy profile pair {declared_pair} does not match "
+            f"{kraken_pair}: {normalized}"
         )
     return normalized

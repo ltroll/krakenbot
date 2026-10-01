@@ -104,6 +104,7 @@ def validate_strategy_config(strategy_config):
         "round_trip_fee_pct",
         "position_size_pct",
         "min_buy_notional_usd",
+        "min_buy_volume_asset",
         "min_buy_volume_btc",
         "minimum_order_floor_usd",
         "price_check_interval_seconds",

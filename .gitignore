@@ -5,6 +5,8 @@
 !.env_example
 env.local
 env.*.local
+env.range-grid-sol
+env.range-grid-eth
 secrets/
 credentials/
 *.pem

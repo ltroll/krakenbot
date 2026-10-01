@@ -33,6 +33,13 @@ from range_grid_order_sizing import (
     minimum_order_floor_decision,
     minimum_order_floor_required_block_reason,
 )
+from range_grid_instance import (
+    effective_inventory_cap,
+    instance_runtime_path,
+    instance_web_path,
+    normalize_instance_id,
+    parse_optional_positive_float,
+)
 from range_grid_profit_target import fear_greed_profit_target_adjustment
 from signal_normalizer import normalize_signal_payload
 
@@ -43,9 +50,39 @@ ENV_FILE = (
 )
 load_dotenv(dotenv_path=ENV_FILE, override=False)
 
-SNAPSHOT_LOG_FILE = os.getenv(
-    "RANGE_GRID_BACKTEST_SNAPSHOT_FILE",
-    "range_grid_backtest_snapshot_log.jsonl"
+INSTANCE_ID = normalize_instance_id(os.getenv("RANGE_GRID_INSTANCE_ID"))
+INSTANCE_RUNTIME_ROOT = os.getenv("RANGE_GRID_INSTANCE_RUNTIME_ROOT", "instances")
+INSTANCE_WEB_ROOT = os.getenv("RANGE_GRID_INSTANCE_WEB_ROOT", "/var/www/html/bot")
+KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
+SIGNAL_ASSET_ID = str(os.getenv("SIGNAL_ASSET_ID") or "BTC").strip().upper()
+BACKTEST_CAPITAL_ALLOCATION_USD = parse_optional_positive_float(
+    os.getenv("RANGE_GRID_CAPITAL_ALLOCATION_USD"),
+    "RANGE_GRID_CAPITAL_ALLOCATION_USD",
+)
+
+
+def instance_runtime_default(filename):
+    return instance_runtime_path(
+        INSTANCE_ID,
+        filename,
+        runtime_root=INSTANCE_RUNTIME_ROOT,
+    )
+
+
+def instance_web_default(filename, legacy_path):
+    return instance_web_path(
+        INSTANCE_ID,
+        filename,
+        legacy_path=legacy_path,
+        web_root=INSTANCE_WEB_ROOT,
+    )
+
+SNAPSHOT_LOG_FILE = (
+    os.getenv("RANGE_GRID_BACKTEST_SNAPSHOT_FILE")
+    or instance_web_default(
+        "range_grid_backtest_snapshot_log.jsonl",
+        "range_grid_backtest_snapshot_log.jsonl",
+    )
 )
 SNAPSHOT_ROTATE_DAILY = os.getenv(
     "RANGE_GRID_BACKTEST_ROTATE_DAILY",
@@ -54,11 +91,18 @@ SNAPSHOT_ROTATE_DAILY = os.getenv(
 TRADE_LOG_FILE = (
     os.getenv("RANGE_GRID_TRADE_LOG_FILE")
     or os.getenv("TRADE_LOG_FILE")
-    or "trade_log.jsonl"
+    or instance_runtime_default("trade_log.jsonl")
 )
 ACTIVITY_LOG_FILE = (
     os.getenv("RANGE_GRID_ACTIVITY_LOG_FILE")
-    or ""
+    or (
+        instance_web_default(
+            "range_grid_activity.jsonl",
+            "",
+        )
+        if INSTANCE_ID
+        else ""
+    )
 ).strip()
 ACTIVITY_LOG_ROTATE_DAILY = os.getenv(
     "RANGE_GRID_ACTIVITY_LOG_ROTATE_DAILY",
@@ -68,13 +112,19 @@ BACKTEST_HTTP_TIMEOUT_SECONDS = float(os.getenv(
     "RANGE_GRID_BACKTEST_HTTP_TIMEOUT_SECONDS",
     "10"
 ))
-BACKTEST_OUTPUT_FILE = os.getenv(
-    "RANGE_GRID_BACKTEST_OUTPUT_FILE",
-    "/var/www/html/bot/range_grid_backtest.json"
+BACKTEST_OUTPUT_FILE = (
+    os.getenv("RANGE_GRID_BACKTEST_OUTPUT_FILE")
+    or instance_web_default(
+        "range_grid_backtest.json",
+        "/var/www/html/bot/range_grid_backtest.json",
+    )
 )
-BACKTEST_ARCHIVE_DIR = os.getenv(
-    "RANGE_GRID_BACKTEST_ARCHIVE_DIR",
-    "/var/www/html/bot/range_grid_backtest"
+BACKTEST_ARCHIVE_DIR = (
+    os.getenv("RANGE_GRID_BACKTEST_ARCHIVE_DIR")
+    or instance_web_default(
+        "range_grid_backtest",
+        "/var/www/html/bot/range_grid_backtest",
+    )
 )
 BACKTEST_WINDOW_HOURS = float(os.getenv("RANGE_GRID_BACKTEST_WINDOW_HOURS", "24"))
 BACKTEST_RECENT_LIMIT = int(os.getenv("RANGE_GRID_BACKTEST_RECENT_LIMIT", "25"))
@@ -85,21 +135,30 @@ BACKTEST_INCLUDE_STRATEGY_DETAILS = os.getenv(
     "RANGE_GRID_BACKTEST_INCLUDE_STRATEGY_DETAILS",
     "true"
 ).strip().lower() in ("1", "true", "yes", "on")
-BACKTEST_STRATEGY_SET_FILE = os.getenv(
-    "RANGE_GRID_BACKTEST_STRATEGY_SET_FILE",
-    ""
+BACKTEST_STRATEGY_SET_FILE = (
+    os.getenv("RANGE_GRID_BACKTEST_STRATEGY_SET_FILE")
+    or (f"{INSTANCE_ID}_range_grid_strategy_test_set.txt" if INSTANCE_ID else "")
 ).strip()
-BACKTEST_STRATEGY_COMPARE_CSV_FILE = os.getenv(
-    "RANGE_GRID_BACKTEST_STRATEGY_COMPARE_CSV_FILE",
-    "/var/www/html/bot/range_grid_backtest_strategy_compare.csv"
+BACKTEST_STRATEGY_COMPARE_CSV_FILE = (
+    os.getenv("RANGE_GRID_BACKTEST_STRATEGY_COMPARE_CSV_FILE")
+    or instance_web_default(
+        "range_grid_backtest_strategy_compare.csv",
+        "/var/www/html/bot/range_grid_backtest_strategy_compare.csv",
+    )
 )
-BACKTEST_STRATEGY_RANKED_CSV_FILE = os.getenv(
-    "RANGE_GRID_BACKTEST_STRATEGY_RANKED_CSV_FILE",
-    "/var/www/html/bot/range_grid_backtest_strategy_ranked.csv"
+BACKTEST_STRATEGY_RANKED_CSV_FILE = (
+    os.getenv("RANGE_GRID_BACKTEST_STRATEGY_RANKED_CSV_FILE")
+    or instance_web_default(
+        "range_grid_backtest_strategy_ranked.csv",
+        "/var/www/html/bot/range_grid_backtest_strategy_ranked.csv",
+    )
 )
-BACKTEST_ANCHOR_WINNERS_FILE = os.getenv(
-    "RANGE_GRID_BACKTEST_ANCHOR_WINNERS_FILE",
-    "/var/www/html/bot/range_grid_anchor_winners.json"
+BACKTEST_ANCHOR_WINNERS_FILE = (
+    os.getenv("RANGE_GRID_BACKTEST_ANCHOR_WINNERS_FILE")
+    or instance_web_default(
+        "range_grid_anchor_winners.json",
+        "/var/www/html/bot/range_grid_anchor_winners.json",
+    )
 )
 BACKTEST_ANCHOR_WINNER_MIN_APPROVED = int(os.getenv(
     "RANGE_GRID_BACKTEST_ANCHOR_WINNER_MIN_APPROVED",
@@ -444,7 +503,21 @@ def signal_payload(snapshot):
         payload = signal.get("raw_payload")
     if not isinstance(payload, dict):
         return {}
-    return normalize_signal_payload(payload)
+    return normalize_signal_payload(
+        payload,
+        asset_id=snapshot.get("asset_id") or SIGNAL_ASSET_ID,
+        pair=snapshot.get("pair") or KRAKEN_PAIR,
+    )
+
+
+def signal_price(signal):
+    if not isinstance(signal, dict):
+        return None
+    for field in ("asset_price", "price", "btc_price"):
+        price = safe_float(signal.get(field))
+        if price is not None and price > 0:
+            return price
+    return None
 
 
 RISK_CONTEXT_NUMERIC_FIELDS = {
@@ -2473,7 +2546,7 @@ def snapshot_price(snapshot):
     if price is not None:
         return price
     signal = signal_payload(snapshot)
-    return safe_float(signal.get("btc_price"))
+    return signal_price(signal)
 
 
 def sell_backlog_oldest_minutes(snapshot):
@@ -3078,6 +3151,10 @@ def simulate_approved_order_lifecycle(replay, snapshots):
     )
     if configured_max_inventory_usd is None or configured_max_inventory_usd <= 0:
         configured_max_inventory_usd = float("inf")
+    configured_max_inventory_usd = effective_inventory_cap(
+        configured_max_inventory_usd,
+        BACKTEST_CAPITAL_ALLOCATION_USD,
+    )
     inventory_hard_cap_enabled = strategy_bool(
         first_config,
         "inventory_hard_cap_enabled",
@@ -6880,7 +6957,7 @@ def replay_from_snapshots(snapshots):
         price = safe_float((snapshot.get("ticker") or {}).get("last_price"))
         if price is None:
             signal = signal_payload(snapshot)
-            price = safe_float(signal.get("btc_price"))
+            price = signal_price(signal)
         if price is None:
             summary["missing_price"] += 1
             continue
@@ -8573,6 +8650,9 @@ def build_report(window_hours=None, include_strategy_details=None):
 
     report = {
         "timestamp": now.isoformat(),
+        "instance_id": INSTANCE_ID or None,
+        "asset_id": SIGNAL_ASSET_ID,
+        "kraken_pair": KRAKEN_PAIR,
         "snapshot_file_base": display_source_path(SNAPSHOT_LOG_FILE),
         "snapshot_files": snapshot_files,
         "trade_log_file": display_source_path(TRADE_LOG_FILE),

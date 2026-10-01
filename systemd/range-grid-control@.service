@@ -1,0 +1,23 @@
+[Unit]
+Description=Range Grid Control Plane (%i)
+After=network-online.target range-grid-bot@%i.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ben
+Group=ben
+WorkingDirectory=/home/ben/krakenbot
+Environment=RANGE_GRID_INSTANCE_ID=%i
+Environment=RANGE_GRID_ENV_FILE=/home/ben/krakenbot/env.range-grid-%i
+EnvironmentFile=/home/ben/krakenbot/env.range-grid-%i
+ExecStart=/home/ben/krakenbot/venv/bin/python /home/ben/krakenbot/range_grid_control_plane.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=range-grid-control-%i
+
+[Install]
+WantedBy=multi-user.target
+

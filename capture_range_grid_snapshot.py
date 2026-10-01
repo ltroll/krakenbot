@@ -13,6 +13,11 @@ from urllib.parse import urlparse
 
 import requests
 from dotenv import load_dotenv
+from range_grid_instance import (
+    instance_runtime_path,
+    instance_web_path,
+    normalize_instance_id,
+)
 from signal_normalizer import normalize_signal_payload
 
 
@@ -21,6 +26,27 @@ ENV_FILE = (
     or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 )
 load_dotenv(dotenv_path=ENV_FILE, override=True)
+
+INSTANCE_ID = normalize_instance_id(os.getenv("RANGE_GRID_INSTANCE_ID"))
+INSTANCE_RUNTIME_ROOT = os.getenv("RANGE_GRID_INSTANCE_RUNTIME_ROOT", "instances")
+INSTANCE_WEB_ROOT = os.getenv("RANGE_GRID_INSTANCE_WEB_ROOT", "/var/www/html/bot")
+
+
+def instance_runtime_default(filename):
+    return instance_runtime_path(
+        INSTANCE_ID,
+        filename,
+        runtime_root=INSTANCE_RUNTIME_ROOT,
+    )
+
+
+def instance_web_default(filename, legacy_path):
+    return instance_web_path(
+        INSTANCE_ID,
+        filename,
+        legacy_path=legacy_path,
+        web_root=INSTANCE_WEB_ROOT,
+    )
 
 CONFIG_FILE = (
     os.getenv("RANGE_GRID_CONFIG_FILE")
@@ -35,11 +61,11 @@ STRATEGY_PROFILE = (
 STATE_FILE = (
     os.getenv("RANGE_GRID_STATE_FILE")
     or os.getenv("BOT_STATE_FILE")
-    or "last_state.json"
+    or instance_runtime_default("last_state.json")
 )
 STATUS_FILE = (
     os.getenv("RANGE_GRID_STATUS_FILE")
-    or "range_grid_status.json"
+    or instance_runtime_default("range_grid_status.json")
 )
 
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL", "https://api.kraken.com")
@@ -64,7 +90,10 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
 
 SNAPSHOT_LOG_FILE = os.getenv(
     "RANGE_GRID_BACKTEST_SNAPSHOT_FILE",
-    "range_grid_backtest_snapshot_log.jsonl"
+    instance_web_default(
+        "range_grid_backtest_snapshot_log.jsonl",
+        "range_grid_backtest_snapshot_log.jsonl",
+    ),
 )
 SNAPSHOT_ROTATE_DAILY = os.getenv(
     "RANGE_GRID_BACKTEST_ROTATE_DAILY",
@@ -780,7 +809,11 @@ def build_snapshot():
     signal_source = SIGNAL_FILE or LLM_SIGNAL_URL
     sentiment = read_json_source(signal_source, timeout=REQUEST_TIMEOUT)
     normalized_sentiment_payload = (
-        normalize_signal_payload(sentiment["payload"], pair=KRAKEN_PAIR)
+        normalize_signal_payload(
+            sentiment["payload"],
+            asset_id=configured_asset_id(),
+            pair=KRAKEN_PAIR,
+        )
         if sentiment["ok"]
         else None
     )
@@ -799,6 +832,7 @@ def build_snapshot():
     snapshot = {
         "captured_at": captured_at,
         "hostname": socket.gethostname(),
+        "instance_id": INSTANCE_ID or None,
         "pair": KRAKEN_PAIR,
         "asset_id": configured_asset_id(),
         "snapshot_kind": "range_grid_backtest_input",

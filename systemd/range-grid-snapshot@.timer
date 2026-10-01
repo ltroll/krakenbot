@@ -1,0 +1,12 @@
+[Unit]
+Description=Capture Range Grid Snapshot Every Minute (%i)
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+Persistent=true
+RandomizedDelaySec=5
+Unit=range-grid-snapshot@%i.service
+
+[Install]
+WantedBy=timers.target
+

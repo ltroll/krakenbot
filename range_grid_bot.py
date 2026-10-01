@@ -37,6 +37,7 @@ from range_grid_assets import (
     infer_asset_id_from_pair,
     kraken_pair_matches as configured_kraken_pair_matches,
     kraken_result_for_pair,
+    normalize_kraken_pair,
     parse_asset_balance_keys,
 )
 from range_grid_guardrails import (
@@ -73,6 +74,16 @@ from range_grid_order_sizing import (
     minimum_order_floor_decision,
     minimum_order_floor_required_block_reason,
 )
+from range_grid_instance import (
+    available_quote_cash,
+    effective_inventory_cap,
+    instance_runtime_path,
+    instance_web_path,
+    normalize_instance_id,
+    parse_optional_positive_float,
+    price_from_record,
+    validate_instance_configuration,
+)
 from range_grid_profit_target import (
     fear_greed_profit_target_adjustment,
     fear_greed_profit_target_policy,
@@ -85,7 +96,38 @@ from range_grid_source_policy import (
 from range_grid_strategy_catalog import validate_strategy_profile_selection
 from signal_normalizer import normalize_signal_payload
 
-load_dotenv()
+ENV_FILE = (
+    os.getenv("RANGE_GRID_ENV_FILE")
+    or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+)
+load_dotenv(dotenv_path=ENV_FILE, override=False)
+
+INSTANCE_ID = normalize_instance_id(os.getenv("RANGE_GRID_INSTANCE_ID"))
+INSTANCE_RUNTIME_ROOT = os.getenv(
+    "RANGE_GRID_INSTANCE_RUNTIME_ROOT",
+    "instances",
+)
+INSTANCE_WEB_ROOT = os.getenv(
+    "RANGE_GRID_INSTANCE_WEB_ROOT",
+    "/var/www/html/bot",
+)
+
+
+def instance_runtime_default(filename):
+    return instance_runtime_path(
+        INSTANCE_ID,
+        filename,
+        runtime_root=INSTANCE_RUNTIME_ROOT,
+    )
+
+
+def instance_web_default(filename, legacy_path):
+    return instance_web_path(
+        INSTANCE_ID,
+        filename,
+        legacy_path=legacy_path,
+        web_root=INSTANCE_WEB_ROOT,
+    )
 
 # ----------------------
 # CONFIG
@@ -105,7 +147,7 @@ STRATEGY_PROFILE = CONFIGURED_STRATEGY_PROFILE
 STATE_FILE = (
     os.getenv("RANGE_GRID_STATE_FILE")
     or os.getenv("BOT_STATE_FILE")
-    or "last_state.json"
+    or instance_runtime_default("last_state.json")
 )
 STATE_BACKUP_FILE = (
     os.getenv("RANGE_GRID_STATE_BACKUP_FILE")
@@ -114,7 +156,7 @@ STATE_BACKUP_FILE = (
 LOG_FILE = (
     os.getenv("RANGE_GRID_TRADE_LOG_FILE")
     or os.getenv("TRADE_LOG_FILE")
-    or "trade_log.jsonl"
+    or instance_runtime_default("trade_log.jsonl")
 )
 LOG_ROTATE_MAX_BYTES = int(
     float(os.getenv("RANGE_GRID_TRADE_LOG_MAX_MB", "50")) * 1024 * 1024
@@ -124,7 +166,10 @@ LOG_ROTATE_RETENTION = int(
 )
 ACTIVITY_LOG_FILE = (
     os.getenv("RANGE_GRID_ACTIVITY_LOG_FILE")
-    or "/var/www/html/bot/range_grid_activity.jsonl"
+    or instance_web_default(
+        "range_grid_activity.jsonl",
+        "/var/www/html/bot/range_grid_activity.jsonl",
+    )
 )
 ACTIVITY_LOG_ROTATE_DAILY = (
     os.getenv("RANGE_GRID_ACTIVITY_LOG_ROTATE_DAILY", "true")
@@ -146,16 +191,16 @@ INSTANCE_LOCK_FILE = (
 STATUS_FILE = (
     os.getenv("RANGE_GRID_STATUS_FILE")
     or os.getenv("BOT_STATUS_FILE")
-    or "range_grid_status.json"
+    or instance_runtime_default("range_grid_status.json")
 )
 ALERT_LOG_FILE = (
     os.getenv("RANGE_GRID_ALERT_LOG_FILE")
     or os.getenv("BOT_ALERT_LOG_FILE")
-    or "range_grid_alerts.jsonl"
+    or instance_runtime_default("range_grid_alerts.jsonl")
 )
-CONTROL_FILE = os.getenv(
-    "RANGE_GRID_CONTROL_FILE",
-    "range_grid_control_state.json",
+CONTROL_FILE = (
+    os.getenv("RANGE_GRID_CONTROL_FILE")
+    or instance_runtime_default("range_grid_control_state.json")
 )
 STRATEGY_DIRECTORY = os.getenv(
     "RANGE_GRID_STRATEGY_DIRECTORY",
@@ -174,13 +219,17 @@ if _startup_strategy_override and not _startup_control.get("load_error"):
         STARTUP_STRATEGY_SELECTION_ERROR = str(exc)
 ANCHOR_STRATEGY_ROUTER_FILE = (
     os.getenv("RANGE_GRID_ANCHOR_ROUTER_FILE")
-    or "/var/www/html/bot/range_grid_anchor_winners.json"
+    or instance_web_default(
+        "range_grid_anchor_winners.json",
+        "/var/www/html/bot/range_grid_anchor_winners.json",
+    )
 )
 
 KRAKEN_TICKER_URL = os.getenv("KRAKEN_TICKER_URL")
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL")
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL")
 PRICE_LOG_URL = os.getenv("PRICE_LOG_URL")
+PRICE_LOG_FIELD = os.getenv("RANGE_GRID_PRICE_LOG_FIELD", "asset_price_usd")
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
 SIGNAL_ASSET_ID = (
     os.getenv("SIGNAL_ASSET_ID")
@@ -190,6 +239,14 @@ SIGNAL_ASSET_ID = (
 ASSET_BALANCE_KEYS = parse_asset_balance_keys(
     os.getenv("RANGE_GRID_ASSET_BALANCE_KEYS"),
     SIGNAL_ASSET_ID,
+)
+CAPITAL_ALLOCATION_USD = parse_optional_positive_float(
+    os.getenv("RANGE_GRID_CAPITAL_ALLOCATION_USD"),
+    "RANGE_GRID_CAPITAL_ALLOCATION_USD",
+)
+QUOTE_CASH_RESERVE_USD = max(
+    0.0,
+    float(os.getenv("RANGE_GRID_QUOTE_CASH_RESERVE_USD", "0")),
 )
 KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY")
 KRAKEN_API_SECRET = os.getenv("KRAKEN_API_SECRET")
@@ -613,6 +670,7 @@ order_tracker_user_agent = (
 order_owner_tag_source = (
     os.getenv("ORDER_OWNER_TAG_SOURCE")
     or order_tracker_user_agent
+    or (f"{socket.gethostname()}:{INSTANCE_ID}" if INSTANCE_ID else None)
     or socket.gethostname()
 )
 order_tracker_symbol = (
@@ -690,7 +748,10 @@ require_fresh_signal = bool(strategy_config.get("require_fresh_signal", True))
 price_check_interval_seconds = profile_int("price_check_interval_seconds", 120)
 range_refresh_interval_minutes = profile_int("range_refresh_interval_minutes", 60)
 max_open_sell_orders = profile_int("max_open_sell_orders", 999999)
-max_inventory_usd = profile_float("max_inventory_usd", 1e18)
+max_inventory_usd = effective_inventory_cap(
+    profile_float("max_inventory_usd", 1e18),
+    CAPITAL_ALLOCATION_USD,
+)
 sell_repricing_enabled = profile_bool("sell_repricing_enabled", False)
 aging_start_minutes = profile_int("aging_start_minutes", 999999)
 aging_step_minutes = profile_int("aging_step_minutes", 60)
@@ -1085,6 +1146,30 @@ operating_mode = normalize_operating_mode(
     strategy_config.get("operating_mode", "range_plus_llm")
 )
 paper_trading_enabled = profile_bool("paper_trading_enabled", False)
+LEGACY_UNSCOPED_BTC_INSTANCE = SIGNAL_ASSET_ID == "BTC" and not INSTANCE_ID
+LIVE_ENABLED = env_default_bool(
+    "RANGE_GRID_LIVE_ENABLED",
+    LEGACY_UNSCOPED_BTC_INSTANCE,
+)
+LIVE_CONFIRMATION = os.getenv(
+    "RANGE_GRID_LIVE_CONFIRMATION",
+    KRAKEN_PAIR if LEGACY_UNSCOPED_BTC_INSTANCE else "",
+)
+INSTANCE_CONFIGURATION_ERRORS = validate_instance_configuration(
+    instance_id=INSTANCE_ID,
+    asset_id=SIGNAL_ASSET_ID,
+    kraken_pair=KRAKEN_PAIR,
+    strategy=strategy_config,
+    order_tracker_symbol=order_tracker_symbol,
+    paper_trading_enabled=paper_trading_enabled,
+    live_enabled=LIVE_ENABLED,
+    live_confirmation=LIVE_CONFIRMATION,
+)
+if INSTANCE_CONFIGURATION_ERRORS:
+    raise RuntimeError(
+        "Unsafe range-grid instance configuration: "
+        + "; ".join(INSTANCE_CONFIGURATION_ERRORS)
+    )
 risk_context_shadow_buy_enabled = profile_bool(
     "risk_context_shadow_buy_enabled",
     env_default_bool("RANGE_GRID_RISK_CONTEXT_SHADOW_BUY_ENABLED", False)
@@ -1141,6 +1226,12 @@ if not pair_info:
 
 PRICE_DECIMALS = pair_info["pair_decimals"]
 VOLUME_DECIMALS = pair_info["lot_decimals"]
+try:
+    PAIR_ORDER_MIN_VOLUME = max(0.0, float(pair_info.get("ordermin") or 0.0))
+except (TypeError, ValueError):
+    PAIR_ORDER_MIN_VOLUME = 0.0
+min_buy_volume_asset = max(min_buy_volume_asset, PAIR_ORDER_MIN_VOLUME)
+min_buy_volume_btc = min_buy_volume_asset
 INSTANCE_LOCK_HANDLE = None
 
 # ----------------------
@@ -1400,6 +1491,31 @@ def load_anchor_strategy_routes(force=False):
                 )
                 continue
 
+            instance_errors = validate_instance_configuration(
+                instance_id=INSTANCE_ID,
+                asset_id=SIGNAL_ASSET_ID,
+                kraken_pair=KRAKEN_PAIR,
+                strategy=strategy_payload,
+                order_tracker_symbol=order_tracker_symbol,
+                paper_trading_enabled=strategy_bool(
+                    strategy_payload,
+                    "paper_trading_enabled",
+                    paper_trading_enabled,
+                ),
+                live_enabled=LIVE_ENABLED,
+                live_confirmation=LIVE_CONFIRMATION,
+            )
+            if instance_errors:
+                log_event(
+                    "ANCHOR_STRATEGY_ROUTE_SKIPPED",
+                    anchor=anchor,
+                    strategy_label=selected.get("strategy_label"),
+                    reason="strategy_instance_mismatch",
+                    validation_errors=instance_errors,
+                    router_file=path,
+                )
+                continue
+
             if (
                 not paper_trading_enabled
                 and (
@@ -1579,6 +1695,10 @@ def routed_effective_limits(route_config, regime, risk_multiplier):
         strategy_float(route_config, "max_inventory_usd", max_inventory_usd)
         * regime["inventory_multiplier"]
         * risk_multiplier
+    )
+    route_max_inventory_usd = effective_inventory_cap(
+        route_max_inventory_usd,
+        CAPITAL_ALLOCATION_USD,
     )
     route_max_open_sell_orders = max(
         1,
@@ -2584,6 +2704,8 @@ def runtime_identity():
     return {
         "pid": os.getpid(),
         "hostname": socket.gethostname(),
+        "instance_id": INSTANCE_ID or None,
+        "env_file": os.path.abspath(ENV_FILE),
         "state_file": os.path.abspath(STATE_FILE),
         "lock_file": os.path.abspath(INSTANCE_LOCK_FILE),
         "log_file": os.path.abspath(LOG_FILE),
@@ -3246,7 +3368,11 @@ def get_sentiment():
         data = r.json()
 
         if isinstance(data, dict):
-            normalized = normalize_signal_payload(data, pair=KRAKEN_PAIR)
+            normalized = normalize_signal_payload(
+                data,
+                asset_id=SIGNAL_ASSET_ID,
+                pair=KRAKEN_PAIR,
+            )
             normalized["action_reason"] = (
                 (
                     normalized.get("action_policy", {}).get("reason")
@@ -3289,6 +3415,8 @@ def get_sentiment():
 def synthetic_range_sentiment_payload(reason, price):
     return {
         "schema_version": "range_fallback_v1",
+        "asset_id": SIGNAL_ASSET_ID,
+        "asset_price": price,
         "execution_signal": range_fallback_execution_signal,
         "target_prices": [],
         "risk_multiplier": 1.0,
@@ -3912,6 +4040,18 @@ def allow_above_last_sell_for_candidate(config, buy_source, weather_report):
 # ----------------------
 
 def refresh_range():
+    if not PRICE_LOG_URL:
+        state["last_range_refresh"] = datetime.now(timezone.utc).isoformat()
+        save_state(state)
+        log_event(
+            "RANGE_REFRESH_SKIPPED",
+            message=(
+                "PRICE_LOG_URL is not configured; using the selected "
+                f"{SIGNAL_ASSET_ID} signal range"
+            ),
+            asset_id=SIGNAL_ASSET_ID,
+        )
+        return
     try:
         r = requests.get(PRICE_LOG_URL, timeout=10)
 
@@ -3936,7 +4076,13 @@ def refresh_range():
                     ts = ts.replace(tzinfo=timezone.utc)
 
                 if ts >= cutoff:
-                    prices.append(float(record["btc_price_usd"]))
+                    record_price = price_from_record(
+                        record,
+                        SIGNAL_ASSET_ID,
+                        PRICE_LOG_FIELD,
+                    )
+                    if record_price is not None:
+                        prices.append(record_price)
             except Exception:
                 continue
 
@@ -6475,6 +6621,13 @@ def main():
         config_file=CONFIG_FILE,
         operating_mode=operating_mode,
         paper_trading_enabled=paper_trading_enabled,
+        live_enabled=LIVE_ENABLED,
+        live_confirmation_valid=(
+            normalize_kraken_pair(LIVE_CONFIRMATION)
+            == normalize_kraken_pair(KRAKEN_PAIR)
+        ),
+        capital_allocation_usd=CAPITAL_ALLOCATION_USD,
+        quote_cash_reserve_usd=QUOTE_CASH_RESERVE_USD,
         base_strategy_fingerprint=base_strategy_fingerprint,
         configured_strategy_profile=CONFIGURED_STRATEGY_PROFILE,
         strategy_profile_source=(
@@ -6500,6 +6653,7 @@ def main():
         min_buy_notional_usd=min_buy_notional_usd,
         min_buy_volume_asset=min_buy_volume_asset,
         min_buy_volume_btc=min_buy_volume_btc,
+        pair_order_min_volume=PAIR_ORDER_MIN_VOLUME,
         minimum_order_floor_enabled=profile_bool(
             "minimum_order_floor_enabled",
             False,
@@ -7211,6 +7365,10 @@ def main():
             )
             effective_position_size_pct *= smoothed_risk_multiplier
             effective_max_inventory_usd *= smoothed_risk_multiplier
+            effective_max_inventory_usd = effective_inventory_cap(
+                effective_max_inventory_usd,
+                CAPITAL_ALLOCATION_USD,
+            )
             effective_max_open_sell_orders = max(
                 1,
                 int(round(
@@ -9043,7 +9201,11 @@ def main():
 
                 usd = float(bal["result"].get("ZUSD", 0))
                 reserved_buy_usd = reserved_buy_capital_usd()
-                available_usd = max(0.0, usd - reserved_buy_usd)
+                available_usd = available_quote_cash(
+                    usd,
+                    reserved_buy_usd,
+                    QUOTE_CASH_RESERVE_USD,
+                )
                 reserved_sell_levels = {
                     sell_order.get("level")
                     for sell_order in state["open_sell_orders"].values()
@@ -10208,7 +10370,15 @@ def main():
                             above_last_sell_breakout_bypass=(
                                 above_last_sell_breakout_bypass
                             ),
-                            candidate_volume_btc=round(volume, VOLUME_DECIMALS),
+                            candidate_volume_asset=round(
+                                volume,
+                                VOLUME_DECIMALS,
+                            ),
+                            candidate_volume_btc=(
+                                round(volume, VOLUME_DECIMALS)
+                                if SIGNAL_ASSET_ID == "BTC"
+                                else None
+                            ),
                             candidate_sell_pct_override=active_sell_pct_override,
                             reason=skip_reason
                         )
@@ -10763,7 +10933,11 @@ def main():
                             ),
                         )
                         reserved_buy_usd += level * volume
-                        available_usd = max(0.0, usd - reserved_buy_usd)
+                        available_usd = available_quote_cash(
+                            usd,
+                            reserved_buy_usd,
+                            QUOTE_CASH_RESERVE_USD,
+                        )
                         if not operator_controlled:
                             record_buy_cooldown_timestamp(
                                 buy_source,
@@ -11027,7 +11201,11 @@ def main():
                         projected_bucket_inventory_usd
                     )
                     reserved_buy_usd += level * volume
-                    available_usd = max(0.0, usd - reserved_buy_usd)
+                    available_usd = available_quote_cash(
+                        usd,
+                        reserved_buy_usd,
+                        QUOTE_CASH_RESERVE_USD,
+                    )
 
                     log_and_console(
                         "BUY_ORDER_PLACED",
@@ -11670,6 +11848,9 @@ def main():
             )
             write_status_snapshot({
                 "timestamp": cycle_id,
+                "instance_id": INSTANCE_ID or None,
+                "asset_id": SIGNAL_ASSET_ID,
+                "kraken_pair": KRAKEN_PAIR,
                 "operating_mode": operating_mode,
                 "sentiment_control_mode": sentiment_control_mode,
                 "strategy_profile": STRATEGY_PROFILE,
@@ -11681,6 +11862,9 @@ def main():
                 ),
                 "strategy_selection_error": strategy_selection_error,
                 "paper_trading_enabled": paper_trading_enabled,
+                "live_enabled": LIVE_ENABLED,
+                "capital_allocation_usd": CAPITAL_ALLOCATION_USD,
+                "quote_cash_reserve_usd": QUOTE_CASH_RESERVE_USD,
                 "base_strategy_fingerprint": base_strategy_fingerprint,
                 "effective_strategy": effective_strategy_status_snapshot(),
                 "grid_anchor": grid_anchor,

@@ -317,6 +317,69 @@ per line (`wjl_1:{...}`). Existing journald/syslog forwarding can send that
 message body to a Wren JSON Logging parser; no additional bot listener or
 network output is required. Trade and activity JSONL files are unchanged.
 
+### Install A Separate Asset Instance (SOL Example)
+
+The repository includes systemd templates for isolated instances. They assume
+the checkout is `/home/ben/krakenbot`, the service account is `ben`, and each
+instance has an env file named `env.range-grid-<instance>`. Adjust the checked-in
+templates first if your paths or service account differ.
+
+Create the local env, web directory, and runtime directory:
+
+```bash
+cd /home/ben/krakenbot
+cp env.range-grid-sol.example env.range-grid-sol
+chmod 600 env.range-grid-sol
+mkdir -p instances/sol
+sudo install -d -o ben -g ben /var/www/html/bot/sol
+```
+
+Edit `env.range-grid-sol` and set a dedicated Kraken API key/secret, a unique
+control token, and the intended capital allocation/reserve. Do not reuse the
+BTC bot's Kraken key: concurrent private API calls on one key can collide on
+Kraken's nonce sequence.
+
+The included `range_grid_strategy_sol_paper_baseline.json` is deliberately
+paper-only. Run the fail-closed preflight before installing the units:
+
+```bash
+venv/bin/python range_grid_instance_check.py --env-file env.range-grid-sol
+```
+
+Install and start the instance units:
+
+```bash
+sudo cp systemd/range-grid-bot@.service /etc/systemd/system/
+sudo cp systemd/range-grid-control@.service /etc/systemd/system/
+sudo cp systemd/range-grid-snapshot@.service /etc/systemd/system/
+sudo cp systemd/range-grid-snapshot@.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now range-grid-snapshot@sol.timer
+sudo systemctl enable --now range-grid-bot@sol.service
+sudo systemctl enable --now range-grid-control@sol.service
+```
+
+The SOL control plane is then available at `http://<bot-host>:8788/`. Verify
+identity and paper mode before leaving it unattended:
+
+```bash
+sudo systemctl status range-grid-bot@sol.service --no-pager
+sudo journalctl -u range-grid-bot@sol.service -n 30 --no-pager -o cat
+curl -s -H 'Authorization: Bearer <token>' http://127.0.0.1:8788/api/status | jq '{instance, strategy: .strategy_control.desired}'
+```
+
+Live promotion requires a separately reviewed SOL strategy with
+`paper_trading_enabled: false` plus these exact env gates:
+
+```env
+RANGE_GRID_LIVE_ENABLED=true
+RANGE_GRID_LIVE_CONFIRMATION=SOLUSD
+```
+
+Run the preflight again before restarting. Existing BTC services and orders
+are untouched; the new instance reads and writes only its namespaced files and
+only reconciles Kraken orders for its configured pair.
+
 ## 4. Install The Sentiment Executor Service
 
 Create `/etc/systemd/system/kraken-sentiment.service`:

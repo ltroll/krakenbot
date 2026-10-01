@@ -1,0 +1,23 @@
+[Unit]
+Description=Range Grid Bot (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ben
+Group=ben
+WorkingDirectory=/home/ben/krakenbot
+Environment=RANGE_GRID_INSTANCE_ID=%i
+Environment=RANGE_GRID_ENV_FILE=/home/ben/krakenbot/env.range-grid-%i
+EnvironmentFile=/home/ben/krakenbot/env.range-grid-%i
+ExecStartPre=/home/ben/krakenbot/venv/bin/python /home/ben/krakenbot/range_grid_instance_check.py --env-file /home/ben/krakenbot/env.range-grid-%i
+ExecStart=/home/ben/krakenbot/venv/bin/python /home/ben/krakenbot/range_grid_bot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=range-grid-%i
+
+[Install]
+WantedBy=multi-user.target

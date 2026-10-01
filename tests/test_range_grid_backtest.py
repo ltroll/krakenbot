@@ -2048,6 +2048,32 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertGreaterEqual(result["summary"]["approved_candidates"], 1)
         self.assertEqual(result["summary"]["hold_snapshots"], 0)
 
+    def test_signal_payload_selects_snapshot_asset_for_non_btc_instance(self):
+        snapshot = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            None,
+        )
+        snapshot["asset_id"] = "SOL"
+        snapshot["pair"] = "SOLUSD"
+        snapshot["signal"]["payload"] = {
+            "schema_version": "multi-asset-sentiment-v1",
+            "processed_at": "2026-06-13T12:00:00+00:00",
+            "assets": {
+                "BTC": {"asset_id": "BTC", "asset_price": 80_000.0},
+                "SOL": {
+                    "asset_id": "SOL",
+                    "asset_price": 145.25,
+                    "signal_status": "fresh",
+                },
+            },
+        }
+
+        signal = backtest.signal_payload(snapshot)
+
+        self.assertEqual(signal["asset_id"], "SOL")
+        self.assertEqual(signal["asset_price"], 145.25)
+        self.assertEqual(backtest.snapshot_price(snapshot), 145.25)
+
     def test_watch_only_allows_range_permissions(self):
         permissions = backtest.sentiment_buy_permissions("watch_only")
         self.assertFalse(permissions["llm_buys_allowed"])

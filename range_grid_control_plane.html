@@ -225,7 +225,7 @@
 
     <main id="tradingView" class="grid tab-view active" data-view="trading">
       <section class="panel hero">
-        <h2 class="panel-title">BTC / USD</h2>
+        <h2 id="assetPairLabel" class="panel-title">Asset / USD</h2>
         <div id="currentPrice" class="price">—</div>
         <div id="marketTimestamp" class="subline">Waiting for Kraken market data</div>
       </section>
@@ -237,11 +237,11 @@
 
       <section class="panel chart-panel">
         <div class="control-head">
-          <h2 class="panel-title">200-day BTC close</h2>
+          <h2 id="chartAssetLabel" class="panel-title">200-day asset close</h2>
           <span id="chartRange" class="subline"></span>
         </div>
         <div class="chart-wrap">
-          <canvas id="priceChart" tabindex="0" aria-label="Interactive 200-day BTC closing-price chart"></canvas>
+          <canvas id="priceChart" tabindex="0" aria-label="Interactive 200-day asset closing-price chart"></canvas>
           <div id="chartTooltip" class="chart-tooltip" role="status"><strong id="chartTooltipDate"></strong><span id="chartTooltipPrice"></span></div>
         </div>
       </section>
@@ -596,6 +596,7 @@
 
     function renderSentiment(sentiment) {
       const signal = sentiment.signal || {}, risk = sentiment.risk || {};
+      const assetId = ((state.payload || {}).instance || {}).asset_id || signal.asset_id || 'Asset';
       const regime = sentiment.price_regime || {}, structure = sentiment.market_structure || {};
       const available = sentiment.available === true;
       const condition = available && risk.weather_report_available
@@ -667,7 +668,7 @@
       ]);
 
       document.querySelector('#marketLocationFacts').innerHTML = factMarkup([
-        ['Engine BTC price', money2(risk.weather_market_current_price ?? signal.asset_price)],
+        [`Engine ${assetId} price`, money2(risk.weather_market_current_price ?? signal.asset_price)],
         ['Range zone', humanize(risk.weather_market_range_zone)],
         ['Range position', ratioText(risk.weather_market_range_position ?? regime.range_position_24h)],
         ['24h return', signedPercent(risk.weather_market_price_return_24h_pct ?? regime.return_24h_pct)],
@@ -1119,6 +1120,12 @@
 
     function render(payload) {
       state.payload = payload; state.revision = payload.control.revision;
+      const instance = payload.instance || {};
+      const assetId = instance.asset_id || 'Asset';
+      document.querySelector('#assetPairLabel').textContent = `${assetId} / USD`;
+      document.querySelector('#chartAssetLabel').textContent = `200-day ${assetId} close`;
+      document.querySelector('#priceChart').setAttribute('aria-label', `Interactive 200-day ${assetId} closing-price chart`);
+      document.title = `${assetId} Range Grid Control Plane`;
       renderMarket(payload.market);
       renderSentiment(payload.sentiment || {});
       const control = payload.control, bot = payload.bot || {}, stats = bot.stats || {};

@@ -28,6 +28,11 @@ from range_grid_control import (
     operator_round_trip_limit_status,
     save_control_state,
 )
+from range_grid_assets import normalize_kraken_pair
+from range_grid_instance import (
+    instance_runtime_path,
+    normalize_instance_id,
+)
 from range_grid_strategy_catalog import (
     strategy_catalog,
     validate_strategy_profile_selection,
@@ -36,18 +41,42 @@ from risk_context import derive_risk_context, parse_iso8601
 from signal_normalizer import normalize_signal_payload
 
 
-load_dotenv()
+ENV_FILE = (
+    os.getenv("RANGE_GRID_ENV_FILE")
+    or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+)
+load_dotenv(dotenv_path=ENV_FILE, override=False)
 
-CONTROL_FILE = os.getenv(
-    "RANGE_GRID_CONTROL_FILE",
-    "range_grid_control_state.json",
+INSTANCE_ID = normalize_instance_id(os.getenv("RANGE_GRID_INSTANCE_ID"))
+INSTANCE_RUNTIME_ROOT = os.getenv(
+    "RANGE_GRID_INSTANCE_RUNTIME_ROOT",
+    "instances",
 )
-CONTROL_AUDIT_FILE = os.getenv(
-    "RANGE_GRID_CONTROL_AUDIT_FILE",
-    "range_grid_control_audit.jsonl",
+
+
+def instance_runtime_default(filename):
+    return instance_runtime_path(
+        INSTANCE_ID,
+        filename,
+        runtime_root=INSTANCE_RUNTIME_ROOT,
+    )
+
+CONTROL_FILE = (
+    os.getenv("RANGE_GRID_CONTROL_FILE")
+    or instance_runtime_default("range_grid_control_state.json")
 )
-STATUS_FILE = os.getenv("RANGE_GRID_STATUS_FILE", "range_grid_status.json")
-STATE_FILE = os.getenv("RANGE_GRID_STATE_FILE", "last_state.json")
+CONTROL_AUDIT_FILE = (
+    os.getenv("RANGE_GRID_CONTROL_AUDIT_FILE")
+    or instance_runtime_default("range_grid_control_audit.jsonl")
+)
+STATUS_FILE = (
+    os.getenv("RANGE_GRID_STATUS_FILE")
+    or instance_runtime_default("range_grid_status.json")
+)
+STATE_FILE = (
+    os.getenv("RANGE_GRID_STATE_FILE")
+    or instance_runtime_default("last_state.json")
+)
 CONTROL_HOST = os.getenv("RANGE_GRID_CONTROL_HOST", "127.0.0.1")
 CONTROL_PORT = int(os.getenv("RANGE_GRID_CONTROL_PORT", "8787"))
 CONTROL_TOKEN = os.getenv("RANGE_GRID_CONTROL_TOKEN", "").strip()
@@ -65,9 +94,9 @@ REQUEST_TIMEOUT_SECONDS = max(
 )
 KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
 KRAKEN_API_URL = os.getenv("KRAKEN_API_URL", "https://api.kraken.com").rstrip("/")
-KRAKEN_TICKER_URL = os.getenv(
-    "KRAKEN_TICKER_URL",
-    f"{KRAKEN_API_URL}/0/public/Ticker?pair={KRAKEN_PAIR}",
+KRAKEN_TICKER_URL = (
+    os.getenv("KRAKEN_TICKER_URL")
+    or f"{KRAKEN_API_URL}/0/public/Ticker?pair={KRAKEN_PAIR}"
 )
 KRAKEN_OHLC_ENDPOINT = os.getenv(
     "RANGE_GRID_CONTROL_OHLC_URL",
@@ -75,6 +104,22 @@ KRAKEN_OHLC_ENDPOINT = os.getenv(
 )
 LLM_SIGNAL_URL = os.getenv("LLM_SIGNAL_URL", "").strip()
 SIGNAL_ASSET_ID = os.getenv("SIGNAL_ASSET_ID", "BTC").strip().upper() or "BTC"
+LEGACY_UNSCOPED_BTC_INSTANCE = SIGNAL_ASSET_ID == "BTC" and not INSTANCE_ID
+LIVE_ENABLED = str(
+    os.getenv(
+        "RANGE_GRID_LIVE_ENABLED",
+        "true" if LEGACY_UNSCOPED_BTC_INSTANCE else "false",
+    )
+).strip().lower() in {"1", "true", "yes", "on"}
+LIVE_CONFIRMATION = os.getenv(
+    "RANGE_GRID_LIVE_CONFIRMATION",
+    KRAKEN_PAIR if LEGACY_UNSCOPED_BTC_INSTANCE else "",
+)
+LIVE_GATE_READY = (
+    LIVE_ENABLED
+    and normalize_kraken_pair(LIVE_CONFIRMATION)
+    == normalize_kraken_pair(KRAKEN_PAIR)
+)
 CONFIGURED_STRATEGY_PROFILE = (
     os.getenv("RANGE_GRID_STRATEGY_PROFILE")
     or os.getenv("STRATEGY_PROFILE")
@@ -529,6 +574,9 @@ def unavailable_backtest_snapshot(source, error=None):
         "available": False,
         "captured_at": utc_now_iso(),
         "timestamp": None,
+        "instance_id": INSTANCE_ID or None,
+        "asset_id": SIGNAL_ASSET_ID,
+        "kraken_pair": KRAKEN_PAIR,
         "since": None,
         "window_hours": None,
         "source": source or None,
@@ -548,6 +596,15 @@ def unavailable_backtest_snapshot(source, error=None):
 
 
 def build_backtest_snapshot(report, *, source, captured_at, fetch_error=None):
+    report_asset_id = str(report.get("asset_id") or "").strip().upper()
+    if report_asset_id and report_asset_id != SIGNAL_ASSET_ID:
+        return unavailable_backtest_snapshot(
+            source,
+            (
+                f"backtest asset {report_asset_id} does not match control "
+                f"plane asset {SIGNAL_ASSET_ID}"
+            ),
+        )
     comparison = report.get("strategy_comparison")
     comparison = comparison if isinstance(comparison, dict) else {}
     raw_rows = comparison.get("ranked_rows") or comparison.get("rows")
@@ -647,6 +704,9 @@ def build_backtest_snapshot(report, *, source, captured_at, fetch_error=None):
         "available": True,
         "captured_at": captured_at,
         "timestamp": timestamp,
+        "instance_id": report.get("instance_id"),
+        "asset_id": report_asset_id or SIGNAL_ASSET_ID,
+        "kraken_pair": report.get("kraken_pair") or KRAKEN_PAIR,
         "since": since,
         "window_hours": window_hours,
         "source": source,
@@ -789,7 +849,26 @@ def append_audit_event(event):
 def build_strategy_control_snapshot(control, bot_status, directory=None):
     control = control if isinstance(control, dict) else {}
     bot_status = bot_status if isinstance(bot_status, dict) else {}
-    options = strategy_catalog(directory or STRATEGY_DIRECTORY)
+    options = strategy_catalog(
+        directory or STRATEGY_DIRECTORY,
+        asset_id=SIGNAL_ASSET_ID,
+    )
+    if not LIVE_GATE_READY:
+        options = [
+            (
+                entry
+                if entry.get("paper_trading_enabled")
+                else {
+                    **entry,
+                    "valid": False,
+                    "errors": [
+                        *(entry.get("errors") or []),
+                        "live gate is not enabled for this instance",
+                    ],
+                }
+            )
+            for entry in options
+        ]
     override = control.get("strategy_profile_override")
     desired = override or CONFIGURED_STRATEGY_PROFILE
     active = bot_status.get("strategy_profile")
@@ -813,6 +892,31 @@ def build_strategy_control_snapshot(control, bot_status, directory=None):
     }
 
 
+def validate_control_strategy_selection(filename):
+    selected = validate_strategy_profile_selection(
+        filename,
+        STRATEGY_DIRECTORY,
+        asset_id=SIGNAL_ASSET_ID,
+        kraken_pair=KRAKEN_PAIR,
+    )
+    entry = next(
+        (
+            item for item in strategy_catalog(
+                STRATEGY_DIRECTORY,
+                asset_id=SIGNAL_ASSET_ID,
+            )
+            if item.get("filename") == selected
+        ),
+        None,
+    )
+    if entry and not entry.get("paper_trading_enabled") and not LIVE_GATE_READY:
+        raise ValueError(
+            "live strategy selection is disabled until "
+            "RANGE_GRID_LIVE_ENABLED and RANGE_GRID_LIVE_CONFIRMATION are set"
+        )
+    return selected
+
+
 def build_status_payload(
     market_data,
     sentiment_data=None,
@@ -829,6 +933,11 @@ def build_status_payload(
     )
     return {
         "generated_at": utc_now_iso(),
+        "instance": {
+            "id": INSTANCE_ID or None,
+            "asset_id": SIGNAL_ASSET_ID,
+            "kraken_pair": KRAKEN_PAIR,
+        },
         "control": control_status(control),
         "strategy_control": build_strategy_control_snapshot(
             control,
@@ -1014,10 +1123,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 if selected in (None, ""):
                     selected = None
                 else:
-                    selected = validate_strategy_profile_selection(
-                        selected,
-                        STRATEGY_DIRECTORY,
-                    )
+                    selected = validate_control_strategy_selection(selected)
                 payload = {
                     "strategy_profile_override": selected,
                     "expected_revision": payload.get("expected_revision"),
@@ -1027,10 +1133,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 if selected in (None, ""):
                     selected = None
                 else:
-                    selected = validate_strategy_profile_selection(
-                        selected,
-                        STRATEGY_DIRECTORY,
-                    )
+                    selected = validate_control_strategy_selection(selected)
                 payload["strategy_profile_override"] = selected
 
             expected_revision = payload.pop("expected_revision", None)
@@ -1116,6 +1219,9 @@ def main():
     )
     print(json.dumps({
         "status": "starting",
+        "instance_id": INSTANCE_ID or None,
+        "asset_id": SIGNAL_ASSET_ID,
+        "kraken_pair": KRAKEN_PAIR,
         "url": f"http://{CONTROL_HOST}:{CONTROL_PORT}/",
         "control_file": os.path.abspath(CONTROL_FILE),
         "status_file": os.path.abspath(STATUS_FILE),

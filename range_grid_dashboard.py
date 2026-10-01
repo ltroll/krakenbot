@@ -11,18 +11,76 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from dotenv import load_dotenv
+from range_grid_assets import infer_asset_id_from_pair
+from range_grid_instance import (
+    instance_runtime_path,
+    instance_web_path,
+    normalize_instance_id,
+)
 
-load_dotenv()
+ENV_FILE = (
+    os.getenv("RANGE_GRID_ENV_FILE")
+    or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+)
+load_dotenv(dotenv_path=ENV_FILE, override=False)
+
+INSTANCE_ID = normalize_instance_id(os.getenv("RANGE_GRID_INSTANCE_ID"))
+INSTANCE_RUNTIME_ROOT = os.getenv("RANGE_GRID_INSTANCE_RUNTIME_ROOT", "instances")
+INSTANCE_WEB_ROOT = os.getenv("RANGE_GRID_INSTANCE_WEB_ROOT", "/var/www/html/bot")
+KRAKEN_PAIR = os.getenv("KRAKEN_PAIR", "XXBTZUSD")
+SIGNAL_ASSET_ID = (
+    os.getenv("SIGNAL_ASSET_ID")
+    or infer_asset_id_from_pair(KRAKEN_PAIR)
+    or "BTC"
+).upper()
 
 
-STATUS_FILE = os.getenv("RANGE_GRID_STATUS_FILE", "range_grid_status.json")
-ALERT_LOG_FILE = os.getenv("RANGE_GRID_ALERT_LOG_FILE", "range_grid_alerts.jsonl")
-STATE_FILE = os.getenv("RANGE_GRID_STATE_FILE", "last_state.json")
-TRADE_LOG_FILE = os.getenv("RANGE_GRID_TRADE_LOG_FILE", "trade_log.jsonl")
-ACTIVITY_LOG_FILE = os.getenv("RANGE_GRID_ACTIVITY_LOG_FILE", "range_grid_activity.jsonl")
-OUTPUT_FILE = os.getenv(
-    "RANGE_GRID_DASHBOARD_OUTPUT",
-    "/var/www/html/bot/range_grid_dashboard.html",
+def instance_runtime_default(filename):
+    return instance_runtime_path(
+        INSTANCE_ID,
+        filename,
+        runtime_root=INSTANCE_RUNTIME_ROOT,
+    )
+
+
+def instance_web_default(filename, legacy_path):
+    return instance_web_path(
+        INSTANCE_ID,
+        filename,
+        legacy_path=legacy_path,
+        web_root=INSTANCE_WEB_ROOT,
+    )
+
+
+STATUS_FILE = (
+    os.getenv("RANGE_GRID_STATUS_FILE")
+    or instance_runtime_default("range_grid_status.json")
+)
+ALERT_LOG_FILE = (
+    os.getenv("RANGE_GRID_ALERT_LOG_FILE")
+    or instance_runtime_default("range_grid_alerts.jsonl")
+)
+STATE_FILE = (
+    os.getenv("RANGE_GRID_STATE_FILE")
+    or instance_runtime_default("last_state.json")
+)
+TRADE_LOG_FILE = (
+    os.getenv("RANGE_GRID_TRADE_LOG_FILE")
+    or instance_runtime_default("trade_log.jsonl")
+)
+ACTIVITY_LOG_FILE = (
+    os.getenv("RANGE_GRID_ACTIVITY_LOG_FILE")
+    or instance_web_default(
+        "range_grid_activity.jsonl",
+        "range_grid_activity.jsonl",
+    )
+)
+OUTPUT_FILE = (
+    os.getenv("RANGE_GRID_DASHBOARD_OUTPUT")
+    or instance_web_default(
+        "range_grid_dashboard.html",
+        "/var/www/html/bot/range_grid_dashboard.html",
+    )
 )
 LOOKBACK_HOURS = float(os.getenv("RANGE_GRID_DASHBOARD_LOOKBACK_HOURS", "24"))
 RECENT_EVENT_LIMIT = int(os.getenv("RANGE_GRID_DASHBOARD_RECENT_EVENT_LIMIT", "30"))
@@ -1157,7 +1215,7 @@ def render_dashboard(status, state, recent_summary, recent_events, alert_summary
 
     <section class="process-grid" aria-label="Current Process">
       <article class="process-card">
-        <div class="process-label">BTC / USD</div>
+        <div class="process-label">{html.escape(SIGNAL_ASSET_ID)} / USD</div>
         <div class="process-value">${fmt_number(current_value('price'), 2)}</div>
         <div class="process-sub">{html.escape(str(current_value('weather_condition', '--')))} · {html.escape(str(current_value('weather_market_range_zone', '--')))}</div>
       </article>
