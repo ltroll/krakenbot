@@ -368,17 +368,29 @@ sudo journalctl -u range-grid-bot@sol.service -n 30 --no-pager -o cat
 curl -s -H 'Authorization: Bearer <token>' http://127.0.0.1:8788/api/status | jq '{instance, strategy: .strategy_control.desired}'
 ```
 
-Live promotion requires a separately reviewed SOL strategy with
-`paper_trading_enabled: false` plus these exact env gates:
+Live promotion uses `range_grid_strategy_sol_live_baseline.json`, which mirrors
+the paper baseline with `paper_trading_enabled: false`. Select that profile and
+set these exact env gates:
 
 ```env
 RANGE_GRID_LIVE_ENABLED=true
 RANGE_GRID_LIVE_CONFIRMATION=SOLUSD
 ```
 
+Give the live process clean runtime files so simulated paper orders cannot be
+treated as live state:
+
+```env
+RANGE_GRID_STATE_FILE=instances/sol/live_state.json
+RANGE_GRID_STATUS_FILE=instances/sol/live_status.json
+RANGE_GRID_TRADE_LOG_FILE=instances/sol/live_trade_log.jsonl
+RANGE_GRID_ALERT_LOG_FILE=instances/sol/live_alerts.jsonl
+RANGE_GRID_CONTROL_FILE=instances/sol/live_control_state.json
+RANGE_GRID_CONTROL_AUDIT_FILE=instances/sol/live_control_audit.jsonl
+```
+
 Run the preflight again before restarting. Existing BTC services and orders
-are untouched; the new instance reads and writes only its namespaced files and
-only reconciles Kraken orders for its configured pair.
+are untouched; the SOL instance only reconciles Kraken orders for SOLUSD.
 
 ## 4. Install The Sentiment Executor Service
 

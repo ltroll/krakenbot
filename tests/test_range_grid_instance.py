@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from range_grid_instance import (
@@ -17,6 +18,20 @@ from range_grid_instance_check import build_preflight
 
 
 class RangeGridInstanceTests(unittest.TestCase):
+    def test_sol_live_profile_matches_paper_baseline_except_mode(self):
+        repository = Path(__file__).resolve().parent.parent
+        with (repository / "range_grid_strategy_sol_paper_baseline.json").open(
+            encoding="utf-8"
+        ) as paper_handle, (repository / "range_grid_strategy_sol_live_baseline.json").open(
+            encoding="utf-8"
+        ) as live_handle:
+            paper = json.load(paper_handle)
+            live = json.load(live_handle)
+
+        self.assertTrue(paper.pop("paper_trading_enabled"))
+        self.assertFalse(live.pop("paper_trading_enabled"))
+        self.assertEqual(live, paper)
+
     def test_instance_paths_preserve_legacy_defaults_without_instance(self):
         self.assertEqual(instance_runtime_path("", "last_state.json"), "last_state.json")
         self.assertEqual(

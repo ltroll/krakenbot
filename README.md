@@ -632,14 +632,19 @@ is paper-only. Validate the complete instance before starting anything:
 venv/bin/python range_grid_instance_check.py --env-file env.range-grid-sol
 ```
 
-For live promotion, create and backtest a SOL-specific strategy declaring
-`"asset_id": "SOL"` and `"kraken_pair": "SOLUSD"`, change that strategy's
-`paper_trading_enabled` to `false`, then explicitly set both:
+For live promotion, use `range_grid_strategy_sol_live_baseline.json`. It mirrors
+the SOL paper baseline, declares `"asset_id": "SOL"` and
+`"kraken_pair": "SOLUSD"`, and sets `paper_trading_enabled` to `false`. Then
+explicitly set both:
 
 ```env
 RANGE_GRID_LIVE_ENABLED=true
 RANGE_GRID_LIVE_CONFIRMATION=SOLUSD
 ```
+
+Use new live state, status, trade-log, alert, and control filenames during the
+paper-to-live promotion. Do not reuse a paper state file containing simulated
+orders.
 
 The bot refuses to start live if the instance, asset, pair, strategy, tracker
 symbol, or confirmation disagree. The control-plane strategy menu also hides
