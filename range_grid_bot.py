@@ -84,6 +84,12 @@ from range_grid_instance import (
     price_from_record,
     validate_instance_configuration,
 )
+from range_grid_level_stability import (
+    level_stability_snapshot,
+    shadow_price_rule_reason,
+    update_anchor_hysteresis,
+    update_level_stability,
+)
 from range_grid_profit_target import (
     fear_greed_profit_target_adjustment,
     fear_greed_profit_target_policy,
@@ -3098,6 +3104,7 @@ def load_state():
         "range_high": None,
         "range_mean": None,
         "range_median": None,
+        "level_stability_shadow": {},
         "last_range_refresh": None,
         "last_buy_at": None,
         "last_buy_at_by_source": {},
@@ -3172,12 +3179,15 @@ def normalize_state(state):
     state.setdefault("pending_order_intents", {})
     state.setdefault("last_alerts", {})
     state.setdefault("last_minimum_order_floor_at_by_source", {})
+    state.setdefault("level_stability_shadow", {})
     if not isinstance(state["pending_order_intents"], dict):
         state["pending_order_intents"] = {}
     if not isinstance(state["last_alerts"], dict):
         state["last_alerts"] = {}
     if not isinstance(state["last_minimum_order_floor_at_by_source"], dict):
         state["last_minimum_order_floor_at_by_source"] = {}
+    if not isinstance(state["level_stability_shadow"], dict):
+        state["level_stability_shadow"] = {}
     state["consecutive_loop_errors"] = int(state.get("consecutive_loop_errors", 0) or 0)
     state["consecutive_private_api_failures"] = int(
         state.get("consecutive_private_api_failures", 0) or 0
@@ -7166,6 +7176,96 @@ def main():
             action_policy = sentiment_payload.get("action_policy", {})
             risk_context = sentiment_payload.get("risk_context")
             weather_report = weather_report_payload(risk_context)
+            level_stability_shadow_enabled = strategy_bool(
+                strategy_config,
+                "level_stability_shadow_enabled",
+                False,
+            )
+            level_stability_state = state.setdefault(
+                "level_stability_shadow",
+                {},
+            )
+            level_stability_changes = []
+            level_stability_anchor_change = {"changed": False}
+            if level_stability_shadow_enabled:
+                raw_support = weather_nearest_support(weather_report)
+                raw_support_price = positive_float(raw_support.get("price"))
+                if raw_support_price is None or raw_support_price >= price:
+                    fallback_support = positive_float(
+                        price_regime.get("price_low_24h")
+                    )
+                    raw_support = (
+                        {
+                            "price": fallback_support,
+                            "type": "range_low",
+                            "label": "24h range low",
+                            "source": "price_regime",
+                            "distance_pct": (
+                                ((price / fallback_support) - 1) * 100
+                                if fallback_support and fallback_support < price
+                                else None
+                            ),
+                        }
+                        if fallback_support and fallback_support < price
+                        else {}
+                    )
+                raw_resistance = weather_actionable_resistance(weather_report)
+                raw_resistance_price = positive_float(
+                    raw_resistance.get("price")
+                )
+                if raw_resistance_price is None or raw_resistance_price <= price:
+                    fallback_resistance = positive_float(
+                        price_regime.get("price_high_24h")
+                    )
+                    raw_resistance = (
+                        {
+                            "price": fallback_resistance,
+                            "type": "range_high",
+                            "label": "24h range high",
+                            "source": "price_regime",
+                            "distance_pct": (
+                                ((fallback_resistance / price) - 1) * 100
+                                if fallback_resistance and fallback_resistance > price
+                                else None
+                            ),
+                        }
+                        if fallback_resistance and fallback_resistance > price
+                        else {}
+                    )
+                level_stability_changes = update_level_stability(
+                    level_stability_state,
+                    raw_support=raw_support,
+                    raw_resistance=raw_resistance,
+                    now=now,
+                    config=strategy_config,
+                )
+                level_stability_anchor_change = update_anchor_hysteresis(
+                    level_stability_state.setdefault("anchor", {}),
+                    configured_modes=configured_strategy_modes,
+                    raw_active_modes=active_strategy_modes,
+                    range_position=price_regime_range_position,
+                    now=now,
+                    config=strategy_config,
+                )
+            level_stability_shadow = level_stability_snapshot(
+                level_stability_state,
+                strategy_config,
+                operator_control_snapshot,
+            )
+            level_stability_shadow_allowed_grid_levels = []
+            level_stability_shadow_blocked_grid_levels = []
+            if (
+                level_stability_changes
+                or level_stability_anchor_change.get("changed")
+            ):
+                log_and_console(
+                    "LEVEL_STABILITY_SHADOW_UPDATE",
+                    message="Stable execution levels updated in shadow mode",
+                    cycle_id=cycle_id,
+                    level_changes=level_stability_changes,
+                    anchor_change=level_stability_anchor_change,
+                    level_stability_shadow=level_stability_shadow,
+                )
             sentiment_risk_fields = sentiment_risk_log_fields(
                 risk_context
             )
@@ -9182,6 +9282,32 @@ def main():
                         continue
                     seen_levels.add(rounded_level)
                     deduped_candidates.append(candidate)
+
+                if level_stability_shadow_enabled:
+                    for candidate in deduped_candidates:
+                        rounded_level = round(
+                            candidate["level"],
+                            PRICE_DECIMALS,
+                        )
+                        shadow_reason = shadow_price_rule_reason(
+                            candidate["level"],
+                            level_stability_shadow,
+                            operator_control_snapshot,
+                        )
+                        candidate["level_stability_shadow_reason"] = (
+                            shadow_reason
+                        )
+                        if shadow_reason:
+                            level_stability_shadow_blocked_grid_levels.append({
+                                "level": rounded_level,
+                                "buy_source": candidate.get("buy_source"),
+                                "reason": shadow_reason,
+                            })
+                        else:
+                            level_stability_shadow_allowed_grid_levels.append({
+                                "level": rounded_level,
+                                "buy_source": candidate.get("buy_source"),
+                            })
 
                 bal = safe_kraken_private("BALANCE", "/0/private/Balance")
 
@@ -11551,6 +11677,13 @@ def main():
                         weather_high_anchor_allowed=weather_high_anchor_allowed,
                         runtime_block_reason=runtime_block_reason,
                         operator_control=operator_control_snapshot,
+                        level_stability_shadow=level_stability_shadow,
+                        level_stability_shadow_allowed_grid_levels=(
+                            level_stability_shadow_allowed_grid_levels
+                        ),
+                        level_stability_shadow_blocked_grid_levels=(
+                            level_stability_shadow_blocked_grid_levels
+                        ),
                         operator_round_trip_status=(
                             cycle_operator_round_trip_status
                         ),
@@ -11692,6 +11825,13 @@ def main():
                 source_guard_allows_trading=source_guard_allows_trading,
                 runtime_block_reason=runtime_block_reason,
                 operator_control=operator_control_snapshot,
+                level_stability_shadow=level_stability_shadow,
+                level_stability_shadow_allowed_grid_levels=(
+                    level_stability_shadow_allowed_grid_levels
+                ),
+                level_stability_shadow_blocked_grid_levels=(
+                    level_stability_shadow_blocked_grid_levels
+                ),
                 operator_round_trip_status=cycle_operator_round_trip_status,
                 activity_summary_written=activity_summary_written,
                 realized_pnl_today=round(realized_pnl_today, 8),
@@ -11897,6 +12037,13 @@ def main():
                 "action_recommendation": action_recommendation,
                 "runtime_block_reason": runtime_block_reason,
                 "operator_control": operator_control_snapshot,
+                "level_stability_shadow": level_stability_shadow,
+                "level_stability_shadow_allowed_grid_levels": (
+                    level_stability_shadow_allowed_grid_levels
+                ),
+                "level_stability_shadow_blocked_grid_levels": (
+                    level_stability_shadow_blocked_grid_levels
+                ),
                 "operator_round_trip_status": (
                     cycle_operator_round_trip_status
                 ),

@@ -3749,6 +3749,78 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertGreaterEqual(result["summary"]["approved_candidates"], 1)
         self.assertEqual(result["summary"]["hold_snapshots"], 0)
 
+    def test_replay_reports_level_stability_shadow_without_changing_gates(self):
+        weather_template = {
+            "mode": "weather_report",
+            "bot_decision_authority": "bot",
+            "trade_permission": "bot_decides",
+            "alert_level": "normal",
+            "emergency_bell": False,
+            "market_location": {
+                "current_price": 100.0,
+                "nearest_support": {
+                    "price": 95.0,
+                    "type": "recent_low",
+                    "distance_pct": 5.0,
+                },
+                "resistance_bands": [{
+                    "price": 105.0,
+                    "type": "recent_high",
+                    "distance_pct": 5.0,
+                }],
+            },
+        }
+        strategy_overrides = {
+            "grid_anchor": "low,median",
+            "operating_mode": "range_only",
+            "sentiment_control_mode": "price_first",
+            "allow_range_buy_on_confidence_block": True,
+            "dynamic_anchor_mode": True,
+            "dynamic_anchor_low_band_max": 0.5,
+            "dynamic_anchor_high_band_min": 0.92,
+            "dynamic_anchor_mid_mode": "median",
+            "level_stability_shadow_enabled": True,
+            "level_stability_support_lower_confirm_samples": 2,
+            "level_stability_support_lower_confirm_minutes": 5,
+            "level_stability_support_raise_confirm_minutes": 240,
+            "dynamic_anchor_hysteresis_low_enter": 0.45,
+            "dynamic_anchor_hysteresis_low_exit": 0.58,
+        }
+        snapshots = []
+        for captured_at, support, range_position in (
+            ("2026-06-13T12:00:00+00:00", 95.0, 0.44),
+            ("2026-06-13T12:01:00+00:00", 90.0, 0.52),
+            ("2026-06-13T12:06:00+00:00", 90.1, 0.52),
+        ):
+            weather = json.loads(json.dumps(weather_template))
+            weather["market_location"]["nearest_support"]["price"] = support
+            snapshot = make_snapshot(
+                captured_at,
+                100.0,
+                strategy_modes=["low", "median"],
+                strategy_overrides=strategy_overrides,
+                risk_context={"weather_report": weather},
+            )
+            snapshot["signal"]["payload"]["price_regime"][
+                "range_position_24h"
+            ] = range_position
+            snapshots.append(snapshot)
+
+        result = backtest.replay_from_snapshots(snapshots)
+        stability = result["summary"]["level_stability_shadow"]
+
+        self.assertTrue(stability["enabled"])
+        self.assertTrue(stability["shadow_only"])
+        self.assertEqual(stability["snapshots"], 3)
+        self.assertEqual(stability["support"]["stable_price"], 90.05)
+        self.assertEqual(stability["raw_anchor_changes"], 1)
+        self.assertEqual(stability["stable_anchor_changes"], 0)
+        self.assertEqual(stability["anchor"]["stable_mode"], "low")
+        self.assertGreater(
+            stability["candidate_allowed"] + stability["candidate_blocked"],
+            0,
+        )
+
     def test_replay_risk_modulated_allows_low_range_during_blocked_calibration(self):
         snapshots = [
             make_snapshot(

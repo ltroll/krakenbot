@@ -347,6 +347,23 @@ unfinished cycles remain open but do not consume the new day's allowance. This
 limits how quickly new inventory can accumulate without turning the existing
 inventory backlog into a hard blocker. Existing orders are never resized.
 
+The production low/median profile also enables execution-level stabilization
+in shadow mode. The sentiment engine's raw support and resistance remain
+visible, while the bot persists separate stable levels. Raw levels within the
+configured cluster tolerance are treated as one zone. Lower support and lower
+resistance can be confirmed quickly; higher levels require longer confirmation
+so a rolling 24-hour boundary cannot immediately pull buying upward. Dynamic
+low/median/high selection receives a separate hysteresis band to show how much
+anchor switching would be removed. The shadow effective buy ceiling is the
+lower of the confirmed support plus its buffer and the operator's hard ceiling.
+It is diagnostic only: it does not block, cancel, move, or create orders.
+
+The Weather & Sentiment tab shows raw versus stable levels, the shadow buy
+ceiling, pending confirmation, and raw versus stable anchor mode. Backtest
+replay records candidate and approved-candidate allow/block counts plus raw and
+stable anchor-change counts. Promotion to execution should be a separate,
+reviewed strategy change after enough shadow history exists.
+
 HOLD blocks new buys and, by default, requests cancellation of pending buy
 orders on the next bot cycle. It never cancels or reprices existing sell orders,
 and filled inventory continues through the normal sell-management path. A
@@ -413,6 +430,7 @@ State includes:
 - `range_high`
 - `range_mean`
 - `range_median`
+- `level_stability_shadow`
 - `last_range_refresh`
 
 ## How `stats_trend_bot.py` works
@@ -744,6 +762,10 @@ ranked by total net return on entry notional. Completed trades use realized net
 profit; positions still open at the end of the window are marked to the final
 captured price after estimated round-trip fees. Fill counts remain visible so a
 single successful entry is not mistaken for a well-tested price range.
+When an evaluated strategy enables `level_stability_shadow_enabled`, the same
+report also includes a `level_stability_shadow` replay summary. These values
+describe what the stable permission layer would have allowed; the shadow does
+not alter the order-lifecycle simulation or strategy ranking.
 
 Range-grid strategy comparisons also write `range_grid_anchor_winners.json`.
 That file selects the top eligible low, median, and high anchor strategy from

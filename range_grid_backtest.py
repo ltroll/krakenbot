@@ -40,6 +40,12 @@ from range_grid_instance import (
     normalize_instance_id,
     parse_optional_positive_float,
 )
+from range_grid_level_stability import (
+    level_stability_snapshot,
+    shadow_price_rule_reason,
+    update_anchor_hysteresis,
+    update_level_stability,
+)
 from range_grid_profit_target import fear_greed_profit_target_adjustment
 from signal_normalizer import normalize_signal_payload
 
@@ -6924,6 +6930,7 @@ def empty_replay_summary():
         "candidate_counts_by_strategy_mode": {},
         "approved_counts_by_source": {},
         "approved_counts_by_strategy_mode": {},
+        "level_stability_shadow": {},
     }
 
 
@@ -6951,6 +6958,10 @@ def replay_from_snapshots(snapshots):
     approved_counts_by_strategy_mode = Counter()
     last_replay_buy_at = None
     last_replay_buy_at_by_source = {}
+    level_stability_state = {}
+    level_stability_counters = Counter()
+    previous_raw_anchor_mode = None
+    latest_level_stability_snapshot = {}
 
     for snapshot in snapshots:
         summary["snapshots"] += 1
@@ -6969,7 +6980,102 @@ def replay_from_snapshots(snapshots):
             continue
         sentiment_risk_fields = sentiment_risk_event_fields(signal)
 
+        config = strategy_payload(snapshot)
+        level_stability_enabled = strategy_bool(
+            config,
+            "level_stability_shadow_enabled",
+            False,
+        )
+        if level_stability_enabled:
+            risk_context = risk_context_payload(signal)
+            weather_report = weather_report_payload(risk_context)
+            raw_support = weather_nearest_support(weather_report)
+            raw_support_price = safe_float(raw_support.get("price"))
+            low, high, _, _ = derive_range_values(snapshot)
+            if raw_support_price is None or raw_support_price >= price:
+                raw_support = (
+                    {
+                        "price": low,
+                        "type": "range_low",
+                        "label": "24h range low",
+                        "source": "price_regime",
+                        "distance_pct": (
+                            ((price / low) - 1) * 100
+                            if low and low < price
+                            else None
+                        ),
+                    }
+                    if low and low < price
+                    else {}
+                )
+            raw_resistance = weather_actionable_resistance(weather_report)
+            raw_resistance_price = safe_float(raw_resistance.get("price"))
+            if raw_resistance_price is None or raw_resistance_price <= price:
+                raw_resistance = (
+                    {
+                        "price": high,
+                        "type": "range_high",
+                        "label": "24h range high",
+                        "source": "price_regime",
+                        "distance_pct": (
+                            ((high / price) - 1) * 100
+                            if high and high > price
+                            else None
+                        ),
+                    }
+                    if high and high > price
+                    else {}
+                )
+            changes = update_level_stability(
+                level_stability_state,
+                raw_support=raw_support,
+                raw_resistance=raw_resistance,
+                now=snapshot_timestamp(snapshot),
+                config=config,
+            )
+            level_stability_counters["snapshots"] += 1
+            for change in changes:
+                level_stability_counters[
+                    f"{change['side']}_promotions"
+                ] += 1
+
         built = build_candidates(snapshot, price)
+        if level_stability_enabled:
+            anchor_update = update_anchor_hysteresis(
+                level_stability_state.setdefault("anchor", {}),
+                configured_modes=(
+                    strategy_context(snapshot).get("strategy_modes")
+                    or parse_strategy_modes(
+                        strategy_context(snapshot).get("grid_anchor")
+                    )
+                ),
+                raw_active_modes=built.get("strategy_modes") or [],
+                range_position=safe_float(
+                    signal.get("price_regime", {}).get(
+                        "range_position_24h"
+                    )
+                ),
+                now=snapshot_timestamp(snapshot),
+                config=config,
+            )
+            if (
+                previous_raw_anchor_mode is not None
+                and anchor_update.get("raw_mode") != previous_raw_anchor_mode
+            ):
+                level_stability_counters["raw_anchor_changes"] += 1
+            previous_raw_anchor_mode = anchor_update.get("raw_mode")
+            if (
+                anchor_update.get("changed")
+                and level_stability_state.get("anchor", {}).get(
+                    "previous_mode"
+                ) is not None
+            ):
+                level_stability_counters["stable_anchor_changes"] += 1
+            latest_level_stability_snapshot = level_stability_snapshot(
+                level_stability_state,
+                config,
+                runtime_status_summary(snapshot).get("operator_control"),
+            )
         if built["hold_reason"] is not None:
             summary["hold_snapshots"] += 1
             hold_reason_counts[built["hold_reason"]] += 1
@@ -7052,6 +7158,16 @@ def replay_from_snapshots(snapshots):
                 )
             )
             approved, reason = evaluate_candidate(snapshot, candidate, price)
+            shadow_reason = None
+            if level_stability_enabled:
+                shadow_reason = shadow_price_rule_reason(
+                    candidate.get("level"),
+                    latest_level_stability_snapshot,
+                    runtime_status_summary(snapshot).get("operator_control"),
+                )
+                level_stability_counters[
+                    "candidate_blocked" if shadow_reason else "candidate_allowed"
+                ] += 1
             resting_grid_entry = (
                 candidate.get("entry_placement_mode") == "resting_grid"
             )
@@ -7180,6 +7296,12 @@ def replay_from_snapshots(snapshots):
                 approved = False
                 reason = "buy_after_sell_fill_cooldown"
             if approved:
+                if level_stability_enabled:
+                    level_stability_counters[
+                        "approved_candidate_blocked"
+                        if shadow_reason
+                        else "approved_candidate_allowed"
+                    ] += 1
                 approved_at = snapshot_timestamp(snapshot)
                 if approved_at is not None:
                     last_replay_buy_at = approved_at
@@ -7360,6 +7482,7 @@ def replay_from_snapshots(snapshots):
                     "sell_pct_override": candidate.get("sell_pct_override"),
                     "status": "approved_gate_only",
                     "reason": None,
+                    "level_stability_shadow_reason": shadow_reason,
                     **sentiment_risk_fields,
                 }
                 recent.append(approved_event)
@@ -7492,6 +7615,7 @@ def replay_from_snapshots(snapshots):
                     "level": round(candidate["level"], 2),
                     "status": "blocked_gate_only",
                     "reason": reason,
+                    "level_stability_shadow_reason": shadow_reason,
                     **sentiment_risk_fields,
                 }
                 recent.append(blocked_event)
@@ -7549,6 +7673,35 @@ def replay_from_snapshots(snapshots):
             snapshots,
         )
     )
+    if latest_level_stability_snapshot:
+        summary["level_stability_shadow"] = {
+            **latest_level_stability_snapshot,
+            "snapshots": level_stability_counters["snapshots"],
+            "support_promotions": level_stability_counters[
+                "support_promotions"
+            ],
+            "resistance_promotions": level_stability_counters[
+                "resistance_promotions"
+            ],
+            "raw_anchor_changes": level_stability_counters[
+                "raw_anchor_changes"
+            ],
+            "stable_anchor_changes": level_stability_counters[
+                "stable_anchor_changes"
+            ],
+            "candidate_allowed": level_stability_counters[
+                "candidate_allowed"
+            ],
+            "candidate_blocked": level_stability_counters[
+                "candidate_blocked"
+            ],
+            "approved_candidate_allowed": level_stability_counters[
+                "approved_candidate_allowed"
+            ],
+            "approved_candidate_blocked": level_stability_counters[
+                "approved_candidate_blocked"
+            ],
+        }
 
     return {
         "summary": summary,

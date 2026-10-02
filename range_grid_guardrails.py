@@ -88,6 +88,7 @@ def validate_strategy_config(strategy_config):
         "minimum_order_floor_enabled",
         "minimum_order_floor_require_full_size",
         "fear_greed_profit_target_enabled",
+        "level_stability_shadow_enabled",
     )
     for field in boolean_fields:
         if field in strategy_config and not isinstance(
@@ -113,6 +114,10 @@ def validate_strategy_config(strategy_config):
         "max_inventory_usd",
         "aging_step_minutes",
         "high_anchor_buy_cooldown_minutes",
+        "level_stability_support_lower_confirm_samples",
+        "level_stability_support_raise_confirm_samples",
+        "level_stability_resistance_lower_confirm_samples",
+        "level_stability_resistance_raise_confirm_samples",
     )
     for field in positive_numeric_fields:
         value = strategy_config.get(field)
@@ -146,6 +151,10 @@ def validate_strategy_config(strategy_config):
         "minimum_order_floor_cooldown_minutes",
         "minimum_order_floor_cash_reserve_usd",
         "fear_greed_profit_target_max_multiplier",
+        "level_stability_support_lower_confirm_minutes",
+        "level_stability_support_raise_confirm_minutes",
+        "level_stability_resistance_lower_confirm_minutes",
+        "level_stability_resistance_raise_confirm_minutes",
     )
     for field in non_negative_numeric_fields:
         value = strategy_config.get(field)
@@ -225,6 +234,12 @@ def validate_strategy_config(strategy_config):
         "buy_cooldown_after_sell_fill_weather_min_rebound_confirmation",
         "buy_cooldown_after_sell_fill_weather_min_hold_through",
         "buy_cooldown_after_sell_fill_weather_max_exit_pressure",
+        "level_stability_cluster_tolerance_pct",
+        "level_stability_support_buy_buffer_pct",
+        "dynamic_anchor_hysteresis_low_enter",
+        "dynamic_anchor_hysteresis_low_exit",
+        "dynamic_anchor_hysteresis_high_enter",
+        "dynamic_anchor_hysteresis_high_exit",
     )
     for field in bounded_score_fields:
         value = strategy_config.get(field)
@@ -237,6 +252,28 @@ def validate_strategy_config(strategy_config):
             continue
         if numeric < 0 or numeric > 1:
             errors.append(f"{field} must be between 0 and 1")
+
+    for lower_field, upper_field in (
+        (
+            "dynamic_anchor_hysteresis_low_enter",
+            "dynamic_anchor_hysteresis_low_exit",
+        ),
+        (
+            "dynamic_anchor_hysteresis_high_exit",
+            "dynamic_anchor_hysteresis_high_enter",
+        ),
+    ):
+        lower = strategy_config.get(lower_field)
+        upper = strategy_config.get(upper_field)
+        if lower is None or upper is None:
+            continue
+        try:
+            if float(lower) >= float(upper):
+                errors.append(
+                    f"{lower_field} must be less than {upper_field}"
+                )
+        except (TypeError, ValueError):
+            pass
 
     fear_greed_index_fields = (
         "fear_greed_profit_target_greed_start_index",

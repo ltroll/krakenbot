@@ -233,6 +233,7 @@ class RangeGridGuardrailsTests(unittest.TestCase):
                 for error in errors
             )
         )
+
         self.assertTrue(
             any(
                 "stale_level_reanchor_profit_guard_low_dip_size_multiplier"
@@ -296,6 +297,33 @@ class RangeGridGuardrailsTests(unittest.TestCase):
                 for error in errors
             )
         )
+
+    def test_validate_strategy_config_checks_level_stability_fields(self):
+        errors = guardrails.validate_strategy_config({
+            "grid_anchor": "low,median",
+            "operating_mode": "range_only",
+            "level_stability_shadow_enabled": "yes",
+            "level_stability_cluster_tolerance_pct": 1.5,
+            "level_stability_support_lower_confirm_samples": 0,
+            "level_stability_support_raise_confirm_minutes": -1,
+            "dynamic_anchor_hysteresis_low_enter": 0.60,
+            "dynamic_anchor_hysteresis_low_exit": 0.50,
+            "dynamic_anchor_hysteresis_high_exit": 0.95,
+            "dynamic_anchor_hysteresis_high_enter": 0.90,
+        })
+
+        for field in (
+            "level_stability_shadow_enabled",
+            "level_stability_cluster_tolerance_pct",
+            "level_stability_support_lower_confirm_samples",
+            "level_stability_support_raise_confirm_minutes",
+            "dynamic_anchor_hysteresis_low_enter",
+            "dynamic_anchor_hysteresis_high_exit",
+        ):
+            self.assertTrue(
+                any(field in error for error in errors),
+                msg=f"missing validation error for {field}: {errors}",
+            )
 
     def test_summarize_sell_backlog_counts_and_ages(self):
         now = datetime(2026, 6, 13, 12, 0, tzinfo=timezone.utc)

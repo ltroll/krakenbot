@@ -587,6 +587,7 @@ def unavailable_backtest_snapshot(source, error=None):
         "strategy_count": 0,
         "top_summary": {},
         "replay": {},
+        "level_stability_shadow": {},
         "actual": {},
         "missed": {},
         "entry_price_performance": {},
@@ -734,7 +735,16 @@ def build_backtest_snapshot(report, *, source, captured_at, fetch_error=None):
             "candidate_counts_by_source",
             "approved_counts_by_source",
             "blocked_reason_counts",
+            "level_stability_shadow",
         )),
+        "level_stability_shadow": (
+            replay_summary.get("level_stability_shadow")
+            if isinstance(
+                replay_summary.get("level_stability_shadow"),
+                dict,
+            )
+            else {}
+        ),
         "actual": _selected_fields(actual, (
             "buy_orders_placed",
             "buy_orders_filled",

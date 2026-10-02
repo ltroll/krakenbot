@@ -442,6 +442,12 @@
             <div id="resistanceLevels" class="level-list"><span class="empty-weather">Waiting for resistance levels.</span></div>
           </section>
         </div>
+        <div class="tag-group">
+          <span>Stable execution structure</span>
+          <div><span id="levelStabilityStatus" class="badge unavailable">Waiting</span></div>
+        </div>
+        <div id="levelStabilityFacts" class="weather-facts"></div>
+        <p id="levelStabilityNote" class="weather-copy">Waiting for the bot’s shadow stabilizer.</p>
       </section>
 
       <section class="panel weather-half">
@@ -594,7 +600,7 @@
       }).join('');
     }
 
-    function renderSentiment(sentiment) {
+    function renderSentiment(sentiment, bot = {}) {
       const signal = sentiment.signal || {}, risk = sentiment.risk || {};
       const assetId = ((state.payload || {}).instance || {}).asset_id || signal.asset_id || 'Asset';
       const regime = sentiment.price_regime || {}, structure = sentiment.market_structure || {};
@@ -691,6 +697,32 @@
         structure.upside_to_resistance_pct,
       );
 
+      const stability = bot.level_stability_shadow || {};
+      const stableSupport = stability.support || {};
+      const stableResistance = stability.resistance || {};
+      const stableAnchor = stability.anchor || {};
+      const stabilityStatus = document.querySelector('#levelStabilityStatus');
+      stabilityStatus.className = `badge ${stability.enabled ? 'watch' : 'unavailable'}`;
+      stabilityStatus.textContent = stability.enabled
+        ? stability.shadow_only ? 'Shadow only' : 'Execution active'
+        : 'Not enabled';
+      document.querySelector('#levelStabilityFacts').innerHTML = factMarkup([
+        ['Raw support', money2(stableSupport.raw_price)],
+        ['Stable support', money2(stableSupport.stable_price)],
+        ['Shadow buy ceiling', money2(stability.effective_shadow_buy_ceiling)],
+        ['Raw resistance', money2(stableResistance.raw_price)],
+        ['Stable resistance', money2(stableResistance.stable_price)],
+        ['Active / stable anchor', `${humanize(stableAnchor.raw_mode)} / ${humanize(stableAnchor.stable_mode)}`],
+        ['Support zone width', ratioText(stability.cluster_tolerance_pct)],
+        ['Support buy buffer', ratioText(stability.support_buy_buffer_pct)],
+      ]);
+      const pendingSupport = stableSupport.pending_price == null
+        ? ''
+        : ` Pending ${humanize(stableSupport.pending_direction)} support ${money2(stableSupport.pending_price)} has ${integerValue(stableSupport.pending_samples)} of ${integerValue(stableSupport.pending_required_samples)} samples and ${durationValue(stableSupport.pending_age_minutes)} of ${durationValue(stableSupport.pending_required_minutes)} confirmation.`;
+      document.querySelector('#levelStabilityNote').textContent = stability.enabled
+        ? `Shadow mode does not alter orders. Lower support is accepted quickly; higher support must persist before the execution level rises.${pendingSupport}`
+        : 'The active strategy has not enabled stable execution-level shadowing.';
+
       document.querySelector('#opportunityFacts').innerHTML = factMarkup([
         ['Cycle phase', humanize(risk.weather_opportunity_phase)],
         ['Short trend', humanize(risk.weather_short_term_direction)],
@@ -730,6 +762,7 @@
       const available = backtest.available === true;
       const replay = backtest.replay || {}, actual = backtest.actual || {};
       const missed = backtest.missed || {}, topSummary = backtest.top_summary || {};
+      const stability = backtest.level_stability_shadow || replay.level_stability_shadow || {};
       const strategies = Array.isArray(backtest.strategies) ? backtest.strategies : [];
       const top = strategies[0] || {};
       document.querySelector('#backtestWindow').textContent = backtest.window_hours == null
@@ -754,6 +787,9 @@
         ['Live buy fills', integerValue(actual.buy_orders_filled ?? topSummary.actual_buy_orders_filled)],
         ['Live sell fills', integerValue(actual.sell_orders_filled ?? topSummary.actual_sell_orders_filled)],
         ['Live net P&L', money2(actual.realized_estimated_net_pnl ?? topSummary.actual_realized_estimated_net_pnl)],
+        ['Raw / stable anchor changes', `${integerValue(stability.raw_anchor_changes)} / ${integerValue(stability.stable_anchor_changes)}`],
+        ['Shadow-approved allowed', integerValue(stability.approved_candidate_allowed)],
+        ['Shadow-approved blocked', integerValue(stability.approved_candidate_blocked)],
       ]);
       const notes = Array.isArray(topSummary.notes) ? topSummary.notes.join(' ') : '';
       document.querySelector('#backtestSummaryNote').textContent = backtest.error
@@ -1126,9 +1162,9 @@
       document.querySelector('#chartAssetLabel').textContent = `200-day ${assetId} close`;
       document.querySelector('#priceChart').setAttribute('aria-label', `Interactive 200-day ${assetId} closing-price chart`);
       document.title = `${assetId} Range Grid Control Plane`;
-      renderMarket(payload.market);
-      renderSentiment(payload.sentiment || {});
       const control = payload.control, bot = payload.bot || {}, stats = bot.stats || {};
+      renderMarket(payload.market);
+      renderSentiment(payload.sentiment || {}, bot);
       document.querySelector('#revision').textContent = `Revision ${control.revision}`;
       const hold = document.querySelector('#holdButton');
       hold.dataset.paused = control.buying_paused ? 'true' : 'false';

@@ -278,6 +278,14 @@ class RangeGridControlPlaneTests(unittest.TestCase):
                     "raw_candidates": 90,
                     "approved_candidates": 8,
                     "blocked_reason_counts": {"price_above_level": 22},
+                    "level_stability_shadow": {
+                        "enabled": True,
+                        "shadow_only": True,
+                        "raw_anchor_changes": 7,
+                        "stable_anchor_changes": 2,
+                        "approved_candidate_allowed": 6,
+                        "approved_candidate_blocked": 2,
+                    },
                 },
             },
             "actual_live": {
@@ -365,6 +373,16 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertEqual(snapshot["window_hours"], 168.0)
         self.assertEqual(snapshot["snapshot_count"], 168)
         self.assertEqual(snapshot["actual"]["buy_orders_filled"], 4)
+        self.assertEqual(
+            snapshot["level_stability_shadow"]["raw_anchor_changes"],
+            7,
+        )
+        self.assertEqual(
+            snapshot["replay"]["level_stability_shadow"][
+                "approved_candidate_blocked"
+            ],
+            2,
+        )
         self.assertEqual(snapshot["missed"]["placement_rate_vs_approved"], 0.625)
         self.assertEqual(snapshot["strategies"][0]["strategy_label"], "winner")
         self.assertEqual(snapshot["strategies"][1]["strategy_label"], "runner_up")
@@ -546,6 +564,10 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertIn('id="weatherCondition"', html)
         self.assertIn('id="supportLevels"', html)
         self.assertIn('id="resistanceLevels"', html)
+        self.assertIn('id="levelStabilityStatus"', html)
+        self.assertIn('id="levelStabilityFacts"', html)
+        self.assertIn("effective_shadow_buy_ceiling", html)
+        self.assertIn("Shadow mode does not alter orders", html)
         self.assertIn("function renderSentiment", html)
         self.assertIn("function renderStructureCard", html)
         self.assertNotIn("['Support / resistance'", html)
