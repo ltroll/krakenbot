@@ -39,7 +39,7 @@
     .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 14px currentColor; }
     .dot.ok { background: var(--green); }
     .dot.error { background: var(--red); }
-    .tabs { display: flex; gap: 7px; margin: 0 0 15px; padding: 5px; width: fit-content; border: 1px solid var(--line); border-radius: 12px; background: rgba(10, 21, 31, .78); }
+    .tabs { display: flex; flex-wrap: wrap; gap: 7px; margin: 0 0 15px; padding: 5px; width: fit-content; border: 1px solid var(--line); border-radius: 12px; background: rgba(10, 21, 31, .78); }
     .tab-button { border: 0; border-radius: 8px; padding: 10px 16px; color: var(--muted); background: transparent; font-weight: 780; cursor: pointer; }
     .tab-button:hover { color: var(--text); }
     .tab-button.active { color: #061412; background: var(--cyan); }
@@ -184,8 +184,33 @@
     .watch-item { padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
     .watch-item strong { display: block; margin-bottom: 4px; font-size: .79rem; }
     .watch-item span { color: var(--muted); font-size: .77rem; line-height: 1.45; }
+    .decision-hero { grid-column: span 4; padding: 21px; }
+    .decision-summary { grid-column: span 8; padding: 18px; }
+    .decision-full { grid-column: 1 / -1; padding: 18px; }
+    .decision-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin: 13px 0; }
+    .decision-control { display: grid; gap: 5px; min-width: 150px; }
+    .decision-control label { color: var(--muted); font-size: .68rem; text-transform: uppercase; letter-spacing: .075em; }
+    .decision-control select { min-height: 39px; padding: 7px 34px 7px 10px; border: 1px solid var(--line); border-radius: 9px; color: var(--text); background: var(--panel-2); }
+    .decision-refresh { min-height: 39px; padding: 8px 14px; border: 0; border-radius: 9px; color: #061412; background: var(--cyan); font-weight: 820; cursor: pointer; }
+    .decision-refresh:disabled { opacity: .5; cursor: wait; }
+    .decision-reasons { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+    .decision-reason { padding: 7px 9px; border: 1px solid rgba(98,168,255,.20); border-radius: 8px; color: var(--muted); background: rgba(98,168,255,.07); font-size: .73rem; }
+    .decision-reason strong { margin-left: 5px; color: var(--text); }
+    .decision-table-wrap { overflow: auto; max-height: 650px; border: 1px solid var(--line); border-radius: 11px; }
+    .decision-table { width: 100%; min-width: 1100px; border-collapse: separate; border-spacing: 0; font-size: .77rem; }
+    .decision-table th, .decision-table td { padding: 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    .decision-table th { position: sticky; top: 0; z-index: 1; color: var(--muted); background: #172734; text-transform: uppercase; letter-spacing: .055em; font-size: .65rem; white-space: nowrap; }
+    .decision-table tr:last-child td { border-bottom: 0; }
+    .decision-table td:nth-child(1), .decision-table td:nth-child(2), .decision-table td:nth-child(4), .decision-table td:nth-child(5) { white-space: nowrap; }
+    .decision-table td:nth-child(3) { min-width: 260px; max-width: 420px; line-height: 1.4; }
+    .decision-table td:nth-child(6) { min-width: 260px; color: var(--muted); line-height: 1.4; }
+    .outcome { display: inline-flex; padding: 5px 7px; border: 1px solid var(--line); border-radius: 999px; font-size: .65rem; font-weight: 820; text-transform: uppercase; letter-spacing: .055em; }
+    .outcome.trade { color: var(--green); border-color: rgba(110,231,162,.34); background: rgba(110,231,162,.10); }
+    .outcome.decision { color: var(--blue); border-color: rgba(98,168,255,.34); background: rgba(98,168,255,.10); }
+    .outcome.no_trade { color: var(--amber); border-color: rgba(255,200,87,.34); background: rgba(255,200,87,.10); }
+    .outcome.error { color: var(--red); border-color: rgba(255,107,107,.36); background: rgba(255,107,107,.10); }
     @media (max-width: 980px) {
-      .hero, .market, .chart-panel, .control-panel, .strategy-panel, .execution-panel, .profit-panel, .weather-hero, .weather-summary, .weather-half, .backtest-hero, .backtest-summary, .backtest-half { grid-column: 1 / -1; }
+      .hero, .market, .chart-panel, .control-panel, .strategy-panel, .execution-panel, .profit-panel, .weather-hero, .weather-summary, .weather-half, .backtest-hero, .backtest-summary, .backtest-half, .decision-hero, .decision-summary { grid-column: 1 / -1; }
       .market-cards { grid-template-columns: repeat(2, 1fr); }
       .weather-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .permission-head { display: none; }
@@ -221,6 +246,7 @@
       <button class="tab-button active" type="button" data-tab="trading" aria-selected="true" aria-controls="tradingView">Trading</button>
       <button class="tab-button" type="button" data-tab="weather" aria-selected="false" aria-controls="weatherView">Weather &amp; Sentiment</button>
       <button class="tab-button" type="button" data-tab="backtest" aria-selected="false" aria-controls="backtestView">Backtest</button>
+      <button class="tab-button" type="button" data-tab="decisions" aria-selected="false" aria-controls="decisionsView">Trade Reasons</button>
     </nav>
 
     <main id="tradingView" class="grid tab-view active" data-view="trading">
@@ -515,10 +541,60 @@
         <div id="backtestWatchlist" class="watch-list"></div>
       </section>
     </main>
+
+    <main id="decisionsView" class="grid tab-view" data-view="decisions">
+      <section class="panel decision-hero">
+        <h2 class="panel-title">Trade reason history</h2>
+        <div id="decisionHistoryTitle" class="backtest-title">—</div>
+        <span id="decisionHistoryStatus" class="badge unavailable">Waiting</span>
+        <div class="weather-meta">
+          <span id="decisionHistorySource">Source —</span>
+          <span id="decisionHistoryGenerated">Loaded —</span>
+        </div>
+      </section>
+
+      <section class="panel decision-summary">
+        <h2 class="panel-title">Loaded event summary</h2>
+        <div id="decisionSummaryFacts" class="weather-facts"></div>
+        <p class="weather-copy">“Considered” means the bot reached a buy or sell decision; “Order activity” confirms an order was placed or filled. “No trade” shows holds, candidate vetoes, or execution deferrals. Rows are sanitized and omit exchange and client order IDs.</p>
+      </section>
+
+      <section class="panel decision-full">
+        <div class="control-head">
+          <h2 class="panel-title">Recent decisions</h2>
+          <span id="decisionVisibleCount" class="subline">—</span>
+        </div>
+        <div class="decision-toolbar">
+          <div class="decision-control">
+            <label for="decisionLimit">Read last</label>
+            <select id="decisionLimit">
+              <option value="25">25 events</option>
+              <option value="50">50 events</option>
+              <option value="100" selected>100 events</option>
+              <option value="250">250 events</option>
+              <option value="500">500 events</option>
+            </select>
+          </div>
+          <div class="decision-control">
+            <label for="decisionOutcomeFilter">Show</label>
+            <select id="decisionOutcomeFilter">
+              <option value="all">All outcomes</option>
+              <option value="trade">Order activity</option>
+              <option value="decision">Considered</option>
+              <option value="no_trade">No trade</option>
+              <option value="error">Errors</option>
+            </select>
+          </div>
+          <button id="decisionRefreshButton" class="decision-refresh" type="button">REFRESH</button>
+        </div>
+        <div id="decisionReasonSummary" class="decision-reasons"></div>
+        <div id="decisionHistoryTable" class="decision-table-wrap" style="margin-top:14px"><div class="empty-weather" style="padding:20px">Open this tab to load trade decisions.</div></div>
+      </section>
+    </main>
   </div>
 
   <script>
-    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '', chartCandles: [], chartHoverIndex: null, chartGeometry: null, activeTab: 'trading', backtestLoadedAt: 0, strategySelectionDirty: false, profitTargetDirty: false, executionControlsDirty: false, calculatorPriceDirty: false };
+    const state = { payload: null, revision: 0, token: sessionStorage.getItem('rangeGridToken') || '', chartCandles: [], chartHoverIndex: null, chartGeometry: null, activeTab: 'trading', backtestLoadedAt: 0, decisionHistory: null, decisionsLoadedAt: 0, strategySelectionDirty: false, profitTargetDirty: false, executionControlsDirty: false, calculatorPriceDirty: false };
     const money = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', maximumFractionDigits: 0}).format(value);
     const money2 = value => value == null ? '—' : new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', minimumFractionDigits: 2, maximumFractionDigits: 2}).format(value);
     const request = async (url, options = {}, retry = true) => {
@@ -890,6 +966,79 @@
         : `<div class="watch-item"><strong>${available ? 'No watchlist issues' : 'Watchlist unavailable'}</strong><span>${escapeHtml(backtest.error || 'The latest report did not include any watchlist items.')}</span></div>`;
     }
 
+    const decisionOutcomeLabel = outcome => ({trade:'Order activity', decision:'Considered', no_trade:'No trade', error:'Error'}[outcome] || humanize(outcome));
+    const decisionReasonText = reason => {
+      const text = String(reason || 'unspecified');
+      return text.includes('_') && !text.includes(' ') ? humanize(text) : text;
+    };
+
+    function decisionContext(event) {
+      const details = [];
+      if (event.buy_source) details.push(`Source: ${humanize(event.buy_source)}`);
+      if (event.grid_slot != null) details.push(`Grid slot: ${event.grid_slot}`);
+      if (Array.isArray(event.strategy_modes) && event.strategy_modes.length) details.push(`Modes: ${event.strategy_modes.map(humanize).join(', ')}`);
+      if (event.operating_mode) details.push(`Mode: ${humanize(event.operating_mode)}`);
+      if (event.execution_signal != null) details.push(`Signal: ${decimal(event.execution_signal, 3)}`);
+      if (event.signal_status) details.push(`Signal status: ${humanize(event.signal_status)}`);
+      if (event.action_recommendation) details.push(`Engine: ${humanize(event.action_recommendation)}`);
+      if (event.notional_usd != null) details.push(`Notional: ${money2(event.notional_usd)}`);
+      if (event.volume != null) details.push(`Volume: ${Number(event.volume).toFixed(8).replace(/0+$/, '').replace(/\.$/, '')}`);
+      if (event.buy_price != null && event.sell_price != null) details.push(`Buy → sell: ${priceValue(event.buy_price)} → ${priceValue(event.sell_price)}`);
+      if (event.realized_net_pnl != null) details.push(`Net P&L: ${money2(event.realized_net_pnl)}`);
+      const primaryPrice = event.level ?? event.price;
+      if (event.market_price != null && primaryPrice != null && Math.abs(Number(event.market_price) - Number(primaryPrice)) > .00000001) details.push(`Market: ${priceValue(event.market_price)}`);
+      return details.length ? details.join(' · ') : 'No additional decision context recorded.';
+    }
+
+    function renderDecisionHistory(history) {
+      state.decisionHistory = history;
+      const available = history.available === true;
+      const events = Array.isArray(history.events) ? history.events : [];
+      const counts = history.counts || {};
+      const outcomeFilter = document.querySelector('#decisionOutcomeFilter').value;
+      const visible = outcomeFilter === 'all' ? events : events.filter(event => event.outcome === outcomeFilter);
+      document.querySelector('#decisionHistoryTitle').textContent = available
+        ? `${integerValue(history.returned_count)} recent event${Number(history.returned_count) === 1 ? '' : 's'}`
+        : 'No trade log';
+      const status = document.querySelector('#decisionHistoryStatus');
+      status.className = `badge ${available ? 'fresh' : 'unavailable'}`;
+      status.textContent = available ? 'Log loaded' : 'Unavailable';
+      document.querySelector('#decisionHistorySource').textContent = history.source ? `Source ${history.source}` : 'Source —';
+      document.querySelector('#decisionHistoryGenerated').textContent = history.generated_at
+        ? `Loaded ${new Date(history.generated_at).toLocaleString()}`
+        : 'Loaded —';
+      document.querySelector('#decisionSummaryFacts').innerHTML = factMarkup([
+        ['Order activity', integerValue(counts.trade || 0)],
+        ['Considered', integerValue(counts.decision || 0)],
+        ['No trade', integerValue(counts.no_trade || 0)],
+        ['Errors', integerValue(counts.error || 0)],
+        ['Log files read', integerValue(history.files_scanned || 0)],
+        ['Log rows scanned', integerValue(history.scanned_lines || 0)],
+        ['Malformed rows skipped', integerValue(history.malformed_lines || 0)],
+      ]);
+      const topReasons = Array.isArray(history.top_reasons) ? history.top_reasons : [];
+      document.querySelector('#decisionReasonSummary').innerHTML = topReasons.length
+        ? topReasons.map(item => `<span class="decision-reason">${escapeHtml(decisionReasonText(item.reason))}<strong>${escapeHtml(integerValue(item.count))}</strong></span>`).join('')
+        : '<span class="empty-weather">No decision reasons were found in the loaded rows.</span>';
+      document.querySelector('#decisionVisibleCount').textContent = `${visible.length} visible of ${events.length} loaded`;
+      const table = document.querySelector('#decisionHistoryTable');
+      if (!available || !events.length) {
+        table.innerHTML = `<div class="empty-weather" style="padding:20px">${escapeHtml(history.error || 'No decision events were found in the selected portion of the trade log.')}</div>`;
+        return;
+      }
+      if (!visible.length) {
+        table.innerHTML = '<div class="empty-weather" style="padding:20px">No loaded events match this outcome filter.</div>';
+        return;
+      }
+      const rows = visible.map(event => {
+        const when = event.ts ? new Date(event.ts).toLocaleString() : '—';
+        const primaryPrice = event.level ?? event.price;
+        const eventLabel = `${humanize(event.event)} · ${humanize(event.side)}`;
+        return `<tr><td>${escapeHtml(when)}</td><td><span class="outcome ${escapeHtml(event.outcome)}">${escapeHtml(decisionOutcomeLabel(event.outcome))}</span></td><td>${escapeHtml(decisionReasonText(event.reason))}</td><td>${escapeHtml(eventLabel)}</td><td>${escapeHtml(priceValue(primaryPrice))}</td><td>${escapeHtml(decisionContext(event))}</td></tr>`;
+      }).join('');
+      table.innerHTML = `<table class="decision-table"><thead><tr><th>When</th><th>Outcome</th><th>Why</th><th>Event</th><th>Price / level</th><th>Context</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }
+
     function renderMarket(market) {
       document.querySelector('#currentPrice').textContent = money2(market.current_price);
       document.querySelector('#marketTimestamp').textContent = market.error
@@ -1200,6 +1349,20 @@
       }
     }
 
+    async function refreshDecisionHistory() {
+      const button = document.querySelector('#decisionRefreshButton');
+      const limit = document.querySelector('#decisionLimit').value;
+      button.disabled = true;
+      try {
+        renderDecisionHistory(await request(`/api/decisions?limit=${encodeURIComponent(limit)}`));
+        state.decisionsLoadedAt = Date.now();
+      } catch (error) {
+        renderDecisionHistory({available:false, error:error.message || String(error), events:[], counts:{}, top_reasons:[]});
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     function activateTab(tabName) {
       state.activeTab = tabName;
       document.querySelectorAll('.tab-button').forEach(button => {
@@ -1210,9 +1373,15 @@
       document.querySelectorAll('.tab-view').forEach(view => view.classList.toggle('active', view.dataset.view === tabName));
       if (tabName === 'trading' && state.payload) requestAnimationFrame(() => drawChart(state.payload.market.history.daily || []));
       if (tabName === 'backtest' && Date.now() - state.backtestLoadedAt > 60000) refreshBacktest();
+      if (tabName === 'decisions' && Date.now() - state.decisionsLoadedAt > 30000) refreshDecisionHistory();
     }
 
     document.querySelectorAll('.tab-button').forEach(button => button.addEventListener('click', () => activateTab(button.dataset.tab)));
+    document.querySelector('#decisionRefreshButton').addEventListener('click', refreshDecisionHistory);
+    document.querySelector('#decisionLimit').addEventListener('change', refreshDecisionHistory);
+    document.querySelector('#decisionOutcomeFilter').addEventListener('change', () => {
+      if (state.decisionHistory) renderDecisionHistory(state.decisionHistory);
+    });
 
     document.querySelector('#holdButton').addEventListener('click', async () => {
       const button = document.querySelector('#holdButton'); button.disabled = true;
@@ -1388,6 +1557,7 @@
     refresh();
     setInterval(refresh, 60000);
     setInterval(() => { if (state.activeTab === 'backtest') refreshBacktest(); }, 300000);
+    setInterval(() => { if (state.activeTab === 'decisions') refreshDecisionHistory(); }, 60000);
   </script>
 </body>
 </html>

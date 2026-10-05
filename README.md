@@ -315,7 +315,10 @@ location, risk/opportunity scores, warnings, and suggested tuning. That tab is
 read-only; it does not apply the engine's suggested multipliers. The Backtest
 tab loads the latest range-grid JSON report and shows its run window, replay
 versus live activity, top-ranked strategy, ranked comparison table, and
-watchlist.
+watchlist. The Trade Reasons tab reads the configured range-grid trade JSONL
+file and turns recent hold decisions, candidate skips, order activity, fills,
+and execution errors into a filterable explanation history. The HTTP response
+omits exchange and client order IDs.
 
 The control plane writes `RANGE_GRID_CONTROL_FILE`; the bot reads that file on
 every cycle. The optional price floor means "do not buy below this price," and
@@ -392,6 +395,7 @@ RANGE_GRID_CONTROL_MARKET_CACHE_SECONDS=60
 RANGE_GRID_CONTROL_SENTIMENT_CACHE_SECONDS=60
 RANGE_GRID_CONTROL_BACKTEST_URL=http://<backtest-host>/bot/range_grid_backtest.json
 RANGE_GRID_CONTROL_BACKTEST_CACHE_SECONDS=300
+RANGE_GRID_TRADE_LOG_FILE=trade_log.jsonl
 LLM_SIGNAL_URL=http://<signal-host>/bot/multi_asset_signal.json
 SIGNAL_ASSET_ID=BTC
 ```

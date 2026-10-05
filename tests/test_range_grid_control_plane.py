@@ -407,6 +407,130 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertTrue(snapshot["stale"])
         self.assertIn("not configured", snapshot["error"])
 
+    def test_decision_history_normalizes_relevant_trade_log_events(self):
+        records = [
+            {
+                "ts": "2026-10-04T12:00:00+00:00",
+                "event": "BOT_START",
+                "strategy_profile": "ignored.json",
+            },
+            {
+                "ts": "2026-10-04T12:01:00+00:00",
+                "event": "BUY_CANDIDATE_SKIPPED",
+                "reason": "price_above_level",
+                "level": 80100,
+                "market_price": 80200,
+                "buy_source": "range_low",
+                "txid": "must-not-leak",
+            },
+            {
+                "ts": "2026-10-04T12:02:00+00:00",
+                "event": "TRADE_DECISION",
+                "side": "buy",
+                "price": 80000,
+                "execution_signal": 0.42,
+                "strategy_modes": ["low", "median"],
+            },
+            {
+                "ts": "2026-10-04T12:03:00+00:00",
+                "event": "BUY_ORDER_PLACED",
+                "price": 80000,
+                "volume": 0.00125,
+                "buy_source": "range_low",
+                "client_order_id": "must-not-leak-either",
+            },
+            {
+                "ts": "2026-10-04T12:04:00+00:00",
+                "event": "LOOP_ERROR",
+                "message": "temporary failure",
+            },
+        ]
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".jsonl",
+        ) as handle:
+            for record in records:
+                handle.write(json.dumps(record) + "\n")
+            handle.write("not-json\n")
+            handle.flush()
+
+            history = control_plane.build_decision_history(
+                handle.name,
+                limit=4,
+            )
+
+        self.assertTrue(history["available"])
+        self.assertEqual(history["returned_count"], 4)
+        self.assertEqual(history["events"][0]["event"], "LOOP_ERROR")
+        self.assertEqual(history["events"][1]["event"], "BUY_ORDER_PLACED")
+        self.assertEqual(history["counts"], {
+            "trade": 1,
+            "decision": 1,
+            "no_trade": 1,
+            "error": 1,
+        })
+        self.assertEqual(history["malformed_lines"], 1)
+        self.assertEqual(
+            history["events"][2]["reason"],
+            "candidate_passed_buy_checks",
+        )
+        serialized = json.dumps(history)
+        self.assertNotIn("must-not-leak", serialized)
+        self.assertNotIn("client_order_id", serialized)
+
+    def test_decision_history_limit_is_validated_and_capped(self):
+        self.assertEqual(control_plane.parse_decision_history_limit(None), 100)
+        self.assertEqual(control_plane.parse_decision_history_limit(["25"]), 25)
+        self.assertEqual(control_plane.parse_decision_history_limit("5000"), 500)
+        with self.assertRaisesRegex(ValueError, "at least 1"):
+            control_plane.parse_decision_history_limit("0")
+        with self.assertRaisesRegex(ValueError, "integer"):
+            control_plane.parse_decision_history_limit("many")
+
+    def test_decision_history_continues_into_rotated_logs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            active_path = os.path.join(directory, "trade_log.jsonl")
+            rotated_path = os.path.join(
+                directory,
+                "trade_log_20261004T120000Z.jsonl",
+            )
+            with open(rotated_path, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "ts": "2026-10-04T11:59:00+00:00",
+                    "event": "TRADE_DECISION",
+                    "side": "hold",
+                    "reason": "price_above_level",
+                }) + "\n")
+            with open(active_path, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "ts": "2026-10-04T12:01:00+00:00",
+                    "event": "BUY_ORDER_PLACED",
+                    "price": 80000,
+                }) + "\n")
+
+            history = control_plane.build_decision_history(
+                active_path,
+                limit=2,
+            )
+
+        self.assertEqual(history["returned_count"], 2)
+        self.assertEqual(history["files_scanned"], 2)
+        self.assertEqual(
+            [event["event"] for event in history["events"]],
+            ["BUY_ORDER_PLACED", "TRADE_DECISION"],
+        )
+
+    def test_decision_history_reports_missing_trade_log(self):
+        history = control_plane.build_decision_history(
+            "/path/that/does/not/exist/trade_log.jsonl",
+            limit=25,
+        )
+
+        self.assertFalse(history["available"])
+        self.assertEqual(history["events"], [])
+        self.assertIn("not available", history["error"])
+
     def test_backtest_snapshot_rejects_report_for_another_asset(self):
         report = {
             "asset_id": "BTC",
@@ -556,8 +680,13 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertIn('data-tab="trading"', html)
         self.assertIn('data-tab="weather"', html)
         self.assertIn('data-tab="backtest"', html)
+        self.assertIn('data-tab="decisions"', html)
         self.assertIn('id="weatherView"', html)
         self.assertIn('id="backtestView"', html)
+        self.assertIn('id="decisionsView"', html)
+        self.assertIn('id="decisionLimit"', html)
+        self.assertIn('id="decisionOutcomeFilter"', html)
+        self.assertIn('id="decisionHistoryTable"', html)
         self.assertIn('id="assetPairLabel"', html)
         self.assertIn('id="chartAssetLabel"', html)
         self.assertNotIn("Engine BTC price", html)
@@ -577,6 +706,8 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertIn("entry_price_performance", html)
         self.assertIn("marked to", html)
         self.assertIn("request('/api/backtest')", html)
+        self.assertIn("/api/decisions?limit=", html)
+        self.assertIn("function renderDecisionHistory", html)
         self.assertIn("request('/api/strategy',", html)
         self.assertIn("Ranked strategies", html)
         self.assertIn("Suggested bot tuning", html)

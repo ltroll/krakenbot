@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -76,6 +76,11 @@ STATUS_FILE = (
 STATE_FILE = (
     os.getenv("RANGE_GRID_STATE_FILE")
     or instance_runtime_default("last_state.json")
+)
+TRADE_LOG_FILE = (
+    os.getenv("RANGE_GRID_TRADE_LOG_FILE")
+    or os.getenv("TRADE_LOG_FILE")
+    or instance_runtime_default("trade_log.jsonl")
 )
 CONTROL_HOST = os.getenv("RANGE_GRID_CONTROL_HOST", "127.0.0.1")
 CONTROL_PORT = int(os.getenv("RANGE_GRID_CONTROL_PORT", "8787"))
@@ -153,6 +158,74 @@ CONTROL_BACKTEST_CACHE_SECONDS = max(
 )
 HTML_FILE = Path(__file__).with_name("range_grid_control_plane.html")
 
+DECISION_HISTORY_DEFAULT_LIMIT = 100
+DECISION_HISTORY_MAX_LIMIT = 500
+DECISION_HISTORY_MAX_SCANNED_LINES = 50_000
+DECISION_HISTORY_EVENTS = {
+    "TRADE_DECISION",
+    "BUY_CANDIDATE_SKIPPED",
+    "LOW_SUPPORT_OPPORTUNITY_SKIPPED",
+    "BUY_ORDER_PLACED",
+    "BUY_ORDER_PARTIALLY_FILLED",
+    "BUY_ORDER_FILLED",
+    "SELL_ORDER_PLACED",
+    "SELL_ORDER_PARTIALLY_FILLED",
+    "SELL_ORDER_FILLED",
+    "PAPER_BUY_ORDER_PLANNED",
+    "RISK_CONTEXT_PAPER_BUY_PLANNED",
+    "ORDER_REJECTED",
+    "ORDER_SUBMISSION_DEFERRED_PENDING_INTENT",
+    "SELL_EXECUTION_DEFERRED",
+    "SELL_RETRY_DEFERRED",
+    "KRAKEN_BACKOFF_ACTIVE",
+    "SELL_BACKOFF_ACTIVE",
+    "PRICE_ERROR",
+    "SENTIMENT_ERROR",
+    "RANGE_REFRESH_ERROR",
+    "KRAKEN_API_ERROR",
+    "KRAKEN_BAD_RESPONSE",
+    "KRAKEN_EXCEPTION",
+    "LOOP_ERROR",
+}
+DECISION_HISTORY_TRADE_EVENTS = {
+    "BUY_ORDER_PLACED",
+    "BUY_ORDER_PARTIALLY_FILLED",
+    "BUY_ORDER_FILLED",
+    "SELL_ORDER_PLACED",
+    "SELL_ORDER_PARTIALLY_FILLED",
+    "SELL_ORDER_FILLED",
+}
+DECISION_HISTORY_ERROR_EVENTS = {
+    "ORDER_REJECTED",
+    "PRICE_ERROR",
+    "SENTIMENT_ERROR",
+    "RANGE_REFRESH_ERROR",
+    "KRAKEN_API_ERROR",
+    "KRAKEN_BAD_RESPONSE",
+    "KRAKEN_EXCEPTION",
+    "LOOP_ERROR",
+}
+DECISION_HISTORY_NO_TRADE_EVENTS = {
+    "BUY_CANDIDATE_SKIPPED",
+    "LOW_SUPPORT_OPPORTUNITY_SKIPPED",
+    "ORDER_SUBMISSION_DEFERRED_PENDING_INTENT",
+    "SELL_EXECUTION_DEFERRED",
+    "SELL_RETRY_DEFERRED",
+    "KRAKEN_BACKOFF_ACTIVE",
+    "SELL_BACKOFF_ACTIVE",
+}
+DECISION_HISTORY_DEFAULT_REASONS = {
+    "BUY_ORDER_PLACED": "buy_order_accepted_by_exchange",
+    "BUY_ORDER_PARTIALLY_FILLED": "buy_order_partially_filled",
+    "BUY_ORDER_FILLED": "buy_order_filled",
+    "SELL_ORDER_PLACED": "profit_target_sell_accepted_by_exchange",
+    "SELL_ORDER_PARTIALLY_FILLED": "sell_order_partially_filled",
+    "SELL_ORDER_FILLED": "profit_target_sell_filled",
+    "PAPER_BUY_ORDER_PLANNED": "paper_buy_planned",
+    "RISK_CONTEXT_PAPER_BUY_PLANNED": "risk_context_paper_buy_planned",
+    "ORDER_REJECTED": "exchange_rejected_order",
+}
+
 
 def utc_now():
     return datetime.now(timezone.utc)
@@ -169,6 +242,243 @@ def read_json_object(path):
         return payload if isinstance(payload, dict) else {}
     except (OSError, ValueError, TypeError):
         return {}
+
+
+def parse_decision_history_limit(value):
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    if value in (None, ""):
+        return DECISION_HISTORY_DEFAULT_LIMIT
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("decision-history limit must be an integer") from exc
+    if parsed < 1:
+        raise ValueError("decision-history limit must be at least 1")
+    return min(parsed, DECISION_HISTORY_MAX_LIMIT)
+
+
+def iter_jsonl_reverse(path, *, chunk_size=64 * 1024):
+    """Yield non-empty physical lines newest first without loading the log."""
+    with open(os.path.expanduser(path), "rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        remainder = b""
+        while position > 0:
+            read_size = min(chunk_size, position)
+            position -= read_size
+            handle.seek(position)
+            remainder = handle.read(read_size) + remainder
+            lines = remainder.split(b"\n")
+            remainder = lines[0]
+            for line in reversed(lines[1:]):
+                if line.strip():
+                    yield line
+        if remainder.strip():
+            yield remainder
+
+
+def decision_history_log_paths(path):
+    """Return the active log followed by newest size-rotated logs."""
+    active = Path(os.path.abspath(os.path.expanduser(path)))
+    suffix = active.suffix or ".jsonl"
+    stem = active.name[:-len(suffix)] if active.name.endswith(suffix) else active.name
+    rotated = []
+    try:
+        rotated = [
+            candidate
+            for candidate in active.parent.glob(f"{stem}_[0-9][0-9][0-9][0-9]*{suffix}")
+            if candidate.is_file() and candidate != active
+        ]
+        rotated.sort(key=lambda candidate: candidate.stat().st_mtime, reverse=True)
+    except OSError:
+        rotated = []
+    return ([active] if active.is_file() else []) + rotated
+
+
+def _decision_scalar(record, *names):
+    for name in names:
+        value = record.get(name)
+        if isinstance(value, (str, int, float, bool)) and value != "":
+            return value
+    return None
+
+
+def _decision_outcome(record):
+    event = str(record.get("event") or "").upper()
+    if event in DECISION_HISTORY_TRADE_EVENTS:
+        return "trade"
+    if event in DECISION_HISTORY_ERROR_EVENTS:
+        return "error"
+    if event in DECISION_HISTORY_NO_TRADE_EVENTS:
+        return "no_trade"
+    if event == "TRADE_DECISION":
+        return (
+            "no_trade"
+            if str(record.get("side") or "").lower() == "hold"
+            else "decision"
+        )
+    return "decision"
+
+
+def _decision_reason(record):
+    event = str(record.get("event") or "").upper()
+    priority_fields = (
+        "reason",
+        "skip_reason",
+        "rejection_reason",
+        "runtime_block_reason",
+        "freshness_block_reason",
+        "external_block_reason",
+        "flow_control_reason",
+        "action_policy_reason",
+    )
+    reason = _decision_scalar(record, *priority_fields)
+    if reason is not None:
+        return str(reason)
+    if event in DECISION_HISTORY_ERROR_EVENTS:
+        message = _decision_scalar(record, "message", "error")
+        if message is not None:
+            return str(message)
+    if event == "TRADE_DECISION":
+        side = str(record.get("side") or "").lower()
+        return (
+            "candidate_passed_buy_checks"
+            if side == "buy"
+            else "filled_buy_ready_for_sell"
+            if side == "sell"
+            else "no_action_selected"
+        )
+    default = DECISION_HISTORY_DEFAULT_REASONS.get(event)
+    if default:
+        return default
+    message = _decision_scalar(record, "message")
+    return str(message) if message is not None else event.lower()
+
+
+def normalize_decision_history_record(record):
+    if not isinstance(record, dict):
+        return None
+    event = str(record.get("event") or "").upper()
+    if event not in DECISION_HISTORY_EVENTS:
+        return None
+
+    side = str(record.get("side") or "").lower()
+    if not side:
+        if event.startswith("BUY_") or "PAPER_BUY" in event:
+            side = "buy"
+        elif event.startswith("SELL_"):
+            side = "sell"
+        else:
+            side = "system"
+
+    strategy_modes = record.get("strategy_modes")
+    if not isinstance(strategy_modes, list):
+        strategy_modes = []
+    return {
+        "ts": _decision_scalar(record, "ts", "timestamp", "cycle_id"),
+        "event": event,
+        "outcome": _decision_outcome(record),
+        "side": side,
+        "reason": _decision_reason(record),
+        "price": _decision_scalar(record, "price", "market_price"),
+        "market_price": _decision_scalar(record, "market_price", "price"),
+        "level": _decision_scalar(record, "level", "price"),
+        "buy_price": _decision_scalar(record, "buy_price"),
+        "sell_price": _decision_scalar(record, "sell_price"),
+        "notional_usd": _decision_scalar(
+            record,
+            "trade_notional_usd",
+            "buy_cost",
+            "sell_cost",
+        ),
+        "volume": _decision_scalar(record, "volume"),
+        "buy_source": _decision_scalar(record, "buy_source"),
+        "grid_slot": _decision_scalar(record, "grid_slot"),
+        "execution_signal": _decision_scalar(record, "execution_signal"),
+        "signal_status": _decision_scalar(record, "signal_status"),
+        "action_recommendation": _decision_scalar(
+            record,
+            "action_recommendation",
+        ),
+        "operating_mode": _decision_scalar(record, "operating_mode"),
+        "strategy_modes": strategy_modes[:8],
+        "realized_net_pnl": _decision_scalar(
+            record,
+            "realized_net_pnl",
+            "realized_estimated_net_pnl",
+        ),
+    }
+
+
+def build_decision_history(path, *, limit=DECISION_HISTORY_DEFAULT_LIMIT):
+    limit = parse_decision_history_limit(limit)
+    expanded_path = os.path.abspath(os.path.expanduser(path))
+    base = {
+        "generated_at": utc_now_iso(),
+        "available": False,
+        "source": os.path.basename(expanded_path),
+        "limit": limit,
+        "returned_count": 0,
+        "scanned_lines": 0,
+        "files_scanned": 0,
+        "malformed_lines": 0,
+        "counts": {
+            "trade": 0,
+            "decision": 0,
+            "no_trade": 0,
+            "error": 0,
+        },
+        "top_reasons": [],
+        "events": [],
+    }
+    log_paths = decision_history_log_paths(expanded_path)
+    if not log_paths:
+        base["error"] = "trade log is not available"
+        return base
+
+    reason_counts = {}
+    try:
+        for log_path in log_paths:
+            base["files_scanned"] += 1
+            for raw_line in iter_jsonl_reverse(log_path):
+                base["scanned_lines"] += 1
+                if base["scanned_lines"] > DECISION_HISTORY_MAX_SCANNED_LINES:
+                    break
+                try:
+                    record = json.loads(raw_line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    base["malformed_lines"] += 1
+                    continue
+                event = normalize_decision_history_record(record)
+                if event is None:
+                    continue
+                base["events"].append(event)
+                outcome = event["outcome"]
+                base["counts"][outcome] += 1
+                reason = event["reason"]
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                if len(base["events"]) >= limit:
+                    break
+            if (
+                len(base["events"]) >= limit
+                or base["scanned_lines"] > DECISION_HISTORY_MAX_SCANNED_LINES
+            ):
+                break
+    except OSError as exc:
+        base["error"] = f"trade log could not be read: {exc}"
+        return base
+
+    base["available"] = True
+    base["returned_count"] = len(base["events"])
+    base["top_reasons"] = [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(
+            reason_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:12]
+    ]
+    return base
 
 
 def _result_payload(payload):
@@ -1001,12 +1311,14 @@ class ControlPlaneServer(ThreadingHTTPServer):
         market_data,
         sentiment_data=None,
         backtest_data=None,
+        trade_log_file=TRADE_LOG_FILE,
     ):
         super().__init__(address, handler)
         self.control_token = token
         self.market_data = market_data
         self.sentiment_data = sentiment_data or SentimentData()
         self.backtest_data = backtest_data or BacktestData()
+        self.trade_log_file = trade_log_file
         self.control_write_lock = threading.Lock()
 
 
@@ -1089,7 +1401,8 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         return payload
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path
         if path in {"/", "/index.html"}:
             self._send_html()
             return
@@ -1111,6 +1424,24 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             if not self._require_auth():
                 return
             self._send_json(200, self.server.backtest_data.snapshot())
+            return
+        if path == "/api/decisions":
+            if not self._require_auth():
+                return
+            try:
+                limit = parse_decision_history_limit(
+                    parse_qs(parsed_url.query).get("limit")
+                )
+            except ValueError as exc:
+                self._send_json(400, {"error": str(exc)})
+                return
+            self._send_json(
+                200,
+                build_decision_history(
+                    self.server.trade_log_file,
+                    limit=limit,
+                ),
+            )
             return
         self._send_json(404, {"error": "not found"})
 
@@ -1235,6 +1566,7 @@ def main():
         "url": f"http://{CONTROL_HOST}:{CONTROL_PORT}/",
         "control_file": os.path.abspath(CONTROL_FILE),
         "status_file": os.path.abspath(STATUS_FILE),
+        "trade_log_file": os.path.abspath(TRADE_LOG_FILE),
         "authentication_required": bool(CONTROL_TOKEN),
     }, indent=2), flush=True)
     try:
