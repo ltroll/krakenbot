@@ -7236,6 +7236,7 @@ def main():
                     level_stability_state,
                     raw_support=raw_support,
                     raw_resistance=raw_resistance,
+                    market_price=price,
                     now=now,
                     config=strategy_config,
                 )
@@ -7251,6 +7252,7 @@ def main():
                 level_stability_state,
                 strategy_config,
                 operator_control_snapshot,
+                current_price=price,
             )
             level_stability_shadow_allowed_grid_levels = []
             level_stability_shadow_blocked_grid_levels = []
@@ -7260,7 +7262,9 @@ def main():
             ):
                 log_and_console(
                     "LEVEL_STABILITY_SHADOW_UPDATE",
-                    message="Stable execution levels updated in shadow mode",
+                    message=(
+                        "Stable execution level lifecycle updated in shadow mode"
+                    ),
                     cycle_id=cycle_id,
                     level_changes=level_stability_changes,
                     anchor_change=level_stability_anchor_change,

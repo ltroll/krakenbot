@@ -783,11 +783,16 @@
         ? stability.shadow_only ? 'Shadow only' : 'Execution active'
         : 'Not enabled';
       document.querySelector('#levelStabilityFacts').innerHTML = factMarkup([
+        ['Support state', humanize(stableSupport.status)],
         ['Raw support', money2(stableSupport.raw_price)],
         ['Stable support', money2(stableSupport.stable_price)],
+        ['Support raw age', durationValue(stableSupport.raw_age_minutes)],
         ['Shadow buy ceiling', money2(stability.effective_shadow_buy_ceiling)],
+        ['Automatic ceiling', stability.automatic_buy_ceiling_active ? 'Active' : 'Fail-open'],
+        ['Resistance state', humanize(stableResistance.status)],
         ['Raw resistance', money2(stableResistance.raw_price)],
         ['Stable resistance', money2(stableResistance.stable_price)],
+        ['Resistance raw age', durationValue(stableResistance.raw_age_minutes)],
         ['Active / stable anchor', `${humanize(stableAnchor.raw_mode)} / ${humanize(stableAnchor.stable_mode)}`],
         ['Support zone width', ratioText(stability.cluster_tolerance_pct)],
         ['Support buy buffer', ratioText(stability.support_buy_buffer_pct)],
@@ -795,8 +800,17 @@
       const pendingSupport = stableSupport.pending_price == null
         ? ''
         : ` Pending ${humanize(stableSupport.pending_direction)} support ${money2(stableSupport.pending_price)} has ${integerValue(stableSupport.pending_samples)} of ${integerValue(stableSupport.pending_required_samples)} samples and ${durationValue(stableSupport.pending_age_minutes)} of ${durationValue(stableSupport.pending_required_minutes)} confirmation.`;
+      const brokenLevelNote = [
+        stableSupport.status === 'broken' ? ' Confirmed support breakdown: the automatic support ceiling is disabled.' : '',
+        stableSupport.status === 'stale' ? ' Support is stale: the automatic support ceiling has failed open.' : '',
+        stableResistance.status === 'broken' ? ' The prior resistance was retired after a confirmed breakout.' : '',
+        stableResistance.status === 'stale' ? ' The prior resistance is stale and is retained only as history.' : '',
+      ].join('');
+      const ceilingNote = stability.automatic_buy_ceiling_reason
+        ? ` Automatic ceiling: ${humanize(stability.automatic_buy_ceiling_reason)}.`
+        : '';
       document.querySelector('#levelStabilityNote').textContent = stability.enabled
-        ? `Shadow mode does not alter orders. Lower support is accepted quickly; higher support must persist before the execution level rises.${pendingSupport}`
+        ? `Shadow mode does not alter orders. Lower support is accepted quickly; higher support must persist before the execution level rises.${pendingSupport}${brokenLevelNote}${ceilingNote}`
         : 'The active strategy has not enabled stable execution-level shadowing.';
 
       document.querySelector('#opportunityFacts').innerHTML = factMarkup([
@@ -863,9 +877,16 @@
         ['Live buy fills', integerValue(actual.buy_orders_filled ?? topSummary.actual_buy_orders_filled)],
         ['Live sell fills', integerValue(actual.sell_orders_filled ?? topSummary.actual_sell_orders_filled)],
         ['Live net P&L', money2(actual.realized_estimated_net_pnl ?? topSummary.actual_realized_estimated_net_pnl)],
+        ['Stability coverage', stability.coverage_hours == null ? '—' : `${durationValue(Number(stability.coverage_hours) * 60)} · ${integerValue(stability.snapshots)} snapshots`],
         ['Raw / stable anchor changes', `${integerValue(stability.raw_anchor_changes)} / ${integerValue(stability.stable_anchor_changes)}`],
         ['Shadow-approved allowed', integerValue(stability.approved_candidate_allowed)],
         ['Shadow-approved blocked', integerValue(stability.approved_candidate_blocked)],
+        ['Support state', humanize((stability.support || {}).status)],
+        ['Resistance state', humanize((stability.resistance || {}).status)],
+        ['Level invalidations', `${integerValue(stability.support_invalidations)} / ${integerValue(stability.resistance_invalidations)}`],
+        ['Raw material changes', `${integerValue((stability.support || {}).raw_material_change_count)} / ${integerValue((stability.resistance || {}).raw_material_change_count)}`],
+        ['Max raw/stable divergence', `${percentValue((stability.support || {}).max_abs_raw_stable_divergence_pct)} / ${percentValue((stability.resistance || {}).max_abs_raw_stable_divergence_pct)}`],
+        ['Ceiling active / fail-open', `${integerValue(stability.automatic_buy_ceiling_active_snapshots)} / ${integerValue(stability.automatic_buy_ceiling_fail_open_snapshots)}`],
       ]);
       const notes = Array.isArray(topSummary.notes) ? topSummary.notes.join(' ') : '';
       document.querySelector('#backtestSummaryNote').textContent = backtest.error

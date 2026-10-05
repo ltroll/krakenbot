@@ -89,6 +89,7 @@ def validate_strategy_config(strategy_config):
         "minimum_order_floor_require_full_size",
         "fear_greed_profit_target_enabled",
         "level_stability_shadow_enabled",
+        "level_stability_fail_open_when_stale",
     )
     for field in boolean_fields:
         if field in strategy_config and not isinstance(
@@ -118,6 +119,7 @@ def validate_strategy_config(strategy_config):
         "level_stability_support_raise_confirm_samples",
         "level_stability_resistance_lower_confirm_samples",
         "level_stability_resistance_raise_confirm_samples",
+        "level_stability_break_confirm_samples",
     )
     for field in positive_numeric_fields:
         value = strategy_config.get(field)
@@ -155,6 +157,8 @@ def validate_strategy_config(strategy_config):
         "level_stability_support_raise_confirm_minutes",
         "level_stability_resistance_lower_confirm_minutes",
         "level_stability_resistance_raise_confirm_minutes",
+        "level_stability_break_confirm_minutes",
+        "level_stability_raw_max_age_minutes",
     )
     for field in non_negative_numeric_fields:
         value = strategy_config.get(field)
@@ -236,6 +240,7 @@ def validate_strategy_config(strategy_config):
         "buy_cooldown_after_sell_fill_weather_max_exit_pressure",
         "level_stability_cluster_tolerance_pct",
         "level_stability_support_buy_buffer_pct",
+        "level_stability_break_tolerance_pct",
         "dynamic_anchor_hysteresis_low_enter",
         "dynamic_anchor_hysteresis_low_exit",
         "dynamic_anchor_hysteresis_high_enter",

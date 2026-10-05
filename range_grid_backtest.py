@@ -6962,6 +6962,8 @@ def replay_from_snapshots(snapshots):
     level_stability_counters = Counter()
     previous_raw_anchor_mode = None
     latest_level_stability_snapshot = {}
+    level_stability_first_at = None
+    level_stability_last_at = None
 
     for snapshot in snapshots:
         summary["snapshots"] += 1
@@ -6987,6 +6989,11 @@ def replay_from_snapshots(snapshots):
             False,
         )
         if level_stability_enabled:
+            stability_moment = snapshot_timestamp(snapshot)
+            if stability_moment is not None:
+                if level_stability_first_at is None:
+                    level_stability_first_at = stability_moment
+                level_stability_last_at = stability_moment
             risk_context = risk_context_payload(signal)
             weather_report = weather_report_payload(risk_context)
             raw_support = weather_nearest_support(weather_report)
@@ -7030,14 +7037,29 @@ def replay_from_snapshots(snapshots):
                 level_stability_state,
                 raw_support=raw_support,
                 raw_resistance=raw_resistance,
-                now=snapshot_timestamp(snapshot),
+                market_price=price,
+                now=stability_moment,
                 config=config,
             )
             level_stability_counters["snapshots"] += 1
             for change in changes:
-                level_stability_counters[
-                    f"{change['side']}_promotions"
-                ] += 1
+                kind = change.get("kind") or "promotion"
+                if kind == "promotion":
+                    level_stability_counters[
+                        f"{change['side']}_promotions"
+                    ] += 1
+                elif kind == "invalidation":
+                    level_stability_counters[
+                        f"{change['side']}_invalidations"
+                    ] += 1
+                elif kind == "stale":
+                    level_stability_counters[
+                        f"{change['side']}_stale_transitions"
+                    ] += 1
+                elif kind == "reactivation":
+                    level_stability_counters[
+                        f"{change['side']}_reactivations"
+                    ] += 1
 
         built = build_candidates(snapshot, price)
         if level_stability_enabled:
@@ -7055,7 +7077,7 @@ def replay_from_snapshots(snapshots):
                         "range_position_24h"
                     )
                 ),
-                now=snapshot_timestamp(snapshot),
+                now=stability_moment,
                 config=config,
             )
             if (
@@ -7075,7 +7097,36 @@ def replay_from_snapshots(snapshots):
                 level_stability_state,
                 config,
                 runtime_status_summary(snapshot).get("operator_control"),
+                current_price=price,
             )
+            support_status = (
+                latest_level_stability_snapshot.get("support", {}).get(
+                    "status"
+                )
+                or "unknown"
+            )
+            resistance_status = (
+                latest_level_stability_snapshot.get("resistance", {}).get(
+                    "status"
+                )
+                or "unknown"
+            )
+            level_stability_counters[
+                f"support_status_{support_status}"
+            ] += 1
+            level_stability_counters[
+                f"resistance_status_{resistance_status}"
+            ] += 1
+            if latest_level_stability_snapshot.get(
+                "automatic_buy_ceiling_active"
+            ):
+                level_stability_counters[
+                    "automatic_buy_ceiling_active_snapshots"
+                ] += 1
+            else:
+                level_stability_counters[
+                    "automatic_buy_ceiling_fail_open_snapshots"
+                ] += 1
         if built["hold_reason"] is not None:
             summary["hold_snapshots"] += 1
             hold_reason_counts[built["hold_reason"]] += 1
@@ -7674,15 +7725,102 @@ def replay_from_snapshots(snapshots):
         )
     )
     if latest_level_stability_snapshot:
+        level_stability_coverage_hours = None
+        if (
+            level_stability_first_at is not None
+            and level_stability_last_at is not None
+        ):
+            level_stability_coverage_hours = round(
+                max(
+                    0.0,
+                    (
+                        level_stability_last_at - level_stability_first_at
+                    ).total_seconds() / 3600.0,
+                ),
+                4,
+            )
         summary["level_stability_shadow"] = {
             **latest_level_stability_snapshot,
             "snapshots": level_stability_counters["snapshots"],
+            "first_snapshot_at": (
+                level_stability_first_at.isoformat()
+                if level_stability_first_at is not None
+                else None
+            ),
+            "last_snapshot_at": (
+                level_stability_last_at.isoformat()
+                if level_stability_last_at is not None
+                else None
+            ),
+            "coverage_hours": level_stability_coverage_hours,
             "support_promotions": level_stability_counters[
                 "support_promotions"
             ],
             "resistance_promotions": level_stability_counters[
                 "resistance_promotions"
             ],
+            "support_invalidations": level_stability_counters[
+                "support_invalidations"
+            ],
+            "resistance_invalidations": level_stability_counters[
+                "resistance_invalidations"
+            ],
+            "support_stale_transitions": level_stability_counters[
+                "support_stale_transitions"
+            ],
+            "resistance_stale_transitions": level_stability_counters[
+                "resistance_stale_transitions"
+            ],
+            "support_reactivations": level_stability_counters[
+                "support_reactivations"
+            ],
+            "resistance_reactivations": level_stability_counters[
+                "resistance_reactivations"
+            ],
+            "support_status_counts": {
+                status: level_stability_counters[
+                    f"support_status_{status}"
+                ]
+                for status in (
+                    "active",
+                    "missing_raw",
+                    "pending_break",
+                    "broken",
+                    "stale",
+                    "unavailable",
+                    "unknown",
+                )
+                if level_stability_counters[
+                    f"support_status_{status}"
+                ]
+            },
+            "resistance_status_counts": {
+                status: level_stability_counters[
+                    f"resistance_status_{status}"
+                ]
+                for status in (
+                    "active",
+                    "missing_raw",
+                    "pending_break",
+                    "broken",
+                    "stale",
+                    "unavailable",
+                    "unknown",
+                )
+                if level_stability_counters[
+                    f"resistance_status_{status}"
+                ]
+            },
+            "automatic_buy_ceiling_active_snapshots": (
+                level_stability_counters[
+                    "automatic_buy_ceiling_active_snapshots"
+                ]
+            ),
+            "automatic_buy_ceiling_fail_open_snapshots": (
+                level_stability_counters[
+                    "automatic_buy_ceiling_fail_open_snapshots"
+                ]
+            ),
             "raw_anchor_changes": level_stability_counters[
                 "raw_anchor_changes"
             ],

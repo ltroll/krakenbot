@@ -361,11 +361,25 @@ anchor switching would be removed. The shadow effective buy ceiling is the
 lower of the confirmed support plus its buffer and the operator's hard ceiling.
 It is diagnostic only: it does not block, cancel, move, or create orders.
 
+Stable levels have an explicit lifecycle. A market move through support or
+resistance must exceed `level_stability_break_tolerance_pct` for the configured
+sample and time confirmation before the old level is marked broken. Missing raw
+levels remain temporarily usable, then become stale after
+`level_stability_raw_max_age_minutes`. Broken support and, by default, stale
+support disable the automatic support-derived ceiling while preserving any
+operator ceiling. This fail-open behavior prevents old market structure from
+becoming an indefinite hidden buy blocker. A newly valid raw level can
+reactivate the stable level or enter the normal confirmation process.
+
 The Weather & Sentiment tab shows raw versus stable levels, the shadow buy
-ceiling, pending confirmation, and raw versus stable anchor mode. Backtest
-replay records candidate and approved-candidate allow/block counts plus raw and
-stable anchor-change counts. Promotion to execution should be a separate,
-reviewed strategy change after enough shadow history exists.
+ceiling, level lifecycle state and raw-data age, pending confirmation, and raw
+versus stable anchor mode. Backtest replay records candidate and
+approved-candidate allow/block counts, raw and stable anchor changes, level
+invalidations, stale transitions, reactivations, raw-level movement and
+divergence, explicit shadow coverage timestamps/hours, and automatic-ceiling
+active versus fail-open snapshots. Promotion
+to execution should be a separate, reviewed strategy change after enough
+shadow history exists.
 
 HOLD blocks new buys and, by default, requests cancellation of pending buy
 orders on the next bot cycle. It never cancels or reprices existing sell orders,

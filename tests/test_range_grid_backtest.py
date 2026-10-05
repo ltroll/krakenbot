@@ -3783,6 +3783,11 @@ class RangeGridBacktestTests(unittest.TestCase):
             "level_stability_support_lower_confirm_samples": 2,
             "level_stability_support_lower_confirm_minutes": 5,
             "level_stability_support_raise_confirm_minutes": 240,
+            "level_stability_break_tolerance_pct": 0.0035,
+            "level_stability_break_confirm_samples": 2,
+            "level_stability_break_confirm_minutes": 5,
+            "level_stability_raw_max_age_minutes": 180,
+            "level_stability_fail_open_when_stale": True,
             "dynamic_anchor_hysteresis_low_enter": 0.45,
             "dynamic_anchor_hysteresis_low_exit": 0.58,
         }
@@ -3812,13 +3817,148 @@ class RangeGridBacktestTests(unittest.TestCase):
         self.assertTrue(stability["enabled"])
         self.assertTrue(stability["shadow_only"])
         self.assertEqual(stability["snapshots"], 3)
+        self.assertEqual(
+            stability["first_snapshot_at"],
+            "2026-06-13T12:00:00+00:00",
+        )
+        self.assertEqual(
+            stability["last_snapshot_at"],
+            "2026-06-13T12:06:00+00:00",
+        )
+        self.assertEqual(stability["coverage_hours"], 0.1)
         self.assertEqual(stability["support"]["stable_price"], 90.05)
         self.assertEqual(stability["raw_anchor_changes"], 1)
         self.assertEqual(stability["stable_anchor_changes"], 0)
         self.assertEqual(stability["anchor"]["stable_mode"], "low")
+        self.assertEqual(stability["support"]["status"], "active")
+        self.assertEqual(stability["resistance"]["status"], "active")
+        self.assertEqual(stability["support_invalidations"], 0)
+        self.assertEqual(stability["resistance_invalidations"], 0)
+        self.assertEqual(
+            stability["automatic_buy_ceiling_active_snapshots"],
+            3,
+        )
+        self.assertEqual(
+            stability["automatic_buy_ceiling_fail_open_snapshots"],
+            0,
+        )
         self.assertGreater(
             stability["candidate_allowed"] + stability["candidate_blocked"],
             0,
+        )
+
+    def test_replay_reports_confirmed_resistance_invalidation(self):
+        weather_template = {
+            "mode": "weather_report",
+            "market_location": {
+                "nearest_support": {
+                    "price": 95.0,
+                    "type": "recent_low",
+                },
+                "resistance_bands": [{
+                    "price": 105.0,
+                    "type": "recent_high",
+                }],
+            },
+        }
+        strategy_overrides = {
+            "level_stability_shadow_enabled": True,
+            "level_stability_break_tolerance_pct": 0.0035,
+            "level_stability_break_confirm_samples": 2,
+            "level_stability_break_confirm_minutes": 5,
+            "level_stability_raw_max_age_minutes": 180,
+            "level_stability_fail_open_when_stale": True,
+        }
+        snapshots = []
+        for captured_at, price in (
+            ("2026-06-13T12:00:00+00:00", 100.0),
+            ("2026-06-13T12:01:00+00:00", 106.0),
+            ("2026-06-13T12:06:00+00:00", 106.2),
+        ):
+            snapshot = make_snapshot(
+                captured_at,
+                price,
+                strategy_modes=["low"],
+                strategy_overrides=strategy_overrides,
+                risk_context={
+                    "weather_report": json.loads(
+                        json.dumps(weather_template)
+                    )
+                },
+            )
+            snapshots.append(snapshot)
+
+        stability = backtest.replay_from_snapshots(snapshots)["summary"][
+            "level_stability_shadow"
+        ]
+
+        self.assertEqual(stability["resistance"]["status"], "broken")
+        self.assertEqual(stability["resistance_invalidations"], 1)
+        self.assertEqual(
+            stability["resistance_status_counts"],
+            {"active": 1, "pending_break": 1, "broken": 1},
+        )
+
+    def test_replay_reports_stale_support_fail_open(self):
+        strategy_overrides = {
+            "level_stability_shadow_enabled": True,
+            "level_stability_raw_max_age_minutes": 180,
+            "level_stability_fail_open_when_stale": True,
+        }
+        initial_weather = {
+            "mode": "weather_report",
+            "market_location": {
+                "nearest_support": {
+                    "price": 95.0,
+                    "type": "recent_low",
+                },
+                "resistance_bands": [{
+                    "price": 105.0,
+                    "type": "recent_high",
+                }],
+            },
+        }
+        missing_weather = {
+            "mode": "weather_report",
+            "market_location": {
+                "nearest_support": {},
+                "resistance_bands": [{
+                    "price": 105.0,
+                    "type": "recent_high",
+                }],
+            },
+        }
+        first = make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            100.0,
+            strategy_modes=["low"],
+            strategy_overrides=strategy_overrides,
+            risk_context={"weather_report": initial_weather},
+        )
+        stale = make_snapshot(
+            "2026-06-13T15:01:00+00:00",
+            100.0,
+            strategy_modes=["low"],
+            strategy_overrides=strategy_overrides,
+            risk_context={"weather_report": missing_weather},
+        )
+        stale["signal"]["payload"]["price_regime"][
+            "price_low_24h"
+        ] = 101.0
+
+        stability = backtest.replay_from_snapshots([first, stale])[
+            "summary"
+        ]["level_stability_shadow"]
+
+        self.assertEqual(stability["support"]["status"], "stale")
+        self.assertEqual(stability["support_stale_transitions"], 1)
+        self.assertEqual(
+            stability["automatic_buy_ceiling_active_snapshots"],
+            1,
+        )
+        self.assertEqual(
+            stability["automatic_buy_ceiling_fail_open_snapshots"],
+            1,
         )
 
     def test_replay_risk_modulated_allows_low_range_during_blocked_calibration(self):
