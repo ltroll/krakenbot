@@ -763,7 +763,12 @@ configured profit margin plus `round_trip_fee_pct`. Open inventory is marked
 to market, including the estimated round-trip fee, and rankings use simulated
 net return and equity drawdown instead of gross gate-level opportunity return.
 The simulator defaults starting cash to `max_inventory_usd`; profiles can set
-`backtest_starting_cash_usd` to model a different cash balance.
+`backtest_starting_cash_usd` to model a different cash balance. A backtest host
+can set `RANGE_GRID_BACKTEST_STARTING_CASH_USD` to override the embedded value
+for every compared strategy in that run. The environment override affects only
+the backtest simulator; it does not change live balances, order sizing, or
+strategy files. Backtest output reports both the effective starting cash and
+whether it came from the environment, strategy profile, or a default.
 
 ## Backtest Results Viewer
 

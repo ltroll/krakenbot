@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import range_grid_backtest as backtest
 
@@ -1181,6 +1182,28 @@ class RangeGridBacktestTests(unittest.TestCase):
                 "net_return_on_entry_notional_pct"
             ],
             2.0,
+        )
+
+    def test_environment_starting_cash_overrides_strategy_profile(self):
+        snapshots = [make_snapshot(
+            "2026-06-13T12:00:00+00:00",
+            100.0,
+            strategy_overrides={
+                "backtest_starting_cash_usd": 600.0,
+                "max_inventory_usd": 2500.0,
+            },
+        )]
+
+        with patch.object(backtest, "BACKTEST_STARTING_CASH_USD", 7000.0):
+            result = backtest.simulate_approved_order_lifecycle(
+                {"approved_events": []},
+                snapshots,
+            )
+
+        self.assertEqual(result["starting_cash_usd"], 7000.0)
+        self.assertEqual(
+            result["starting_cash_source"],
+            "environment_override",
         )
 
     def test_entry_price_performance_ranks_bands_with_open_mark_to_market(self):

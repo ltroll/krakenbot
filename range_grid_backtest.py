@@ -65,6 +65,10 @@ BACKTEST_CAPITAL_ALLOCATION_USD = parse_optional_positive_float(
     os.getenv("RANGE_GRID_CAPITAL_ALLOCATION_USD"),
     "RANGE_GRID_CAPITAL_ALLOCATION_USD",
 )
+BACKTEST_STARTING_CASH_USD = parse_optional_positive_float(
+    os.getenv("RANGE_GRID_BACKTEST_STARTING_CASH_USD"),
+    "RANGE_GRID_BACKTEST_STARTING_CASH_USD",
+)
 
 
 def instance_runtime_default(filename):
@@ -3176,14 +3180,28 @@ def simulate_approved_order_lifecycle(replay, snapshots):
         if inventory_hard_cap_enabled
         else float("inf")
     )
-    starting_cash_usd = safe_float(
+    profile_starting_cash_usd = safe_float(
         first_config.get("backtest_starting_cash_usd")
     )
-    if starting_cash_usd is None or starting_cash_usd <= 0:
+    if BACKTEST_STARTING_CASH_USD is not None:
+        starting_cash_usd = BACKTEST_STARTING_CASH_USD
+        starting_cash_source = "environment_override"
+    elif (
+        profile_starting_cash_usd is not None
+        and profile_starting_cash_usd > 0
+    ):
+        starting_cash_usd = profile_starting_cash_usd
+        starting_cash_source = "strategy_profile"
+    else:
         starting_cash_usd = (
             configured_max_inventory_usd
             if configured_max_inventory_usd != float("inf")
             else 1000.0
+        )
+        starting_cash_source = (
+            "max_inventory_default"
+            if configured_max_inventory_usd != float("inf")
+            else "fallback_default"
         )
     starting_deployed_inventory_usd = max(
         0.0,
@@ -3732,6 +3750,7 @@ def simulate_approved_order_lifecycle(replay, snapshots):
 
     return {
         "starting_cash_usd": round(starting_cash_usd, 8),
+        "starting_cash_source": starting_cash_source,
         "starting_deployed_inventory_usd": round(
             starting_deployed_inventory_usd,
             8,
@@ -4627,6 +4646,9 @@ def build_strategy_comparison_rows(
                 "risk_sized_avg_max_drawdown_pct"
             ),
             "simulation_starting_cash_usd": simulation.get("starting_cash_usd"),
+            "simulation_starting_cash_source": simulation.get(
+                "starting_cash_source"
+            ),
             "simulation_orders_placed": simulation.get("orders_placed"),
             "simulation_near_touch_orders_placed": simulation.get(
                 "near_touch_orders_placed"
@@ -5365,6 +5387,7 @@ def write_strategy_comparison_csv(comparison, output_path):
         "potential_risk_sized_avg_max_runup_pct",
         "potential_risk_sized_avg_max_drawdown_pct",
         "simulation_starting_cash_usd",
+        "simulation_starting_cash_source",
         "simulation_orders_placed",
         "simulation_near_touch_orders_placed",
         "simulation_filled_entries",
@@ -5518,6 +5541,8 @@ def write_ranked_strategy_csv(comparison, output_path):
         "potential_risk_sized_avg_net_end_return_pct",
         "potential_risk_sized_avg_max_runup_pct",
         "potential_risk_sized_avg_max_drawdown_pct",
+        "simulation_starting_cash_usd",
+        "simulation_starting_cash_source",
         "simulation_orders_placed",
         "simulation_near_touch_orders_placed",
         "simulation_filled_entries",

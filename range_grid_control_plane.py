@@ -837,6 +837,8 @@ BACKTEST_STRATEGY_FIELDS = (
     "simulation_filled_entries",
     "simulation_closed_positions",
     "simulation_open_positions",
+    "simulation_starting_cash_usd",
+    "simulation_starting_cash_source",
     "simulation_net_return_pct",
     "simulation_max_equity_drawdown_pct",
 )

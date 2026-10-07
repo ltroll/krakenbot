@@ -903,6 +903,8 @@
         ['Efficiency', decimal(top.candidate_efficiency, 5)],
         ['TP reached', rateValue(top.potential_take_profit_reached_rate)],
         ['Avg end return', percentValue(top.potential_avg_end_return_pct)],
+        ['Starting cash', money2(top.simulation_starting_cash_usd)],
+        ['Cash setting', humanize(top.simulation_starting_cash_source)],
         ['Simulation return', percentValue(top.simulation_net_return_pct)],
         ['Simulation drawdown', percentValue(top.simulation_max_equity_drawdown_pct)],
       ]);

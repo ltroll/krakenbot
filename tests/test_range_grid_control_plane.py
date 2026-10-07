@@ -318,6 +318,10 @@ class RangeGridControlPlaneTests(unittest.TestCase):
                         "strategy_label": "winner",
                         "practical_score": 1.2,
                         "approved_candidates": 5,
+                        "simulation_starting_cash_usd": 7000.0,
+                        "simulation_starting_cash_source": (
+                            "environment_override"
+                        ),
                         "simulation_net_return_pct": 0.8,
                     },
                 ],
@@ -385,6 +389,14 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(snapshot["missed"]["placement_rate_vs_approved"], 0.625)
         self.assertEqual(snapshot["strategies"][0]["strategy_label"], "winner")
+        self.assertEqual(
+            snapshot["strategies"][0]["simulation_starting_cash_usd"],
+            7000.0,
+        )
+        self.assertEqual(
+            snapshot["strategies"][0]["simulation_starting_cash_source"],
+            "environment_override",
+        )
         self.assertEqual(snapshot["strategies"][1]["strategy_label"], "runner_up")
         self.assertEqual(
             snapshot["entry_price_performance"]["strategy_label"],
@@ -710,6 +722,8 @@ class RangeGridControlPlaneTests(unittest.TestCase):
         self.assertIn('id="backtestEntryPriceTable"', html)
         self.assertIn("Best simulated entry ranges", html)
         self.assertIn("entry_price_performance", html)
+        self.assertIn("simulation_starting_cash_usd", html)
+        self.assertIn("simulation_starting_cash_source", html)
         self.assertIn("marked to", html)
         self.assertIn("request('/api/backtest')", html)
         self.assertIn("/api/decisions?limit=", html)
